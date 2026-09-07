@@ -41,73 +41,99 @@
   <div class="card">
     <h2>Daily cap</h2>
     <form method="post" action="/campaign/cap">
-      <div class="toolbar">
-        <input name="daily_cap" type="number" min="1" max="5000" style="width:110px"
+      <div class="field">
+        <label for="cap">New leads per day</label>
+        <input id="cap" name="daily_cap" type="number" min="1" max="5000"
                value="{{ settings.daily_cap }}">
-        <button type="submit" class="ghost">Save</button>
       </div>
-      <p class="dim" style="margin-bottom:0">New leads per day. Callbacks, L3
-         follow-ups and retries go ahead of new leads and do <b>not</b> use it.</p>
+      <button type="submit" class="ghost">Save cap</button>
+      <p class="dim" style="margin-bottom:0">Callbacks, L3 follow-ups and
+         retries go ahead of new leads and do <b>not</b> use this.</p>
     </form>
   </div>
 
   <div class="card">
     <h2>Spacing</h2>
     <form method="post" action="/campaign/spacing">
-      <div class="kv">
-        <div>at a time</div><div><input name="max_concurrent" type="number" min="1" max="10" style="width:80px" value="{{ settings.max_concurrent }}"></div>
-        <div>gap min (s)</div><div><input name="dial_interval_min" type="number" min="15" max="3600" style="width:100px" value="{{ settings.dial_interval_min }}"></div>
-        <div>gap max (s)</div><div><input name="dial_interval_max" type="number" min="15" max="7200" style="width:100px" value="{{ settings.dial_interval_max }}"></div>
+      <div class="field">
+        <label for="mc">Calls at a time</label>
+        <input id="mc" name="max_concurrent" type="number" min="1" max="10"
+               value="{{ settings.max_concurrent }}">
       </div>
-      <p><button type="submit" class="ghost">Save spacing</button></p>
+      <div class="fields-2">
+        <div class="field">
+          <label for="gmin">Gap min (s)</label>
+          <input id="gmin" name="dial_interval_min" type="number" min="15" max="3600"
+                 value="{{ settings.dial_interval_min }}">
+        </div>
+        <div class="field">
+          <label for="gmax">Gap max (s)</label>
+          <input id="gmax" name="dial_interval_max" type="number" min="15" max="7200"
+                 value="{{ settings.dial_interval_max }}">
+        </div>
+      </div>
+      <button type="submit" class="ghost">Save spacing</button>
+      <p class="dim" style="margin-bottom:0">Random within the range each tick
+        &mdash; a fixed cadence is itself a pattern. About
+        <b>{{ per_hour }}</b> calls/hour.</p>
     </form>
-    <p class="dim" style="margin-bottom:0">Random within the range each tick &mdash;
-      a fixed cadence is itself a pattern. About <b>{{ per_hour }}</b> calls/hour.</p>
   </div>
 
   <div class="card">
     <h2>Sender</h2>
     <form method="post" action="/campaign/sender">
-      <div class="kv">
-        <div>from address</div><div><input name="sender_email" value="{{ settings.sender_email }}" style="width:100%"></div>
-        <div>from name</div><div><input name="sender_name" value="{{ settings.sender_name }}" style="width:100%"></div>
-        <div>footer line</div><div><input name="sender_company_line" value="{{ settings.sender_company_line }}" style="width:100%"></div>
+      <div class="field">
+        <label for="se">From address</label>
+        <input id="se" type="email" name="sender_email" value="{{ settings.sender_email }}">
       </div>
-      <p><button type="submit" class="ghost">Save sender</button></p>
-    </form>
-    <p class="dim" style="margin-bottom:0">Used in draft emails. Switch the
-       domain here when it is warm &mdash; no restart.</p>
-  </div>
-
-  <div class="card">
-    <h2>Calling window</h2>
-    <p class="dim">In the <b>called party's</b> local time. Can only ever narrow
-       the legal 08:00&ndash;20:30 window, never widen it.</p>
-    <form method="post" action="/campaign/windows">
-      <table style="box-shadow:none">
-      <tr><th>Day</th><th>On</th><th>From</th><th>To</th></tr>
-      {% for w in windows %}
-      <tr><td>{{ days[w.dow] }}</td>
-        <td><input type="checkbox" name="enabled_{{ w.dow }}" {% if w.enabled %}checked{% endif %}></td>
-        <td><input type="time" name="start_{{ w.dow }}" value="{{ w.start_time.strftime('%H:%M') }}"></td>
-        <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td></tr>
-      {% endfor %}
-      </table>
-      <p><button type="submit" class="ghost">Save window</button></p>
+      <div class="field">
+        <label for="sn">From name</label>
+        <input id="sn" type="text" name="sender_name" value="{{ settings.sender_name }}">
+      </div>
+      <div class="field">
+        <label for="sc">Footer line</label>
+        <input id="sc" type="text" name="sender_company_line"
+               value="{{ settings.sender_company_line }}">
+      </div>
+      <button type="submit" class="ghost">Save sender</button>
+      <p class="dim" style="margin-bottom:0">Used in draft emails. Switch the
+         domain here when it is warm &mdash; no restart.</p>
     </form>
   </div>
 
   <div class="card">
     <h2>Upload</h2>
     <form method="post" action="/upload-form" enctype="multipart/form-data">
-      <input type="file" name="file" accept=".csv,text/csv" required>
-      <p><button type="submit" class="ghost">Upload to pool</button></p>
+      <div class="field">
+        <label for="csv">CSV file</label>
+        <input id="csv" type="file" name="file" accept=".csv,text/csv" required>
+      </div>
+      <button type="submit" class="ghost">Upload to pool</button>
     </form>
     <p class="dim" style="margin-bottom:0">Columns: <code>company, phone</code>
-      and either <code>state</code> (timezone is derived) or an explicit
-      <code>timezone</code>. Optional: city, segment, external_ref.
-      Uploading lands in the <b>pool</b> &mdash; select on the Leads screen to queue.</p>
+      and either <code>state</code> (timezone derived) or an explicit
+      <code>timezone</code>. Uploading lands in the <b>pool</b> &mdash; select
+      on the Leads screen to queue.</p>
   </div>
+</div>
+
+<div class="card">
+  <h2>Calling window</h2>
+  <p class="dim">In the <b>called party's</b> local time. These can only ever
+     narrow the legal 08:00&ndash;20:30 window, never widen it.</p>
+  <form method="post" action="/campaign/windows">
+    <table style="box-shadow:none;max-width:640px">
+    <tr><th style="width:34%">Day</th><th style="width:12%">On</th>
+        <th style="width:27%">From</th><th style="width:27%">To</th></tr>
+    {% for w in windows %}
+    <tr><td>{{ days[w.dow] }}</td>
+      <td><input type="checkbox" name="enabled_{{ w.dow }}" {% if w.enabled %}checked{% endif %}></td>
+      <td><input type="time" name="start_{{ w.dow }}" value="{{ w.start_time.strftime('%H:%M') }}"></td>
+      <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td></tr>
+    {% endfor %}
+    </table>
+    <p><button type="submit" class="ghost">Save window</button></p>
+  </form>
 </div>
 
 <h2 id="prompts" style="margin-top:28px">Prompt versions</h2>

@@ -47,7 +47,9 @@ h2{font-size:12px;margin:0 0 12px;color:var(--fog);
 
 .card{background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);padding:18px 20px;margin-bottom:16px;box-shadow:var(--shadow)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}
+.grid.wide{grid-template-columns:repeat(auto-fit,minmax(460px,1fr))}
+.full{grid-column:1/-1}
 
 table{border-collapse:separate;border-spacing:0;width:100%;background:var(--surface);
   border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;
@@ -89,8 +91,29 @@ button.danger{background:var(--surface);color:var(--bad);border-color:#f3d9d0}
 button.danger:hover{background:#fdf2ee}
 form.inline{display:inline}
 
-.kv{display:grid;grid-template-columns:150px 1fr;gap:8px 14px;font-size:14px}
+.kv{display:grid;grid-template-columns:minmax(110px,auto) 1fr;gap:8px 14px;
+  font-size:14px;min-width:0}
 .kv div:nth-child(odd){color:var(--fog)}
+.kv > div{min-width:0;overflow-wrap:anywhere}
+
+/* label above input - never truncates, whatever the panel width */
+.field{margin-bottom:12px;min-width:0}
+.field label{display:block;font-size:12px;color:var(--fog);margin-bottom:4px;
+  text-transform:uppercase;letter-spacing:.06em}
+.field input,.field select,.field textarea{width:100%}
+.fields-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
+
+/* nothing inside a card may exceed it */
+.card{min-width:0}
+.card input[type=text],.card input[type=search],.card input[type=email],
+.card input[type=file],.card textarea{max-width:100%}
+.card table{table-layout:auto;width:100%}
+/* A wide table scrolls inside its own box rather than pushing the page out.
+   The leads table has 13 columns and grows with the data. */
+.scroll-x{overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+.scroll-x table{min-width:1120px}
+td .quote-cell{display:block;max-width:220px}
+.card input[type=time]{min-width:112px}
 
 .metric{display:flex;gap:34px;flex-wrap:wrap;margin-bottom:4px}
 .metric .m b{display:block;font-family:'Sora',sans-serif;font-size:26px;

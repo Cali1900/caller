@@ -34,6 +34,7 @@
     {% if dialing_on %}<b style="color:var(--good)">on</b>{% else %}<b style="color:var(--bad)">off</b>{% endif %}.</span>
 </div>
 
+<div class="scroll-x">
 <table>
 <tr>
   <th style="width:28px"><input type="checkbox" onclick="for(const b of document.querySelectorAll('input[name=lead_id]'))b.checked=this.checked"></th>
@@ -58,7 +59,7 @@
   <td class="right dim">{{ l.call_count or 0 }}</td>
   <td class="right"><span class="score {{ l.agent_class }}">{{ l.last_agent if l.last_agent is not none else '' }}</span></td>
   <td class="right"><span class="score {{ l.outcome_class }}">{{ l.last_outcome_score if l.last_outcome_score is not none else '' }}</span></td>
-  <td class="dim">{% if l.their_words %}&ldquo;{{ l.their_words|truncate(58) }}&rdquo;{% endif %}</td>
+  <td class="dim"><span class="quote-cell">{% if l.their_words %}&ldquo;{{ l.their_words|truncate(50) }}&rdquo;{% endif %}</span></td>
   <td class="dim">{{ l.last_called_at.strftime('%b %d %H:%M') if l.last_called_at else '' }}</td>
 </tr>
 {% else %}
@@ -66,6 +67,7 @@
   {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV from the campaign screen.{% endif %}</td></tr>
 {% endfor %}
 </table>
+</div>
 </form>
 
 {% if pages > 1 %}

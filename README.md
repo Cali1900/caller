@@ -84,25 +84,29 @@ before each dial, so pausing mid-batch stops leads already claimed.
 `scripts/deploy.sh` is the only way to restart: it **pauses before restarting
 and resumes after**, with a `trap` so it resumes even if the build fails.
 
-## ⚠️ A guard is only tested if the test ISOLATES it
+## ⚠️ STANDING RULE — a guard is only tested if the test ISOLATES it
 
-Three times now a guard has been removed and the suite stayed green, because
-some *other* filter already excluded the same row. A test that passes for the
-wrong reason is worse than no test: it reports coverage that does not exist.
+**A guard is only tested if the test constructs a row that every OTHER filter
+would pass, so only the guard under test can exclude it.**
 
-| phase | guard | what masked it |
+Six times now a guard has been removed and the suite stayed green, because
+something else already excluded the same row. A test that passes for the wrong
+reason is worse than no test: it reports coverage that does not exist.
+
+| # | guard | what masked it |
 |---|---|---|
-| 2 | TCPA legal window (08:00–20:30) | the operator preference window (09:00–17:00) is strictly **narrower**, so the legal window never bound. Only observable once the preference is widened. |
-| 2 | campaign started/not-paused SQL gate | `assert_campaign_running()` already refused at dial time, so `run_once()` returned 0 either way. Only observable at **selection**, where the SQL gate stops the lead being *claimed*. |
-| 5 | `REPLIED_GUARD` (`replied_at IS NULL`) | the test used `record_reply()`, which also sets `status='completed'` — and the status filter already excluded it. Only observable when `replied_at` is set while status stays **dialable**. |
+| 1 | TCPA legal window | the operator preference window (09:00–17:00) is strictly **narrower**, so the legal window never bound. Only observable once the preference is widened. |
+| 2 | campaign started/paused SQL gate | `assert_campaign_running()` already refused at dial time. Only observable at **selection**, where the gate stops the lead being *claimed*. |
+| 3 | `REPLIED_GUARD` | the test used `record_reply()`, which also sets `status='completed'` — already excluded. Only observable with `replied_at` set while status stays **dialable**. |
+| 4 | the switch (pre-dial) | the selection-level check already refused. Only observable on a lead **claimed while on, paused after**. |
+| 5 | the switch (selection) | **the test itself** claimed the leads on a first call, leaving them `status='dialing'`, so the second selection returned nothing either way. Only observable on **unclaimed** leads. |
+| 6 | carry-over cap exemption | the cap counts `first_dialed_at::date = today`, and the test's carry-overs carried **yesterday's** date, so they never counted. Only observable with a carry-over first dialed **today** against a spent cap. |
 
-**The rule:** to test a guard, construct a row that every *other* filter would
-let through, so the guard under test is the only thing that can exclude it.
-Then remove the guard and watch that specific test go red.
+Note #5: the *test* was wrong, not the code. That is the usual shape.
 
 `scripts/break_pass.sh` enforces the second half — it requires the **named
-expected test** to fail, not merely that something did. All three cases above
-were found by that check, not by review.
+expected test** to fail, not merely that something did. Every one of the six
+was found by that check, never by review.
 
 ## Status: PHASE 5 COMPLETE — L2 and L3
 

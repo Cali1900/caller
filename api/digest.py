@@ -56,9 +56,8 @@ def _failures(conn, date):
             """SELECT s.what_happened, count(*) AS n
                  FROM call_scores s JOIN calls c ON c.call_id = s.call_id
                 WHERE c.created_at >= %s::date AND c.created_at < (%s::date + 1)
-                  AND NOT (s.what_happened = ANY(%s))
                 GROUP BY s.what_happened ORDER BY n DESC LIMIT %s""",
-            (date, date, list(SUCCESS_OUTCOMES), TOP_FAILURES))
+            (date, date, TOP_FAILURES))
         return cur.fetchall()
 
 
