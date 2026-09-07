@@ -94,13 +94,43 @@ def test_turning_the_switch_on_starts_dialing(db, queued, no_real_calls):
 
 
 def test_pausing_stops_selection_immediately(db, queued, no_real_calls):
+    """
+    ISOLATES the selection-level switch.
+
+    An earlier version claimed the leads first, which left them
+    status='dialing' - so the second selection returned nothing whether the
+    switch was checked or not, and removing the guard changed nothing. The
+    candidates here are UNCLAIMED, so only the switch can exclude them.
+    """
     ids = _pool_leads(db, 3, prefix='+1555220')
     queued(ids)
+    settings_mod.set_many({'dialing_enabled': 'false'})
+    assert dialer.select_and_claim(_cfg(), limit=10) == []
+
+    settings_mod.set_many({'dialing_enabled': 'true'})
     assert len(dialer.select_and_claim(_cfg(), limit=10)) > 0
 
+
+def test_pausing_blocks_a_lead_that_was_already_claimed(db, queued, no_real_calls):
+    """
+    ISOLATES the pre-dial switch check.
+
+    Selection already refuses when paused, and that masks this path. Here the
+    lead is claimed while dialing is ON and paused afterwards, so only the
+    guard inside dial_one can stop it.
+    """
+    ids = _pool_leads(db, 1, prefix='+1555225')
+    queued(ids)
+    claimed = dialer.select_and_claim(_cfg(), limit=5)
+    assert len(claimed) == 1
+
     settings_mod.set_many({'dialing_enabled': 'false'})
-    assert dialer.select_and_claim(_cfg(), limit=10) == [], \
-        'a paused queue must produce no candidates at all'
+    assert dialer.dial_one(_cfg(), claimed[0]) is None
+    assert no_real_calls == []
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM dial_audit "
+                    "WHERE outcome='refused_paused'")
+        assert cur.fetchone()['n'] == 1
 
 
 def test_a_lead_not_in_the_queue_is_never_a_candidate(db, queued):
@@ -122,21 +152,34 @@ def test_the_cap_counts_new_leads(db, queued, no_real_calls):
 
 
 def test_a_carryover_is_exempt_from_the_cap(db, queued, no_real_calls):
-    """A callback is a promise already made; it must not wait for tomorrow."""
-    settings_mod.set_many({'daily_cap': 1, 'max_concurrent': 1})
+    """
+    ISOLATES the carry-over exemption.
+
+    The cap counts leads first dialed TODAY. An earlier version gave the
+    carry-overs yesterday's date, so they never counted toward today either
+    way and removing the exemption changed nothing. Here the carry-over was
+    first dialed TODAY and today's cap is already spent, so only the
+    exemption can let it through.
+    """
     import datetime
-    ids = _pool_leads(db, 3, prefix='+1555250')
+    settings_mod.set_many({'daily_cap': 1, 'max_concurrent': 1})
+    spent = _pool_leads(db, 1, prefix='+1555251')
+    carry = _pool_leads(db, 1, prefix='+1555252')
+    now = datetime.datetime.now(datetime.UTC)
     with db.cursor() as cur:
-        # two of them are already-started leads due again now
-        cur.execute("""UPDATE leads SET status='callback', first_dialed_at=%s
-                        WHERE lead_id = ANY(%s::uuid[])""",
-                    (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1),
-                     [str(i) for i in ids[:2]]))
+        # already dialed today AND finished: it consumes the cap but must
+        # not itself be a candidate, or it competes with the carry-over
+        cur.execute("UPDATE leads SET first_dialed_at=%s, status='completed' "
+                    "WHERE lead_id=%s", (now, spent[0]))
+        cur.execute("UPDATE leads SET status='callback', first_dialed_at=%s, "
+                    "next_attempt_at=now() WHERE lead_id=%s", (now, carry[0]))
+        cur.execute("SELECT phone_e164 FROM leads WHERE lead_id=%s", (carry[0],))
+        carry_phone = cur.fetchone()['phone_e164']
     db.commit()
-    queued(ids)
-    for _ in range(4):
-        dialer.run_once(_cfg())
-    assert len(no_real_calls) == 3, 'two carry-overs plus one new lead under a cap of 1'
+    queued(spent + carry)
+
+    dialer.run_once(_cfg())
+    assert no_real_calls == [carry_phone]
 
 
 def test_carryovers_are_dialed_before_new_leads(db, queued, no_real_calls):
