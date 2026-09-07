@@ -11,10 +11,30 @@ and the data.
 is not part of CounselorAI and does not share `lf-postgres` — see
 BUILD_BRIEF.md for the three load-bearing reasons.
 
-## Status: PHASE 0 complete — nothing can dial
+## Status: PHASE 1 built — still nothing can dial
 
-The box runs, the schema exists, and the dial guard refuses everything.
-No Retell integration exists yet. That is phase 1.
+Retell client, webhook inbox, drain and dialer are in and tested.
+`DIAL_ALLOWLIST` is **empty**, so no number can be dialed.
+
+Two steps remain to close phase 1 end to end:
+
+1. **Expose the webhook.** Create a DNS A record for a hostname pointing at
+   this box, **Cloudflare proxy OFF (grey)**, then:
+   ```bash
+   ./scripts/expose_webhook.sh caller.legaltoolsgpt.com
+   ```
+   It checks DNS, writes an nginx vhost that exposes **only**
+   `/webhooks/retell` (everything else 404s), gets a cert, proves an unsigned
+   POST gets 401 from the public internet, and sets `webhook_url` on the
+   agent. The agent currently has **no** webhook URL, so Retell has nowhere
+   to deliver events.
+2. **Put a number on the allowlist**, then add a lead:
+   ```bash
+   # DIAL_ALLOWLIST=+1XXXXXXXXXX in .env, then:
+   docker compose up -d
+   ./scripts/add_lead.sh "My Cell" +1XXXXXXXXXX America/Los_Angeles
+   ```
+   The worker dials on a 2-minute tick.
 
 ## Run it
 
@@ -30,9 +50,14 @@ that ordering rather than relying on anyone remembering it.
 ## Test it
 
 ```bash
-python3 -m pytest tests/ -q      # the guard tests
+./scripts/test.sh -q             # the suite, inside the caller-api image
 ./scripts/break_pass.sh          # prove those tests are not decoration
 ```
+
+Tests run **in the container** (host python is PEP 668 managed) against
+`caller_test_db`, never the database the containers use. `api/` is **mounted**
+into the test run — without that, a break-pass edit would land on the host and
+change nothing in the container, reporting a landed edit and a green suite.
 
 `break_pass.sh` removes each guard, **confirms the edit actually landed**, and
 requires the suite to go red before restoring it. A break that did not land is
@@ -77,3 +102,22 @@ on its own hostname. It does not exist yet.
 - **Migrations are forward-only.** One per phase. Never edit an applied one.
 - **`db.get_conn()`**, `RealDictCursor`, so rows are `r['col']` never `r[0]`.
 - **No tech debt.** Three similar lines beats a premature abstraction.
+
+## Retell notes
+
+**The signature is not a plain HMAC of the body.** Retell sends
+`x-retell-signature: v=<unix_ms>,d=<64 hex>` and signs **body + timestamp**,
+with a 5-minute replay window. `hmac(api_key, body)` rejects every genuine
+webhook and reads as a credentials problem. `api/retell.py` imports Retell's
+own verifier rather than transcribing it.
+
+**Read `call_analyzed`, not `call_ended`.** The `call_ended` payload has no
+`call_analysis` at all.
+
+**Calls that never connect** (`dial_failed`, `dial_no_answer`, `dial_busy`)
+skip `call_started` but still fire the other two.
+
+**Custom analysis fields are absent when no conversation happened.**
+`drain._field()` is the only reader; it returns `None` for absent, empty, and
+the literal junk a JSON bridge produces, so `dm_email` can never become the
+string `"undefined"`.
