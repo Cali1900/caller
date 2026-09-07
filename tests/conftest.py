@@ -30,6 +30,7 @@ REQUIRED_ENV = {
     'RETELL_API_KEY': 'key_test',
     'RETELL_FROM_NUMBER': '+15550000000',
     'AGENT_L1': 'agent_test',
+    'AGENT_L1_VERSION': '1',
 }
 
 

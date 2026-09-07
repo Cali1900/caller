@@ -64,6 +64,13 @@ def create_phone_call(cfg, to_number: str, lead_id, dynamic_vars=None):
         from_number=cfg.RETELL_FROM_NUMBER,
         to_number=to_number,
         override_agent_id=cfg.AGENT_L1,
+        # PIN THE VERSION. Retell can report more than one agent version as
+        # published at once, which leaves "which prompt did this call run"
+        # ambiguous - and an unpublished version carrying the webhook_url
+        # means a call happens and NO events are ever delivered, which reads
+        # as a broken drain rather than a missing webhook. Naming the version
+        # removes the guess, and calls.prompt_version records what ran.
+        override_agent_version=cfg.AGENT_L1_VERSION,
         # metadata is how the drain finds the lead. Matching on
         # leads.last_call_id alone breaks the moment a lead is re-dialed
         # before its previous webhooks have drained.
@@ -77,6 +84,7 @@ def create_web_call(cfg, lead_id, dynamic_vars=None):
     """Browser call. No telephony, no risk - this is rollout step 1."""
     return _client(cfg).call.create_web_call(
         agent_id=cfg.AGENT_L1,
+        agent_version=cfg.AGENT_L1_VERSION,
         metadata={'lead_id': str(lead_id)},
         retell_llm_dynamic_variables=dynamic_vars or {},
     )

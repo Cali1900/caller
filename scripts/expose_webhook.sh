@@ -81,7 +81,7 @@ else
   echo "FATAL: expected 401 from an unsigned POST, got '$code'." >&2; exit 1
 fi
 echo "    and a non-webhook path:"
-curl -s -o /dev/null -w '      https://%{host}/ -> %{http_code} (404 expected)\n' \
+curl -s -o /dev/null -w "      %{url_effective} -> %{http_code} (404 expected)\n" \
      -m 10 "https://$HOST/" || true
 
 echo "==> 5/6  point the agent at it"

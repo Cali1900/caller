@@ -45,6 +45,7 @@ class Config:
     RETELL_API_KEY: str
     RETELL_FROM_NUMBER: str
     AGENT_L1: str
+    AGENT_L1_VERSION: int
 
 
 def parse_allowlist(raw: str | None) -> frozenset:
@@ -70,4 +71,5 @@ def load_config() -> Config:
         RETELL_API_KEY=_required('RETELL_API_KEY'),
         RETELL_FROM_NUMBER=_required('RETELL_FROM_NUMBER'),
         AGENT_L1=_required('AGENT_L1'),
+        AGENT_L1_VERSION=int(_required('AGENT_L1_VERSION')),
     )
