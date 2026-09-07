@@ -48,6 +48,15 @@ h2{font-size:12px;margin:0 0 12px;color:var(--fog);
 .card{background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);padding:18px 20px;margin-bottom:16px;box-shadow:var(--shadow)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px}
+/* Config layout: a NARROW left column of small panels, and a WIDE right
+   column for the things that actually need room - an email address must not
+   truncate to "sean@", and the window table needs DAY/ON/FROM/TO all visible.
+   Explicit two-column, not auto-fit: auto-fit is what produced five squeezed
+   columns and empty gaps at 1400px. */
+.config-split{display:grid;grid-template-columns:minmax(280px,340px) minmax(0,1fr);
+  gap:16px;align-items:start}
+.config-split > div{min-width:0}
+@media (max-width:1000px){.config-split{grid-template-columns:1fr}}
 .grid.wide{grid-template-columns:repeat(auto-fit,minmax(460px,1fr))}
 .full{grid-column:1/-1}
 
