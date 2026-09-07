@@ -101,12 +101,22 @@ def test_unconnected_call_goes_dialing_to_no_answer(db, lead, reason):
     row = _lead(db, lead['lead_id'])
     assert row['status'] == 'no_answer'
     assert row['attempts'] == 1
-    # first backoff rung is 4h - it must actually move, or the dialer
-    # re-dials an unconnectable number on the very next tick
+    # PHASE 2: backoff is now per REASON, not a flat ladder.
+    #   dial_busy      -> 15 minutes (someone IS there, come back soon)
+    #   dial_no_answer -> 2 hours
+    #   dial_failed    -> 2 hours
+    # Whatever the rung, it must actually move, or the dialer re-dials an
+    # unconnectable number on the very next tick.
+    expected = {'dial_busy': 'busy', 'dial_no_answer': 'no_answer',
+                'dial_failed': 'no_answer'}[reason]
+    floor = "interval '10 minutes'" if expected == 'busy' else "interval '90 minutes'"
     with db.cursor() as cur:
-        cur.execute("""SELECT next_attempt_at > now() + interval '3 hours' AS backed_off
+        cur.execute(f"""SELECT next_attempt_at > now() + {floor} AS backed_off,
+                              last_outcome
                          FROM leads WHERE lead_id = %s""", (lead['lead_id'],))
-        assert cur.fetchone()['backed_off'] is True
+        row = cur.fetchone()
+    assert row['backed_off'] is True
+    assert row['last_outcome'] == expected
 
 
 def test_backoff_ladder_then_max_attempts(db, lead):

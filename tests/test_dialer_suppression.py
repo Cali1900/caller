@@ -21,7 +21,36 @@ from api.config import load_config
 def cfg(db, monkeypatch):
     monkeypatch.setenv('DIAL_MODE', 'allowlist')
     monkeypatch.setenv('DIAL_ALLOWLIST', '+15551234567')
+    # PHASE 2: the window is tested in test_windows.py with its own break
+    # pass. Neutralised here so a suppression test fails for suppression
+    # reasons and not because the suite happens to run at 3am.
+    monkeypatch.setattr('api.windows.LEGAL_WINDOW', '')
+    monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
     return load_config()
+
+
+@pytest.fixture(autouse=True)
+def running_campaign(db, request):
+    """
+    PHASE 2: a lead is only a candidate if it is enrolled in a STARTED
+    campaign. Every test in this file assumes the lead is in play, so the
+    setup happens once here rather than in each test.
+    """
+    if 'lead' not in request.fixturenames:
+        return None
+    from api import campaigns
+    from api.config import load_config
+    cfg = load_config()
+    date = campaigns.campaign_date(cfg)
+    campaigns.ensure(cfg, date, daily_cap=200)
+    campaigns.start(cfg, date)
+    lead = request.getfixturevalue('lead')
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO campaign_leads (campaign_date, lead_id, source)
+                       VALUES (%s,%s,'fresh')
+                       ON CONFLICT DO NOTHING""", (date, lead['lead_id']))
+    db.commit()
+    return date
 
 
 @pytest.fixture
@@ -58,27 +87,27 @@ def _audits(db):
 # 1. joined into the SELECT - never a candidate
 # --------------------------------------------------------------------------
 
-def test_suppressed_number_is_never_a_candidate(db, lead):
+def test_suppressed_number_is_never_a_candidate(db, lead, cfg):
     _suppress(db, lead['phone_e164'])
-    assert dialer.select_and_claim() == []
+    assert dialer.select_and_claim(cfg) == []
 
 
-def test_unsuppressed_number_is_a_candidate(db, lead):
-    claimed = dialer.select_and_claim()
+def test_unsuppressed_number_is_a_candidate(db, lead, cfg):
+    claimed = dialer.select_and_claim(cfg)
     assert [c['phone_e164'] for c in claimed] == [lead['phone_e164']]
 
 
-def test_claiming_marks_the_lead_dialing(db, lead):
-    dialer.select_and_claim()
+def test_claiming_marks_the_lead_dialing(db, lead, cfg):
+    dialer.select_and_claim(cfg)
     with db.cursor() as cur:
         cur.execute('SELECT status FROM leads WHERE lead_id=%s', (lead['lead_id'],))
         assert cur.fetchone()['status'] == 'dialing'
 
 
-def test_a_claimed_lead_is_not_claimed_twice(db, lead):
+def test_a_claimed_lead_is_not_claimed_twice(db, lead, cfg):
     """Second worker, or a re-entrant cron, must not double-dial."""
-    assert len(dialer.select_and_claim()) == 1
-    assert dialer.select_and_claim() == []
+    assert len(dialer.select_and_claim(cfg)) == 1
+    assert dialer.select_and_claim(cfg) == []
 
 
 # --------------------------------------------------------------------------
@@ -90,7 +119,7 @@ def test_suppressed_after_claim_is_refused_before_dialing(db, lead, cfg, no_real
     The race the join alone cannot catch: the batch was selected, THEN the
     number went on the list. Without the re-check this dials a DNC number.
     """
-    claimed = dialer.select_and_claim()
+    claimed = dialer.select_and_claim(cfg)
     assert len(claimed) == 1
 
     _suppress(db, lead['phone_e164'])          # after the claim
@@ -110,19 +139,19 @@ def test_suppressed_after_claim_is_refused_before_dialing(db, lead, cfg, no_real
 # allowlist at dial time, and the happy path
 # --------------------------------------------------------------------------
 
-def test_off_allowlist_is_refused_and_audited(db, lead, monkeypatch, no_real_calls):
+def test_off_allowlist_is_refused_and_audited(db, lead, cfg, monkeypatch, no_real_calls):
     monkeypatch.setenv('DIAL_MODE', 'allowlist')
     monkeypatch.setenv('DIAL_ALLOWLIST', '')      # empty: dials nothing
     empty_cfg = load_config()
 
-    claimed = dialer.select_and_claim()
+    claimed = dialer.select_and_claim(empty_cfg)
     assert dialer.dial_one(empty_cfg, claimed[0]) is None
     assert no_real_calls == []
     assert 'refused_allowlist' in [a['outcome'] for a in _audits(db)]
 
 
 def test_allowlisted_number_dials_and_is_audited(db, lead, cfg, no_real_calls):
-    claimed = dialer.select_and_claim()
+    claimed = dialer.select_and_claim(cfg)
     call_id = dialer.dial_one(cfg, claimed[0])
 
     assert call_id == 'call_fake_1'
@@ -140,7 +169,7 @@ def test_allowlisted_number_dials_and_is_audited(db, lead, cfg, no_real_calls):
 def test_every_refusal_is_audited_never_silent(db, lead, cfg, no_real_calls):
     """A silent refusal is how you spend an hour asking why nothing dialed."""
     _suppress(db, lead['phone_e164'])
-    claimed = dialer.select_and_claim()           # join blocks it
+    claimed = dialer.select_and_claim(cfg)           # join blocks it
     assert claimed == []
     # and the direct path is audited too
     fake_lead = {'lead_id': lead['lead_id'], 'phone_e164': lead['phone_e164'],

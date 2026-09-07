@@ -80,3 +80,64 @@ def assert_not_suppressed(conn, phone_e164: str) -> None:
         row = cur.fetchone()
     if row is not None:
         raise DialRefused(f'{phone_e164} is suppressed ({row["reason"]})')
+
+
+# ---------------------------------------------------------------------------
+# THE DAILY CAP
+#
+# The cap is a TOTAL, not a fresh budget: 200 means 200 dials, never 200 fresh
+# plus however many carry-overs happened to exist.
+#
+# The single exception is deliberate. A carry-over is a promise already made -
+# a receptionist asked to be called back. A fresh lead is a cold call. If
+# carry-overs alone meet or exceed the cap they still dial, and zero fresh are
+# added. The cap bends for the promise and never for the cold list.
+#
+# Enrolment already limits how many fresh leads enter a campaign. This is the
+# second, authoritative check at dial time: enrolment can be re-run, a cap can
+# be lowered mid-day, and neither should be able to overshoot.
+# ---------------------------------------------------------------------------
+
+
+def assert_under_cap(conn, campaign_date, source: str) -> None:
+    """Raises DialRefused when a FRESH lead would exceed the day's cap."""
+    if source != 'fresh':
+        return                      # promised callbacks beat cold calls
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT c.daily_cap,
+                      (SELECT count(*) FROM campaign_leads cl
+                        WHERE cl.campaign_date = c.campaign_date
+                          AND cl.dialed_at IS NOT NULL) AS dialed
+                 FROM campaigns c
+                WHERE c.campaign_date = %s""",
+            (campaign_date,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise DialRefused(f'no campaign for {campaign_date} - refusing')
+    if row['dialed'] >= row['daily_cap']:
+        raise DialRefused(
+            f'daily cap reached ({row["dialed"]}/{row["daily_cap"]}) - refusing fresh'
+        )
+
+
+def assert_campaign_running(conn, campaign_date) -> None:
+    """
+    Re-checked immediately before the dial so PAUSE takes effect on leads that
+    were already claimed. Without this, pressing pause still lets the current
+    batch dial out, which is exactly the moment someone presses it.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            'SELECT started_at, paused FROM campaigns WHERE campaign_date = %s',
+            (campaign_date,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise DialRefused(f'no campaign for {campaign_date} - refusing')
+    if row['started_at'] is None:
+        raise DialRefused(f'campaign {campaign_date} not started - refusing')
+    if row['paused']:
+        raise DialRefused(f'campaign {campaign_date} is paused - refusing')

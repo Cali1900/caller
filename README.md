@@ -11,7 +11,41 @@ and the data.
 is not part of CounselorAI and does not share `lf-postgres` — see
 BUILD_BRIEF.md for the three load-bearing reasons.
 
-## Status: PHASE 1 COMPLETE — verified end to end on a real call
+## Status: PHASE 2 COMPLETE — a real day can be run
+
+Windows, cap, CSV upload, campaigns and suppression-in-the-selection-query are
+in. 111 tests, break pass red on **eight** guards, each on its own named test.
+
+```bash
+./scripts/upload_csv.sh leads.csv      # -> the POOL. NEVER dials.
+./scripts/campaign.sh cap 200
+./scripts/campaign.sh enroll           # carry-overs first, then fresh to cap
+./scripts/campaign.sh start            # nothing dials until this
+./scripts/campaign.sh pause | resume | status | rollover
+./scripts/why_not_dialed.sh <lead_id>  # "nothing dialed" is never a mystery
+```
+
+**The calling window** (`api/windows.py`) is two ANDed SQL fragments evaluated
+in the CALLED PARTY's local time: the TCPA 08:00-20:30 legal window, and the
+operator's per-weekday preference. The preference can only ever NARROW the
+legal one - structurally, not by convention. Note that with the default
+09:00-17:00 preference the legal fragment is redundant; it only binds when the
+preference is widened, which is exactly what its test does.
+
+**The cap is a TOTAL.** 200 with 50 carry-overs means 150 fresh. The one
+asymmetry: if carry-overs alone meet the cap they still all dial and zero
+fresh are added - a promised callback beats a cold call.
+
+**Uploading never dials.** Rows land `pool_status='pool'`; the dialer requires
+`'active'` AND membership in a STARTED campaign. Two independent reasons, so
+forgetting one places no calls.
+
+**`leads.timezone` is enforced as an IANA region/city name** by a trigger
+(migration 003). Postgres accepts `-05:00` in `AT TIME ZONE` without
+complaint, so nothing caught a hand-written offset before - and that failure
+is silent for a few weeks after each DST change.
+
+## Phase 1 — verified end to end on a real call
 
 `dialed -> call_ended -> call_analyzed -> lead row` proven on 2026-09-07 with
 `dm_name`, `dm_email` and **`dm_email_confirmed = TRUE`** captured off a real

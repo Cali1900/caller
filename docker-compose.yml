@@ -64,6 +64,7 @@ services:
       RETELL_FROM_NUMBER: ${RETELL_FROM_NUMBER:?RETELL_FROM_NUMBER not set}
       AGENT_L1: ${AGENT_L1:?AGENT_L1 not set}
       AGENT_L1_VERSION: ${AGENT_L1_VERSION:?AGENT_L1_VERSION not set}
+      OPERATOR_TIMEZONE: ${OPERATOR_TIMEZONE:?OPERATOR_TIMEZONE not set}
     command: >
       uvicorn api.main:app --host 0.0.0.0 --port 4100
     ports:
@@ -97,6 +98,7 @@ services:
       RETELL_FROM_NUMBER: ${RETELL_FROM_NUMBER:?RETELL_FROM_NUMBER not set}
       AGENT_L1: ${AGENT_L1:?AGENT_L1 not set}
       AGENT_L1_VERSION: ${AGENT_L1_VERSION:?AGENT_L1_VERSION not set}
+      OPERATOR_TIMEZONE: ${OPERATOR_TIMEZONE:?OPERATOR_TIMEZONE not set}
     command: python -m api.worker
     healthcheck:
       # The worker touches a heartbeat each loop. Stale heartbeat = unhealthy.

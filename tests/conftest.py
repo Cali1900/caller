@@ -31,6 +31,7 @@ REQUIRED_ENV = {
     'RETELL_FROM_NUMBER': '+15550000000',
     'AGENT_L1': 'agent_test',
     'AGENT_L1_VERSION': '1',
+    'OPERATOR_TIMEZONE': 'America/Los_Angeles',
 }
 
 
@@ -80,14 +81,25 @@ def test_db():
                 _sql.Identifier(TEST_DB)))
     admin.close()
 
+    # Apply EVERY migration, tracked the same way scripts/migrate.sh does.
+    # Checking for one table and bailing meant the test schema silently
+    # stopped matching production the moment a second migration landed.
     conn = psycopg2.connect(**_conn_kwargs(TEST_DB))
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('public.leads') AS t")
-        if cur.fetchone()['t'] is None:
-            with open(os.path.join(ROOT, 'migrations',
-                                   '20260906_001_initial.sql')) as f:
+        cur.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                           filename text PRIMARY KEY,
+                           applied_at timestamptz NOT NULL DEFAULT now())""")
+        mig_dir = os.path.join(ROOT, 'migrations')
+        for name in sorted(os.listdir(mig_dir)):
+            if not name.endswith('.sql'):
+                continue
+            cur.execute('SELECT 1 FROM schema_migrations WHERE filename=%s', (name,))
+            if cur.fetchone():
+                continue
+            with open(os.path.join(mig_dir, name)) as f:
                 cur.execute(f.read())
+            cur.execute('INSERT INTO schema_migrations (filename) VALUES (%s)', (name,))
     conn.close()
     return TEST_DB
 
@@ -132,3 +144,27 @@ def lead(db):
         row = cur.fetchone()
     db.commit()
     return row
+
+
+@pytest.fixture
+def cfg_env(db):
+    """A Config pointed at the TEST database. Depends on `db` so the env is
+    already redirected before load_config() reads it."""
+    from api.config import load_config
+    return load_config()
+
+
+@pytest.fixture
+def cfg_dialable(db, monkeypatch):
+    """
+    Config with the ALLOWLIST out of the way, for tests about the cap, pause
+    and campaign gating.
+
+    Same reasoning as neutralising the window in those tests: the allowlist has
+    its own dedicated tests and its own break pass, and leaving it in here
+    would make a cap test fail for allowlist reasons. Retell is always mocked
+    in tests, so nothing can dial regardless.
+    """
+    monkeypatch.setenv('DIAL_MODE', 'unrestricted')
+    from api.config import load_config
+    return load_config()

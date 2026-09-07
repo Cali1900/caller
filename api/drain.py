@@ -26,9 +26,30 @@ import json
 
 from api import db
 
-# Retry ladder from the build brief: 4h -> 1d -> 3d, capped at 4 attempts.
-BACKOFF_HOURS = {1: 4, 2: 24, 3: 72}
+# PHASE 2: the retry ladder is per REASON, not a flat escalation.
+# "busy" means someone is there right now - come back soon. "no answer" means
+# nobody picked up - a couple of hours. "voicemail" means the number works but
+# the desk is unattended, so tomorrow morning, in THEIR timezone.
+BACKOFF = {
+    'busy':      "now() + interval '15 minutes'",
+    'no_answer': "now() + interval '2 hours'",
+    'no_info':   "now() + interval '2 hours'",
+    'api_error': "now() + interval '4 hours'",
+    # next day 09:00 in the CALLED PARTY's local time, not ours
+    'voicemail': ("(((now() AT TIME ZONE l.timezone)::date + 1)"
+                  " + time '09:00') AT TIME ZONE l.timezone"),
+}
+DEFAULT_BACKOFF = "now() + interval '4 hours'"
 MAX_ATTEMPTS = 4
+
+# disconnection_reason -> retry reason
+REASON_MAP = {
+    'dial_busy': 'busy',
+    'dial_no_answer': 'no_answer',
+    'dial_failed': 'no_answer',
+    'voicemail_reached': 'voicemail',
+    'dial_answered_machine': 'voicemail',
+}
 
 # Reasons that mean the phone never got answered by a human.
 NO_CONNECT_REASONS = {
@@ -182,8 +203,17 @@ def _handle_call_ended(conn, call: dict) -> None:
 # call_analyzed - the one that matters
 # ---------------------------------------------------------------------------
 
-def _retry(conn, lead_id: str, note: str) -> None:
-    """attempts+1, backoff 4h -> 1d -> 3d, then max_attempts."""
+def _retry(conn, lead_id: str, reason: str) -> None:
+    """
+    attempts+1, then back off by REASON. Capped at MAX_ATTEMPTS.
+
+    The interval is interpolated as SQL rather than bound as a parameter
+    because the voicemail rule references l.timezone - the arithmetic has to
+    happen in the row's own timezone, which a bound interval cannot express.
+    Every value comes from the BACKOFF dict above; nothing here is caller
+    supplied.
+    """
+    interval_sql = BACKOFF.get(reason, DEFAULT_BACKOFF)
     with conn.cursor() as cur:
         cur.execute('SELECT attempts FROM leads WHERE lead_id = %s', (lead_id,))
         row = cur.fetchone()
@@ -192,19 +222,18 @@ def _retry(conn, lead_id: str, note: str) -> None:
         if attempts >= MAX_ATTEMPTS:
             cur.execute(
                 """UPDATE leads SET status='max_attempts', attempts=%s,
-                   updated_at=now() WHERE lead_id=%s""",
-                (attempts, lead_id),
-            )
+                       last_outcome=%s, updated_at=now()
+                    WHERE lead_id=%s""",
+                (attempts, reason, lead_id))
             return
-        hours = BACKOFF_HOURS.get(attempts, 72)
+
         cur.execute(
-            """UPDATE leads
-               SET status='no_answer', attempts=%s,
-                   next_attempt_at = now() + (%s * interval '1 hour'),
-                   updated_at=now()
-             WHERE lead_id=%s""",
-            (attempts, hours, lead_id),
-        )
+            f"""UPDATE leads l
+                   SET status='no_answer', attempts=%s, last_outcome=%s,
+                       next_attempt_at = {interval_sql},
+                       updated_at=now()
+                 WHERE l.lead_id=%s""",
+            (attempts, reason, lead_id))
 
 
 def _activity(conn, lead_id, call_id, summary, detail=None):
@@ -232,7 +261,9 @@ def _handle_call_analyzed(conn, call: dict) -> None:
 
     # Trap 2: never connected. No analysis will ever arrive for this call.
     if _no_conversation(call, analysis):
-        _retry(conn, lead_id, 'no conversation')
+        reason = REASON_MAP.get((call.get('disconnection_reason') or '').strip(),
+                                'no_answer')
+        _retry(conn, lead_id, reason)
         _activity(conn, lead_id, call_id, 'no answer',
                   call.get('disconnection_reason'))
         return
@@ -341,7 +372,7 @@ def _handle_call_analyzed(conn, call: dict) -> None:
         _activity(conn, lead_id, call_id, 'name only, no email', name)
         return
 
-    _retry(conn, lead_id, 'reached a human, got nothing')
+    _retry(conn, lead_id, 'no_info')
     _activity(conn, lead_id, call_id, 'no information obtained')
 
 
