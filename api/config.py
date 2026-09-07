@@ -48,6 +48,13 @@ class Config:
     AGENT_L1_VERSION: int
     OPERATOR_TIMEZONE: str
 
+    ANTHROPIC_API_KEY: str
+    SCORER_MODEL: str
+    BREVO_API_KEY: str
+    DIGEST_TO: str
+    DIGEST_FROM: str
+    DIGEST_FROM_NAME: str
+
 
 def parse_allowlist(raw: str | None) -> frozenset:
     """Comma-separated E.164. Empty means empty, which dials nothing."""
@@ -74,4 +81,10 @@ def load_config() -> Config:
         AGENT_L1=_required('AGENT_L1'),
         AGENT_L1_VERSION=int(_required('AGENT_L1_VERSION')),
         OPERATOR_TIMEZONE=_required('OPERATOR_TIMEZONE'),
+        ANTHROPIC_API_KEY=_required('ANTHROPIC_API_KEY'),
+        SCORER_MODEL=_required('SCORER_MODEL'),
+        BREVO_API_KEY=_required('BREVO_API_KEY'),
+        DIGEST_TO=_required('DIGEST_TO'),
+        DIGEST_FROM=_required('DIGEST_FROM'),
+        DIGEST_FROM_NAME=_required('DIGEST_FROM_NAME'),
     )

@@ -11,7 +11,63 @@ and the data.
 is not part of CounselorAI and does not share `lf-postgres` — see
 BUILD_BRIEF.md for the three load-bearing reasons.
 
-## Status: PHASE 2 COMPLETE — a real day can be run
+## Status: PHASE 3 COMPLETE — scoring and the digest
+
+Every call gets one LLM pass (`claude-opus-5`). Two scores, never combined.
+One email at end of day.
+
+```bash
+./scripts/score.sh              # score any unscored calls (worker does this every 60s)
+./scripts/digest.sh             # preview today's digest
+./scripts/digest.sh send        # send it (idempotent per day)
+```
+
+**Two scores, and the pair is the diagnosis.** `agent_score` is what we
+control and should reach 9-10; `outcome_score` is the business metric and
+never will. **High agent + low outcome means the LIST or the ASK is wrong,
+not the script** — the digest says so explicitly when it sees that shape.
+There is no combined column and a test asserts one cannot appear.
+
+**`their_words` is verbatim.** The percentage says *that* calls fail; the
+quote says *what was said*, which is the only thing you can write a better
+opener against.
+
+**Scoring can never break the call flow.** `score_pending()` swallows
+everything and records failures in `score_attempts`; the digest surfaces any
+unscored calls, so a silent scorer outage cannot look like a quiet day.
+
+**The LLM reports. It does not edit the prompt.** Nothing in `api/scorer.py`
+writes to `prompt_versions` or any agent config — asserted by a test.
+
+## Measured cost — gpt-4.1 vs sonnet
+
+Retell returns `call_cost` per call; we store it in `calls.cost_cents` rather
+than estimate. Unit prices are **cents per second** (verified: units billed
+equals call seconds exactly), so x60 gives cents/minute:
+
+| line item | c/min |
+|---|---|
+| `claude_5_sonnet` | **8.00** |
+| `gpt_4_1_high_priority` | **6.75** |
+| `retell_voice_engine` | 5.50 |
+| `elevenlabs_tts_03_2026` (custom voice) | 4.00 |
+| `platform_tts` (retell-Rita) | 1.50 |
+| `us_twilio_telephony` | 1.50 |
+| `gpt_4_1_text_testing` (post-call analysis) | 1.5c flat per call |
+
+**gpt-4.1 is 1.25 c/min cheaper than sonnet — and it was also 4x faster**
+(llm p50 508ms vs 2836ms on an identical prompt). There is no
+speed-vs-cost tradeoff here; gpt-4.1 wins both.
+
+Full stack per minute: sonnet+Rita **16.50**, gpt-4.1+Rita **15.25**,
+gpt-4.1+ElevenLabs **17.75**. At 200 calls/day averaging 1.5 min that is
+roughly **$52.50 / $48.75 / $56.25 per day** plus ~$3/day of post-call
+analysis. **The custom ElevenLabs voice costs more than the model swap
+saves** — +2.50 c/min against -1.25 c/min.
+
+Scoring adds ~1.6c per call (~$3.20/day at 200), about 7% of call cost.
+
+## Phase 2 — a real day can be run
 
 Windows, cap, CSV upload, campaigns and suppression-in-the-selection-query are
 in. 111 tests, break pass red on **eight** guards, each on its own named test.

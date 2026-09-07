@@ -121,6 +121,7 @@ def db(test_db, monkeypatch):
     with conn.cursor() as cur:
         cur.execute("""
             TRUNCATE activity, dial_audit, webhook_events, call_scores,
+                     score_attempts, alerts, digests, prompt_versions,
                      calls, campaign_leads, campaigns, leads, suppression
             RESTART IDENTITY CASCADE
         """)

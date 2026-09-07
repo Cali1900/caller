@@ -197,6 +197,13 @@ def _handle_call_ended(conn, call: dict) -> None:
                 json.dumps(call.get('latency')) if call.get('latency') else None,
             ),
         )
+        # Cost is IN the payload - capture it rather than estimate it later.
+        cost = call.get('call_cost') or {}
+        if cost:
+            cur.execute(
+                """UPDATE calls SET cost_cents = %s, cost_breakdown = %s
+                    WHERE call_id = %s""",
+                (cost.get('combined_cost'), json.dumps(cost), call.get('call_id')))
 
 
 # ---------------------------------------------------------------------------

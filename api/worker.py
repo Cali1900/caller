@@ -23,6 +23,16 @@ DIAL_EVERY = 120
 # how Tuesday gets missed. Rollover is idempotent, so running it on a tick is
 # safe.
 MAINTAIN_EVERY = 300
+# Scoring runs on EVERY call. As a queue drain, not inline in the webhook
+# handler: the webhook drain must stay fast, and a transient LLM outage must
+# not leave calls permanently unscored.
+SCORE_EVERY = 60
+# Alerts are immediate on purpose - a verbal yes decays. The digest is the
+# batched channel; these two are not.
+ALERT_EVERY = 60
+# The digest goes out once, after the operator's day ends.
+DIGEST_EVERY = 600
+DIGEST_AFTER_HOUR = 18
 
 _stop = False
 
@@ -31,6 +41,22 @@ def _handle_stop(signum, _frame):
     global _stop
     _stop = True
     print(f'[worker] signal {signum}, draining', flush=True)
+
+
+def _maybe_digest(cfg):
+    """One email, after the operator's day ends. digests has a PK on the date,
+    so a re-run cannot double-send."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from api import digest
+    local = datetime.now(ZoneInfo(cfg.OPERATOR_TIMEZONE))
+    if local.hour < DIGEST_AFTER_HOUR:
+        return
+    r = digest.send(cfg)
+    if r.get('sent'):
+        print(f'[worker] digest sent for {r["date"]}', flush=True)
+    elif r.get('detail'):
+        print(f'[worker] digest FAILED: {r["detail"]}', flush=True)
 
 
 def _maintain(cfg):
@@ -59,7 +85,7 @@ def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
-    from api import campaigns, dialer, drain
+    from api import alerts, campaigns, dialer, drain, scorer
     from api.config import load_config
 
     # Fail fast and loudly on bad config rather than idling in a loop that
@@ -77,6 +103,9 @@ def main():
     last_drain = 0.0
     last_dial = 0.0
     last_maintain = 0.0
+    last_score = 0.0
+    last_alert = 0.0
+    last_digest = 0.0
 
     while not _stop:
         now = time.time()
@@ -90,6 +119,23 @@ def main():
         if now - last_maintain >= MAINTAIN_EVERY:
             last_maintain = now
             _safe('maintain', _maintain, cfg)
+
+        if now - last_score >= SCORE_EVERY:
+            last_score = now
+            r = _safe('scorer', scorer.score_pending, cfg)
+            if r and (r['scored'] or r['failed']):
+                print(f'[worker] scored {r["scored"]}, failed {r["failed"]}', flush=True)
+
+        if now - last_alert >= ALERT_EVERY:
+            last_alert = now
+            _safe('alerts.scan', alerts.scan, cfg)
+            r = _safe('alerts.send', alerts.send_pending, cfg)
+            if r and r['sent']:
+                print(f'[worker] sent {r["sent"]} alert(s)', flush=True)
+
+        if now - last_digest >= DIGEST_EVERY:
+            last_digest = now
+            _safe('digest', _maybe_digest, cfg)
 
         if now - last_dial >= DIAL_EVERY:
             last_dial = now
