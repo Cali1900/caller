@@ -11,7 +11,38 @@ and the data.
 is not part of CounselorAI and does not share `lf-postgres` — see
 BUILD_BRIEF.md for the three load-bearing reasons.
 
-## Status: PHASE 3 COMPLETE — scoring and the digest
+## Status: PHASE 4 COMPLETE — the CRM
+
+Four server-rendered screens, no build step, no login. **It lands on the
+leads list**, not a numbers page — open it at 11am and see where each firm
+stands.
+
+```bash
+ssh -L 4100:localhost:4100 root@ssh.demand.legaltoolsgpt.com
+# then http://localhost:4100
+```
+
+| route | what it is |
+|---|---|
+| `/` | **the landing page** — searchable leads list, one row per firm, last scores and last quote |
+| `/leads/{id}` | full activity timeline: every call, both scores, deductions, what they said, transcript; editable contact; mark DNC |
+| `/campaign` | today's run — enrol / start / pause / resume / rollover / cap, CSV upload |
+| `/today` | the digest as it currently stands, plus the needs-you queue |
+| `/export.csv` | CSV export, respects the current filter |
+
+**NO LOGIN IS DELIBERATE AND THE BINDING IS THE AUTH.** `caller-api` listens on
+`127.0.0.1` and the nginx vhost proxies exactly one path (`/webhooks/retell`)
+and 404s everything else. Verified from the public internet: `/`, `/leads`,
+`/campaign`, `/today`, `/export.csv` and `/health` all return **404**, while
+`/webhooks/retell` returns 405 to a GET (the route exists, the method does
+not). **If anyone ever publishes port 4100, these pages become an
+unauthenticated lead database with a DNC button on the internet.**
+
+**Templates autoescape.** Company names and call transcripts are text other
+people produced; a receptionist who says `<script>` must not have it execute.
+Two tests assert escaping on both.
+
+## Phase 3 — scoring and the digest
 
 Every call gets one LLM pass (`claude-opus-5`). Two scores, never combined.
 One email at end of day.

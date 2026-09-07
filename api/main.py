@@ -7,13 +7,17 @@ this service exposes; it does a single insert and returns 200.
 
 from fastapi import FastAPI, Request
 
-from api import campaigns, db, upload, webhooks
+from api import db, upload, web, webhooks
 
 app = FastAPI(title='caller', docs_url=None, redoc_url=None)
 
 # The only public route. Everything else in this service is reachable through
 # an SSH tunnel only (phase 4).
 app.include_router(webhooks.router)
+
+# The CRM. Reachable ONLY through an SSH tunnel - caller-api binds 127.0.0.1
+# and the nginx vhost proxies exactly one path. The binding is the auth.
+app.include_router(web.router)
 
 
 @app.get('/health')
@@ -33,8 +37,3 @@ async def upload_csv(request: Request):
     body = (await request.body()).decode('utf-8', errors='replace')
     return upload.upload(body)
 
-
-@app.get('/campaign')
-def campaign_status():
-    from api.config import load_config
-    return campaigns.status(load_config()) or {'campaign': None}

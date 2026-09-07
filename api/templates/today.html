@@ -1,0 +1,25 @@
+{% extends "base.html" %}{% block title %}today &middot; caller{% endblock %}
+{% block body %}
+<h1>Today &mdash; {{ date }}</h1>
+<div class="card">
+  <h2>The digest as it currently stands</h2>
+  <p class="dim">This is the same text that goes out by email after {{ digest_hour }}:00 local.
+     One email, once a day.</p>
+  <pre class="transcript">{{ body }}</pre>
+  <form class="inline" method="post" action="/today/send"><button>send it now</button></form>
+  {% if sent %}<span class="dim">{{ sent }}</span>{% endif %}
+</div>
+
+{% if needs_you %}
+<h2>Needs you &mdash; {{ needs_you|length }}</h2>
+<table>
+<tr><th>firm</th><th>why</th><th>they said</th><th></th></tr>
+{% for n in needs_you %}
+<tr><td><a href="/leads/{{ n.lead_id }}">{{ n.company }}</a></td>
+    <td><span class="pill human_review">{{ n.why }}</span></td>
+    <td class="dim">{% if n.their_words %}"{{ n.their_words|truncate(90) }}"{% endif %}</td>
+    <td><a href="/leads/{{ n.lead_id }}">open</a></td></tr>
+{% endfor %}
+</table>
+{% endif %}
+{% endblock %}

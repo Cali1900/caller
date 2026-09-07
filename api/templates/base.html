@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}caller{% endblock %}</title>
+<style>
+:root{
+  --bg:#11131a; --panel:#171a23; --line:#262b38; --fg:#dfe3ec; --dim:#8b93a7;
+  --accent:#7aa2f7; --good:#7bd88f; --warn:#e0af68; --bad:#f7768e;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+header{position:sticky;top:0;z-index:5;background:var(--panel);
+  border-bottom:1px solid var(--line);padding:8px 14px;
+  display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+header .brand{font-weight:700;letter-spacing:.08em}
+header nav a{margin-right:14px}
+header .stat{color:var(--dim)} header .stat b{color:var(--fg)}
+header .needsyou{color:var(--warn)}
+main{padding:14px;max-width:1400px}
+h1{font-size:15px;margin:0 0 12px;letter-spacing:.04em}
+h2{font-size:13px;margin:20px 0 8px;color:var(--dim);
+  text-transform:uppercase;letter-spacing:.1em}
+table{border-collapse:collapse;width:100%}
+th{text-align:left;color:var(--dim);font-weight:500;padding:6px 8px;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:hover td{background:#1b1f2b}
+.pill{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;
+  border:1px solid var(--line);color:var(--dim);white-space:nowrap}
+.pill.completed,.pill.won{color:var(--good);border-color:#2c4a37}
+.pill.dnc,.pill.max_attempts,.pill.failed{color:var(--bad);border-color:#4a2c34}
+.pill.human_review,.pill.demo_pending{color:var(--warn);border-color:#4a3c22}
+.pill.email_path{color:var(--accent);border-color:#2c3a5a}
+.dim{color:var(--dim)} .right{text-align:right}
+.score{font-weight:700}
+.s-hi{color:var(--good)} .s-mid{color:var(--warn)} .s-lo{color:var(--bad)}
+.quote{color:var(--fg);border-left:2px solid var(--line);padding-left:9px;
+  margin:5px 0;white-space:pre-wrap}
+input,select,textarea,button{font:inherit;background:#0d0f15;color:var(--fg);
+  border:1px solid var(--line);border-radius:4px;padding:5px 8px}
+button{cursor:pointer} button:hover{border-color:var(--accent)}
+button.danger{color:var(--bad)} button.danger:hover{border-color:var(--bad)}
+form.inline{display:inline}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:12px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px}
+.kv div:nth-child(odd){color:var(--dim)}
+.timeline{border-left:2px solid var(--line);margin-left:6px;padding-left:14px}
+.tl-item{margin-bottom:16px;position:relative}
+.tl-item::before{content:"";position:absolute;left:-19px;top:6px;width:7px;height:7px;
+  border-radius:50%;background:var(--line)}
+.tl-item.call::before{background:var(--accent)}
+.tl-item.dnc::before{background:var(--bad)}
+.tl-when{color:var(--dim);font-size:11px}
+.banner{background:#2a2013;border:1px solid #4a3c22;color:var(--warn);
+  padding:8px 12px;border-radius:6px;margin-bottom:12px}
+.tunnel{color:var(--dim);font-size:11px;margin-top:26px;border-top:1px solid var(--line);
+  padding-top:8px}
+pre.transcript{white-space:pre-wrap;background:#0d0f15;border:1px solid var(--line);
+  border-radius:4px;padding:10px;margin:6px 0;max-height:340px;overflow:auto}
+</style></head><body>
+<header>
+  <span class="brand">CALLER</span>
+  <nav>
+    <a href="/">leads</a><a href="/campaign">campaign</a><a href="/today">today</a>
+  </nav>
+  <span class="stat">today <b>{{ hdr.dialed or 0 }}</b> dialed</span>
+  <span class="stat">agent <b>{{ hdr.avg_agent if hdr.avg_agent is not none else '-' }}</b></span>
+  <span class="stat">outcome <b>{{ hdr.avg_outcome if hdr.avg_outcome is not none else '-' }}</b></span>
+  {% if hdr.needs_you %}
+    <a class="needsyou" href="/?needs_you=1"><b>{{ hdr.needs_you }}</b> need you</a>
+  {% else %}
+    <span class="stat">nothing needs you</span>
+  {% endif %}
+</header>
+<main>{% block body %}{% endblock %}
+<div class="tunnel">SSH tunnel only &mdash; <code>ssh -L 4100:localhost:4100 root@ssh.demand.legaltoolsgpt.com</code>.
+Nothing here is on the internet; the webhook is the only public route.</div>
+</main></body></html>

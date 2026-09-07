@@ -1,0 +1,91 @@
+{% extends "base.html" %}{% block title %}{{ lead.company }} &middot; caller{% endblock %}
+{% block body %}
+<h1>{{ lead.company }} <span class="pill {{ lead.status }}">{{ lead.status }}</span>
+    <span class="pill">{{ lead.stage }}</span></h1>
+<p><a href="/">&larr; all leads</a></p>
+
+{% if saved %}<div class="banner">{{ saved }}</div>{% endif %}
+
+<div class="grid">
+  <div class="card">
+    <h2>Contact</h2>
+    <form method="post" action="/leads/{{ lead.lead_id }}/edit">
+      <div class="kv">
+        <div>phone</div><div class="dim">{{ lead.phone_e164 }}</div>
+        <div>timezone</div><div class="dim">{{ lead.timezone }} &mdash; local {{ local_time }}</div>
+        <div>name</div><div><input name="dm_name" value="{{ lead.dm_name or '' }}" size="24"></div>
+        <div>title</div><div><input name="dm_title" value="{{ lead.dm_title or '' }}" size="24"></div>
+        <div>email</div><div><input name="dm_email" value="{{ lead.dm_email or '' }}" size="30"></div>
+        <div>confirmed</div><div>
+          <select name="dm_email_confirmed">
+            <option value="">unknown</option>
+            <option value="true"  {% if lead.dm_email_confirmed is true %}selected{% endif %}>yes</option>
+            <option value="false" {% if lead.dm_email_confirmed is false %}selected{% endif %}>no</option>
+          </select></div>
+        <div>notes</div><div><textarea name="notes" rows="3" cols="30">{{ lead.notes or '' }}</textarea></div>
+      </div>
+      <p><button type="submit">save</button>
+         <span class="dim">edits are written to the timeline</span></p>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Position</h2>
+    <div class="kv">
+      <div>attempts</div><div>{{ lead.attempts }}</div>
+      <div>callbacks</div><div>{{ lead.callback_count }}{% if lead.callback_person %} &mdash; for {{ lead.callback_person }}{% endif %}</div>
+      <div>next attempt</div><div class="dim">{{ lead.next_attempt_at.strftime('%Y-%m-%d %H:%M') if lead.next_attempt_at }}</div>
+      <div>last outcome</div><div class="dim">{{ lead.last_outcome or '-' }}</div>
+      <div>rollover days</div><div>{{ lead.rollover_days }}{% if lead.rollover_days >= 5 %} <span class="pill human_review">stuck</span>{% endif %}</div>
+      <div>pool</div><div class="dim">{{ lead.pool_status }}</div>
+    </div>
+    <h2>Stop calling</h2>
+    {% if suppressed %}
+      <p class="dim">On the suppression list ({{ suppressed.reason }}) since {{ suppressed.created_at.strftime('%Y-%m-%d') }}.
+         It can never be a dial candidate.</p>
+    {% else %}
+      <form method="post" action="/leads/{{ lead.lead_id }}/dnc"
+            onsubmit="return confirm('Add {{ lead.phone_e164 }} to the suppression list? This cannot be undone from here.')">
+        <button class="danger" type="submit">mark DNC</button>
+        <span class="dim">writes suppression + status=dnc in one transaction</span>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Activity &mdash; {{ timeline|length }} events</h2>
+<div class="timeline">
+{% for t in timeline %}
+  <div class="tl-item {{ t.kind }}">
+    <div class="tl-when">{{ t.at.strftime('%Y-%m-%d %H:%M') }} &middot; {{ t.kind }}{% if t.stage %} &middot; {{ t.stage }}{% endif %}</div>
+    <div>{{ t.summary }}</div>
+    {% if t.kind == 'call' %}
+      {% if t.agent_score is not none %}
+        <div>
+          <span class="dim">agent</span> <span class="score {{ t.agent_class }}">{{ t.agent_score }}/10</span>
+          &nbsp;<span class="dim">outcome</span> <span class="score {{ t.outcome_class }}">{{ t.outcome_score }}/10</span>
+          &nbsp;<span class="pill">{{ t.what_happened }}</span>
+          {% if t.needs_human %}<span class="pill human_review">needs you</span>{% endif %}
+        </div>
+        {% if t.agent_deductions %}<div class="dim">deductions: {{ t.agent_deductions|join(', ') }}</div>{% endif %}
+        {% if t.where_it_broke %}<div class="dim">{{ t.where_it_broke }}</div>{% endif %}
+        {% if t.their_words %}<div class="quote">"{{ t.their_words }}"</div>{% endif %}
+      {% else %}
+        <div class="dim">not scored yet{% if t.score_error %} &mdash; {{ t.score_error }}{% endif %}</div>
+      {% endif %}
+      <div class="dim">{{ t.duration }}s &middot; {{ t.disconnection_reason or '-' }}
+        {% if t.cost_cents %}&middot; {{ '%.1f'|format(t.cost_cents) }}c{% endif %}
+        {% if t.latency_p50 %}&middot; e2e p50 {{ t.latency_p50 }}ms{% endif %}
+        &middot; <span title="{{ t.call_id }}">{{ t.call_id[:18] }}</span></div>
+      {% if t.transcript %}
+        <details><summary class="dim">transcript</summary><pre class="transcript">{{ t.transcript }}</pre></details>
+      {% endif %}
+    {% elif t.detail %}
+      <div class="dim">{{ t.detail }}</div>
+    {% endif %}
+  </div>
+{% else %}
+  <p class="dim">Nothing has happened to this lead yet.</p>
+{% endfor %}
+</div>
+{% endblock %}

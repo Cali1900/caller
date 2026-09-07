@@ -1,0 +1,56 @@
+{% extends "base.html" %}{% block title %}leads &middot; caller{% endblock %}
+{% block body %}
+<h1>Leads {% if total is not none %}<span class="dim">&mdash; {{ total }} matching</span>{% endif %}</h1>
+
+<form class="card" method="get" action="/">
+  <input type="search" name="q" value="{{ q or '' }}" placeholder="firm, phone, email, contact name" size="34" autofocus>
+  <select name="status">
+    <option value="">any status</option>
+    {% for s in statuses %}<option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <select name="stage">
+    <option value="">any stage</option>
+    {% for s in stages %}<option value="{{ s }}" {% if s == stage %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <label class="dim"><input type="checkbox" name="needs_you" value="1" {% if needs_you %}checked{% endif %}> needs you</label>
+  <button type="submit">search</button>
+  <a class="dim" href="/">reset</a>
+  <a class="right" href="/export.csv?{{ qs }}">export csv</a>
+</form>
+
+{% if needs_you %}<div class="banner">Showing only leads that need a person: unconfirmed emails,
+flagged calls, verbal demo yesses awaiting an invite.</div>{% endif %}
+
+<table>
+<tr><th>firm</th><th>phone</th><th>stage</th><th>status</th><th>contact</th><th>email</th>
+    <th class="right">calls</th><th class="right">agent</th><th class="right">outcome</th>
+    <th>last said</th><th>last call</th></tr>
+{% for l in leads %}
+<tr>
+  <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a>
+      {% if l.rollover_days and l.rollover_days >= 5 %}<span class="pill warn" title="due but undialed {{ l.rollover_days }} days">stuck {{ l.rollover_days }}d</span>{% endif %}</td>
+  <td class="dim">{{ l.phone_e164 }}</td>
+  <td class="dim">{{ l.stage }}</td>
+  <td><span class="pill {{ l.status }}">{{ l.status }}</span></td>
+  <td>{{ l.dm_name or '' }}{% if l.dm_title %} <span class="dim">{{ l.dm_title }}</span>{% endif %}</td>
+  <td>{% if l.dm_email %}{{ l.dm_email }}
+        {% if l.dm_email_confirmed %}<span class="pill completed">confirmed</span>
+        {% else %}<span class="pill human_review">unconfirmed</span>{% endif %}
+      {% endif %}</td>
+  <td class="right dim">{{ l.call_count or 0 }}</td>
+  <td class="right"><span class="score {{ l.agent_class }}">{{ l.last_agent if l.last_agent is not none else '' }}</span></td>
+  <td class="right"><span class="score {{ l.outcome_class }}">{{ l.last_outcome_score if l.last_outcome_score is not none else '' }}</span></td>
+  <td class="dim">{% if l.their_words %}"{{ l.their_words|truncate(64) }}"{% endif %}</td>
+  <td class="dim">{{ l.last_called_at.strftime('%m-%d %H:%M') if l.last_called_at else '' }}</td>
+</tr>
+{% else %}
+<tr><td colspan="11" class="dim">No leads match. {% if q or status or stage or needs_you %}<a href="/">clear the filters</a>{% else %}Upload a CSV to get started.{% endif %}</td></tr>
+{% endfor %}
+</table>
+
+{% if pages > 1 %}
+<p class="dim">page {{ page }} of {{ pages }}
+  {% if page > 1 %}<a href="/?{{ qs }}&page={{ page - 1 }}">prev</a>{% endif %}
+  {% if page < pages %}<a href="/?{{ qs }}&page={{ page + 1 }}">next</a>{% endif %}</p>
+{% endif %}
+{% endblock %}
