@@ -27,7 +27,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from api import (campaigns, db, digest as digest_mod, drafts as drafts_mod,
-                 settings as settings_mod, stages, upload as upload_mod)
+                 prompts as prompts_mod, settings as settings_mod, stages,
+                 upload as upload_mod)
 from api.config import load_config
 
 router = APIRouter()
@@ -315,6 +316,8 @@ def campaign_page(request: Request, msg: str = ''):
                                             cl.source), l.company LIMIT 300""",
                 (campaigns.campaign_date(cfg),))
             enrolled = cur.fetchall()
+    prompt_rows = {'L1': prompts_mod.listing(cfg, 'L1'),
+                   'L3': prompts_mod.listing(cfg, 'L3')}
     st = settings_mod.all_settings(force=True)
     avg = (st['dial_interval_min'] + st['dial_interval_max']) / 2.0
     per_hour = round(3600.0 / avg * st['max_concurrent'], 1) if avg else 0
@@ -322,6 +325,7 @@ def campaign_page(request: Request, msg: str = ''):
         'hdr': hdr, 'c': c, 'pool': pool,
         'enrolled_rows': enrolled, 'msg': msg, 'settings': st,
         'per_hour': per_hour, 'windows': windows, 'days': DAYS,
+        'prompt_rows': prompt_rows,
         'today': campaigns.campaign_date(cfg)})
 
 
@@ -347,6 +351,44 @@ def campaign_spacing(max_concurrent: str = Form(...),
     else:
         msg = 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items())
     return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
+                            status_code=303)
+
+
+@router.post('/campaign/prompt')
+def campaign_prompt(stage: str = Form('L1'), agent_version: str = Form(...)):
+    """
+    Choose which prompt version is LIVE.
+
+    This exists because v8 became live as a SIDE EFFECT - agent.update()
+    applies to whatever draft is sitting in the dashboard. Editing a draft in
+    Retell must not change what dials; only this does.
+    """
+    key = 'agent_l1_version' if stage == 'L1' else 'agent_l3_version'
+    r = settings_mod.set_many({key: agent_version})
+    msg = (f'{stage} now runs v{r["set"][key]} on new calls' if r['ok']
+           else 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items()))
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}#prompts',
+                            status_code=303)
+
+
+@router.post('/campaign/prompt/note')
+def campaign_prompt_note(stage: str = Form('L1'), agent_version: int = Form(...),
+                         note: str = Form('')):
+    cfg = _cfg()
+    agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
+    ok = prompts_mod.set_note(agent_id, agent_version, note.strip())
+    return RedirectResponse(
+        f'/campaign?msg={urllib.parse.quote(("note saved" if ok else "no such version"))}#prompts',
+        status_code=303)
+
+
+@router.post('/campaign/prompt/sync')
+def campaign_prompt_sync():
+    cfg = _cfg()
+    a = prompts_mod.sync_versions(cfg, 'L1')
+    b = prompts_mod.sync_versions(cfg, 'L3')
+    msg = f"synced {a['versions']} L1 and {b['versions']} L3 versions from Retell"
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg)}#prompts',
                             status_code=303)
 
 

@@ -59,13 +59,34 @@ STAGE_AGENTS = {
 }
 
 
+# The live version per stage is an OPERATOR SETTING, not an env value.
+# v8 went live as a side effect of an unrelated dashboard edit; the point of
+# reading it from settings is that editing a draft in Retell can no longer
+# change what actually dials.
+STAGE_VERSION_SETTING = {'L1': 'agent_l1_version', 'L3': 'agent_l3_version'}
+
+
 def agent_for(cfg, stage: str):
-    """(agent_id, version) for a stage. Raises for a stage that must not dial."""
+    """
+    (agent_id, version) for a stage. Raises for a stage that must not dial.
+
+    Version comes from settings, falling back to the env seed if the settings
+    table cannot be read - falling back to a KNOWN version is safer than
+    refusing to dial or guessing at 'latest'.
+    """
     try:
         aid, ver = STAGE_AGENTS[stage]
     except KeyError:
         raise ValueError(f'no dialing agent for stage {stage!r} - refusing')
-    return getattr(cfg, aid), getattr(cfg, ver)
+    version = getattr(cfg, ver)
+    key = STAGE_VERSION_SETTING.get(stage)
+    if key:
+        try:
+            from api import settings as _settings
+            version = _settings.get(key)
+        except Exception:
+            pass
+    return getattr(cfg, aid), version
 
 
 def dynamic_vars(lead) -> dict:
@@ -120,7 +141,9 @@ def create_phone_call(cfg, to_number: str, lead, dynamic=None):
         # metadata is how the drain finds the lead. Matching on
         # leads.last_call_id alone breaks the moment a lead is re-dialed
         # before its previous webhooks have drained.
-        metadata={'lead_id': str(lead_id), 'stage': stage},
+        # agent_version in metadata so the drain can stamp EXACTLY what ran.
+        metadata={'lead_id': str(lead_id), 'stage': stage,
+                  'agent_version': agent_version},
         retell_llm_dynamic_variables=dynamic if dynamic is not None
                                      else dynamic_vars(lead),
     )

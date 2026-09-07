@@ -157,6 +157,10 @@ def _handle_call_ended(conn, call: dict) -> None:
         # Nothing to attach it to. Do not invent a lead.
         return
 
+    # Stamp EXACTLY which agent version ran, from the metadata the dialer set.
+    meta = call.get('metadata') if isinstance(call.get('metadata'), dict) else {}
+    agent_version = meta.get('agent_version')
+
     start_ms, end_ms = call.get('start_timestamp'), call.get('end_timestamp')
     duration = None
     if isinstance(start_ms, int) and isinstance(end_ms, int):
@@ -169,14 +173,14 @@ def _handle_call_ended(conn, call: dict) -> None:
                 call_id, lead_id, stage, agent_id,
                 started_at, ended_at, duration_ms,
                 disconnection_reason, call_status,
-                transcript, recording_url, latency
+                transcript, recording_url, latency, agent_version
             )
             VALUES (
                 %s, %s,
                 COALESCE((SELECT stage FROM leads WHERE lead_id = %s), 'L1'),
                 %s,
                 to_timestamp(%s / 1000.0), to_timestamp(%s / 1000.0), %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (call_id) DO UPDATE SET
                 ended_at             = EXCLUDED.ended_at,
@@ -185,7 +189,8 @@ def _handle_call_ended(conn, call: dict) -> None:
                 call_status          = EXCLUDED.call_status,
                 transcript           = EXCLUDED.transcript,
                 recording_url        = EXCLUDED.recording_url,
-                latency              = EXCLUDED.latency
+                latency              = EXCLUDED.latency,
+                agent_version        = COALESCE(EXCLUDED.agent_version, calls.agent_version)
             """,
             (
                 call.get('call_id'), lead_id, lead_id, call.get('agent_id'),
@@ -195,6 +200,7 @@ def _handle_call_ended(conn, call: dict) -> None:
                 # Latency logged from day one: it is what later tells us
                 # whether P50 is our prompt or the platform floor.
                 json.dumps(call.get('latency')) if call.get('latency') else None,
+                agent_version,
             ),
         )
         # Cost is IN the payload - capture it rather than estimate it later.

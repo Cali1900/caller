@@ -25,6 +25,10 @@ SPEC = {
     'sender_name':  ('Sean',                str, 'from name', None, None),
     'sender_company_line': ('CounselorAI LLC · [ADDRESS TBD]', str,
                            'footer line', None, None),
+    # WHICH PROMPT IS LIVE - an explicit operator choice, not whatever draft
+    # happened to be sitting in the Retell dashboard. See migration 009.
+    'agent_l1_version': (9, int, 'live L1 agent version', 0, 9999),
+    'agent_l3_version': (1, int, 'live L3 agent version', 0, 9999),
 }
 
 _cache = {'at': 0.0, 'values': None}

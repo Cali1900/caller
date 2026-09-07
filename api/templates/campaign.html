@@ -105,6 +105,54 @@
   </div>
 </div>
 
+<h2 id="prompts">Prompt versions</h2>
+<p class="dim">The live version is an explicit choice made here. Editing a draft
+   in the Retell dashboard does <b>not</b> change what dials &mdash; v8 once went
+   live as a side effect of exactly that, which is why this screen exists.
+   Every call records the version it ran, so a score shift stays attributable.</p>
+<form class="inline" method="post" action="/campaign/prompt/sync">
+  <button type="submit">re-sync from Retell</button></form>
+
+{% for stage, rows in prompt_rows.items() %}
+  {% if rows %}
+  <h2>{{ stage }} &mdash; live: v{{ settings['agent_l1_version'] if stage == 'L1' else settings['agent_l3_version'] }}</h2>
+  <table>
+  <tr><th>live</th><th>version</th><th>date</th><th>model</th><th class="right">chars</th>
+      <th class="right">calls run</th><th>note</th><th></th></tr>
+  {% for r in rows %}
+    {% set live = (r.agent_version == (settings['agent_l1_version'] if stage == 'L1' else settings['agent_l3_version'])) %}
+    <tr>
+      <td>{% if live %}<span class="pill completed">LIVE</span>{% endif %}</td>
+      <td>v{{ r.agent_version }}{% if not r.is_published %} <span class="pill">draft</span>{% endif %}</td>
+      <td class="dim">{{ r.retell_updated_at.strftime('%m-%d %H:%M') if r.retell_updated_at else '' }}</td>
+      <td class="dim">{{ r.model or '' }}</td>
+      <td class="right dim">{{ r.prompt_chars }}</td>
+      <td class="right">{{ r.calls_run }}</td>
+      <td>
+        <form class="inline" method="post" action="/campaign/prompt/note">
+          <input type="hidden" name="stage" value="{{ stage }}">
+          <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
+          <input name="note" size="34" value="{{ r.change_note or '' }}"
+                 placeholder="what changed in this version">
+          <button type="submit">save</button>
+        </form>
+      </td>
+      <td>
+        {% if not live %}
+        <form class="inline" method="post" action="/campaign/prompt"
+              onsubmit="return confirm('Make {{ stage }} v{{ r.agent_version }} live for NEW calls?')">
+          <input type="hidden" name="stage" value="{{ stage }}">
+          <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
+          <button type="submit">make live</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </table>
+  {% endif %}
+{% endfor %}
+
 {% if enrolled_rows %}
 <h2>Enrolled today</h2>
 <table>
