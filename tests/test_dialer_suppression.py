@@ -30,27 +30,23 @@ def cfg(db, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def running_campaign(db, request):
+def _queue_the_lead(db, request):
     """
-    PHASE 2: a lead is only a candidate if it is enrolled in a STARTED
-    campaign. Every test in this file assumes the lead is in play, so the
-    setup happens once here rather than in each test.
+    PHASE 5d: a lead is only a candidate if it is IN THE STANDING QUEUE and
+    dialing is switched on. The switch defaults to OFF, so every test that
+    expects a dial has to turn it on.
     """
     if 'lead' not in request.fixturenames:
-        return None
-    from api import campaigns
-    from api.config import load_config
-    cfg = load_config()
-    date = campaigns.campaign_date(cfg)
-    campaigns.ensure(cfg, date, daily_cap=200)
-    campaigns.start(cfg, date)
+        return
+    from api import settings as settings_mod
+    settings_mod._cache.update(at=0.0, values=None)
+    settings_mod.set_many({'dialing_enabled': 'true'}, updated_by='test')
     lead = request.getfixturevalue('lead')
     with db.cursor() as cur:
-        cur.execute("""INSERT INTO campaign_leads (campaign_date, lead_id, source)
-                       VALUES (%s,%s,'fresh')
-                       ON CONFLICT DO NOTHING""", (date, lead['lead_id']))
+        cur.execute("UPDATE leads SET pool_status='active' WHERE lead_id=%s",
+                    (lead['lead_id'],))
     db.commit()
-    return date
+    settings_mod._cache.update(at=0.0, values=None)
 
 
 @pytest.fixture
@@ -58,14 +54,13 @@ def no_real_calls(monkeypatch):
     """Never touch Retell from a test."""
     placed = []
 
-    class FakeResp:
-        call_id = 'call_fake_1'
+    class R:
+        def __init__(self, n): self.call_id = f'call_fake_{n}'
 
-    def _fake(cfg, to_number, lead_id, dynamic_vars=None):
+    def fake(cfg, to_number, lead, dynamic=None):
         placed.append(to_number)
-        return FakeResp()
-
-    monkeypatch.setattr('api.retell.create_phone_call', _fake)
+        return R(len(placed))
+    monkeypatch.setattr('api.retell.create_phone_call', fake)
     return placed
 
 

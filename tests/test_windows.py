@@ -87,21 +87,33 @@ def _lead(db, tz, company='W Firm', phone=None):
 
 
 @pytest.fixture
-def running_campaign(db, cfg_env):
-    """A started, unpaused campaign for today."""
-    date = campaigns.campaign_date(cfg_env)
-    campaigns.ensure(cfg_env, date, daily_cap=200)
-    campaigns.start(cfg_env, date)
-    return date
+def running_campaign(db, cfg_env, monkeypatch):
+    """
+    Standing queue: put leads in it and switch dialing on.
+
+    The windows are deliberately NOT neutralised here - in this file the
+    window IS the thing under test.
+    """
+    from api import settings as settings_mod
+    settings_mod._cache.update(at=0.0, values=None)
+    settings_mod.set_many({'dialing_enabled': 'true', 'daily_cap': 1000},
+                          updated_by='test')
+
+    def _queue(ids):
+        if not isinstance(ids, (list, tuple)):
+            ids = [ids]
+        with db.cursor() as cur:
+            cur.execute("UPDATE leads SET pool_status='active' "
+                        "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
+        db.commit()
+        settings_mod._cache.update(at=0.0, values=None)
+    return _queue
 
 
-def _enrol_and_select(db, cfg_env, date, lead_ids, source='fresh'):
-    with db.cursor() as cur:
-        for lid in lead_ids:
-            cur.execute("""INSERT INTO campaign_leads (campaign_date, lead_id, source)
-                           VALUES (%s,%s,%s)""", (date, lid, source))
-    db.commit()
-    return dialer.select_and_claim(cfg_env, date=date, limit=100)
+def _enrol_and_select(db, cfg_env, queue, lead_ids, source='fresh'):
+    """Put them in the STANDING QUEUE, then run the REAL selection query."""
+    queue(lead_ids)
+    return dialer.select_and_claim(cfg_env, limit=100)
 
 
 # --------------------------------------------------------------------------

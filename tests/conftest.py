@@ -179,3 +179,27 @@ def cfg_dialable(db, monkeypatch):
     monkeypatch.setenv('DIAL_MODE', 'unrestricted')
     from api.config import load_config
     return load_config()
+
+
+@pytest.fixture
+def queued(db):
+    """
+    Put leads in the STANDING QUEUE and switch dialing ON.
+
+    Replaces the old enrol+start fixtures. Note the switch must be turned on
+    explicitly here too - it defaults to OFF, and that is the property the
+    whole queue model rests on.
+    """
+    from api import settings as settings_mod
+    settings_mod._cache.update(at=0.0, values=None)
+    settings_mod.set_many({'dialing_enabled': 'true'}, updated_by='test')
+
+    def _queue(ids):
+        if not isinstance(ids, (list, tuple)):
+            ids = [ids]
+        with db.cursor() as cur:
+            cur.execute("UPDATE leads SET pool_status='active' "
+                        "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
+        db.commit()
+        settings_mod._cache.update(at=0.0, values=None)
+    return _queue

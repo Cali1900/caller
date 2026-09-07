@@ -52,6 +52,38 @@ Two things to know about that choice: `enroll()` does **not** filter on
 and carry-overs auto-enrol regardless of region, so days are clean for
 `source='fresh'` but not perfectly clean overall.
 
+## The standing queue
+
+One ongoing queue, not a per-day ritual. There is no enrol step and no daily
+start.
+
+```
+upload CSV ──▶ POOL ──select on /leads──▶ QUEUE ──the switch──▶ dialing
+                              (never dials)      (defaults OFF)
+```
+
+- **`/leads` has checkboxes.** Filter by anything, select, "Add to campaign".
+- **Carry-overs go first.** `ORDER BY (first_dialed_at IS NULL)` puts
+  callbacks, L3 follow-ups and retries ahead of new leads.
+- **The cap counts NEW leads only**, by `leads.first_dialed_at`, stamped once.
+  A retry never consumes new-lead budget, and a carry-over is exempt entirely.
+- **Nothing is lost.** Whatever is not reached stays queued — there is no
+  rollover step to forget.
+
+### THE SWITCH — and why it exists
+
+Removing the start button removed the thing that stopped *"add 500 leads"*
+becoming *"dial 500 now"*. **That was a guard by omission, and a guard by
+omission disappears the moment the ritual it depended on does.**
+
+It is replaced by one explicit setting, `dialing_enabled`, which **defaults to
+false**. Queueing a thousand leads with the switch off places zero calls — a
+test asserts exactly that with 500. It is checked in the selection query *and*
+before each dial, so pausing mid-batch stops leads already claimed.
+
+`scripts/deploy.sh` is the only way to restart: it **pauses before restarting
+and resumes after**, with a `trap` so it resumes even if the build fails.
+
 ## ⚠️ A guard is only tested if the test ISOLATES it
 
 Three times now a guard has been removed and the suite stayed green, because

@@ -1,8 +1,6 @@
 TARGET = 'api/guards.py'
-EXPECT = 'test_hard_cap_refuses_fresh_at_dial_time'
-LABEL = 'remove the daily cap check'
-OLD = """    if row['dialed'] >= row['daily_cap']:
-        raise DialRefused(
-            f'daily cap reached ({row["dialed"]}/{row["daily_cap"]}) - refusing fresh'
-        )"""
+EXPECT = 'test_the_cap_counts_new_leads'
+LABEL = 'remove the daily new-lead cap'
+OLD = """    if used >= cap:
+        raise DialRefused(f'daily cap reached ({used}/{cap} new leads today)')"""
 NEW = "    return"

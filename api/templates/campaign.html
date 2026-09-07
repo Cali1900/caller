@@ -1,168 +1,152 @@
-{% extends "base.html" %}{% block title %}campaign &middot; caller{% endblock %}
+{% extends "base.html" %}{% block title %}Campaign · Caller{% endblock %}
 {% block body %}
-<h1>Campaign &mdash; {{ c.campaign_date if c else today }}</h1>
+<h1>Campaign</h1>
+<p class="sub">One standing queue. Add leads whenever; it dials up to the daily
+   cap of new leads inside your window, then picks up tomorrow.</p>
 {% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
+
+<div class="card">
+  <div class="toolbar" style="justify-content:space-between">
+    <div class="metric">
+      <div class="m"><b>{{ queue.queued or 0 }}</b><span>in queue</span></div>
+      <div class="m"><b>{{ queue.queued_carry or 0 }}</b><span>carry-overs first</span></div>
+      <div class="m"><b>{{ queue.queued_new or 0 }}</b><span>new waiting</span></div>
+      <div class="m"><b>{{ queue.new_today or 0 }}/{{ settings.daily_cap }}</b><span>new today</span></div>
+      <div class="m"><b>{{ remaining }}</b><span>left today (~{{ hours_left }}h)</span></div>
+      <div class="m"><b>{{ queue.pool or 0 }}</b><span>in pool, not queued</span></div>
+    </div>
+    <div style="text-align:right">
+      <div style="margin-bottom:8px">
+        <span class="livedot {{ 'on' if settings.dialing_enabled else 'off' }}"></span>
+        <b style="font-family:Sora">{{ 'DIALING' if settings.dialing_enabled else 'PAUSED' }}</b>
+      </div>
+      <form class="inline" method="post" action="/campaign/dialing">
+        {% if settings.dialing_enabled %}
+          <input type="hidden" name="on" value="false">
+          <button type="submit" class="danger">Pause dialing</button>
+        {% else %}
+          <input type="hidden" name="on" value="true">
+          <button type="submit" class="gold"
+            onclick="return confirm('Start dialing? It will keep going until you pause it.')">Start dialing</button>
+        {% endif %}
+      </form>
+    </div>
+  </div>
+  <p class="dim" style="margin-bottom:0">This switch is the only thing that
+     dials. Adding leads to the queue never does &mdash; it defaults to paused
+     and stays where you leave it.</p>
+</div>
 
 <div class="grid">
   <div class="card">
-    <h2>State</h2>
-    {% if c %}
-    <div class="kv">
-      <div>started</div><div>{% if c.started_at %}{{ c.started_at.strftime('%H:%M') }}{% else %}<span class="pill">not started &mdash; nothing dials</span>{% endif %}</div>
-      <div>paused</div><div>{% if c.paused %}<span class="pill human_review">PAUSED</span>{% else %}no{% endif %}</div>
-      <div>cap</div><div>{{ c.daily_cap }}</div>
-      <div>enrolled</div><div>{{ c.enrolled }}</div>
-      <div>dialed</div><div>{{ c.dialed }}</div>
-      <div>remaining</div><div>{{ c.remaining }}</div>
-    </div>
-    {% else %}<p class="dim">No campaign for today yet.</p>{% endif %}
-  </div>
-
-  <div class="card">
-    <h2>Controls</h2>
-    <p class="dim">Uploading never dials. Enrolling never dials. Only START dials.</p>
-    <form class="inline" method="post" action="/campaign/action"><input type="hidden" name="do" value="enroll"><button>enroll</button></form>
-    <form class="inline" method="post" action="/campaign/action"><input type="hidden" name="do" value="start"><button>start</button></form>
-    <form class="inline" method="post" action="/campaign/action"><input type="hidden" name="do" value="pause"><button>pause</button></form>
-    <form class="inline" method="post" action="/campaign/action"><input type="hidden" name="do" value="resume"><button>resume</button></form>
-    <form class="inline" method="post" action="/campaign/action"><input type="hidden" name="do" value="rollover"><button>rollover</button></form>
-    <p><form class="inline" method="post" action="/campaign/action">
-      <input type="hidden" name="do" value="cap">
-      <input name="cap" type="number" min="1" max="2000" value="{{ c.daily_cap if c else 200 }}" size="5">
-      <button>set cap</button></form></p>
+    <h2>Daily cap</h2>
+    <form method="post" action="/campaign/cap">
+      <div class="toolbar">
+        <input name="daily_cap" type="number" min="1" max="5000" style="width:110px"
+               value="{{ settings.daily_cap }}">
+        <button type="submit" class="ghost">Save</button>
+      </div>
+      <p class="dim" style="margin-bottom:0">New leads per day. Callbacks, L3
+         follow-ups and retries go ahead of new leads and do <b>not</b> use it.</p>
+    </form>
   </div>
 
   <div class="card">
     <h2>Spacing</h2>
-    <p class="dim">Changes take effect on the next tick. No restart.</p>
     <form method="post" action="/campaign/spacing">
       <div class="kv">
-        <div>at a time</div><div>
-          <input name="max_concurrent" type="number" min="1" max="10" size="3"
-                 value="{{ settings.max_concurrent }}"></div>
-        <div>gap min (s)</div><div>
-          <input name="dial_interval_min" type="number" min="15" max="3600" size="5"
-                 value="{{ settings.dial_interval_min }}"></div>
-        <div>gap max (s)</div><div>
-          <input name="dial_interval_max" type="number" min="15" max="7200" size="5"
-                 value="{{ settings.dial_interval_max }}"></div>
+        <div>at a time</div><div><input name="max_concurrent" type="number" min="1" max="10" style="width:80px" value="{{ settings.max_concurrent }}"></div>
+        <div>gap min (s)</div><div><input name="dial_interval_min" type="number" min="15" max="3600" style="width:100px" value="{{ settings.dial_interval_min }}"></div>
+        <div>gap max (s)</div><div><input name="dial_interval_max" type="number" min="15" max="7200" style="width:100px" value="{{ settings.dial_interval_max }}"></div>
       </div>
-      <p><button type="submit">save spacing</button></p>
+      <p><button type="submit" class="ghost">Save spacing</button></p>
     </form>
-    <p class="dim">Random within the range each tick &mdash; a fixed cadence is
-       itself a pattern. Currently about <b>{{ per_hour }}</b> calls/hour, so a
-       cap of {{ c.daily_cap if c else 100 }} spreads over roughly
-       <b>{{ ((c.daily_cap if c else 100) / per_hour)|round(1) if per_hour else '?' }}</b> hours.</p>
+    <p class="dim" style="margin-bottom:0">Random within the range each tick &mdash;
+      a fixed cadence is itself a pattern. About <b>{{ per_hour }}</b> calls/hour.</p>
   </div>
 
   <div class="card">
     <h2>Sender</h2>
-    <p class="dim">Used in the draft emails. Change the domain here when
-       demandcounselor.com is warm &mdash; no restart.</p>
     <form method="post" action="/campaign/sender">
       <div class="kv">
-        <div>from address</div><div><input name="sender_email" size="30" value="{{ settings.sender_email }}"></div>
-        <div>from name</div><div><input name="sender_name" size="20" value="{{ settings.sender_name }}"></div>
-        <div>footer line</div><div><input name="sender_company_line" size="34" value="{{ settings.sender_company_line }}"></div>
+        <div>from address</div><div><input name="sender_email" value="{{ settings.sender_email }}" style="width:100%"></div>
+        <div>from name</div><div><input name="sender_name" value="{{ settings.sender_name }}" style="width:100%"></div>
+        <div>footer line</div><div><input name="sender_company_line" value="{{ settings.sender_company_line }}" style="width:100%"></div>
       </div>
-      <p><button type="submit">save sender</button></p>
+      <p><button type="submit" class="ghost">Save sender</button></p>
     </form>
+    <p class="dim" style="margin-bottom:0">Used in draft emails. Switch the
+       domain here when it is warm &mdash; no restart.</p>
   </div>
 
   <div class="card">
     <h2>Calling window</h2>
-    <p class="dim">In the <b>called party's</b> local time. These can only ever
-       NARROW the legal 08:00&ndash;20:30 window, never widen it.</p>
+    <p class="dim">In the <b>called party's</b> local time. Can only ever narrow
+       the legal 08:00&ndash;20:30 window, never widen it.</p>
     <form method="post" action="/campaign/windows">
-      <table>
-      <tr><th>day</th><th>on</th><th>from</th><th>to</th></tr>
+      <table style="box-shadow:none">
+      <tr><th>Day</th><th>On</th><th>From</th><th>To</th></tr>
       {% for w in windows %}
-      <tr>
-        <td>{{ days[w.dow] }}</td>
+      <tr><td>{{ days[w.dow] }}</td>
         <td><input type="checkbox" name="enabled_{{ w.dow }}" {% if w.enabled %}checked{% endif %}></td>
         <td><input type="time" name="start_{{ w.dow }}" value="{{ w.start_time.strftime('%H:%M') }}"></td>
-        <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td>
-      </tr>
+        <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td></tr>
       {% endfor %}
       </table>
-      <p><button type="submit">save window</button></p>
+      <p><button type="submit" class="ghost">Save window</button></p>
     </form>
   </div>
 
   <div class="card">
-    <h2>Pool</h2>
-    <div class="kv">
-      <div>in pool</div><div>{{ pool.pool or 0 }} <span class="dim">uploaded, idle</span></div>
-      <div>active</div><div>{{ pool.active or 0 }}</div>
-      <div>suppressed</div><div>{{ pool.suppressed or 0 }}</div>
-    </div>
     <h2>Upload</h2>
     <form method="post" action="/upload-form" enctype="multipart/form-data">
       <input type="file" name="file" accept=".csv,text/csv" required>
-      <button type="submit">upload to pool</button>
+      <p><button type="submit" class="ghost">Upload to pool</button></p>
     </form>
-    <p class="dim">columns: company, phone, timezone (+ city, state, segment, external_ref)</p>
+    <p class="dim" style="margin-bottom:0">Columns: <code>company, phone</code>
+      and either <code>state</code> (timezone is derived) or an explicit
+      <code>timezone</code>. Optional: city, segment, external_ref.
+      Uploading lands in the <b>pool</b> &mdash; select on the Leads screen to queue.</p>
   </div>
 </div>
 
-<h2 id="prompts">Prompt versions</h2>
-<p class="dim">The live version is an explicit choice made here. Editing a draft
-   in the Retell dashboard does <b>not</b> change what dials &mdash; v8 once went
-   live as a side effect of exactly that, which is why this screen exists.
-   Every call records the version it ran, so a score shift stays attributable.</p>
-<form class="inline" method="post" action="/campaign/prompt/sync">
-  <button type="submit">re-sync from Retell</button></form>
+<h2 id="prompts" style="margin-top:28px">Prompt versions</h2>
+<p class="sub">The live version is chosen here. Editing a draft in the Retell
+   dashboard does <b>not</b> change what dials &mdash; v8 once went live as a
+   side effect of exactly that. Every call records the version it ran.</p>
+<p><form class="inline" method="post" action="/campaign/prompt/sync">
+   <button type="submit" class="ghost">Re-sync from Retell</button></form></p>
 
 {% for stage, rows in prompt_rows.items() %}
   {% if rows %}
-  <h2>{{ stage }} &mdash; live: v{{ settings['agent_l1_version'] if stage == 'L1' else settings['agent_l3_version'] }}</h2>
-  <table>
-  <tr><th>live</th><th>version</th><th>date</th><th>model</th><th class="right">chars</th>
-      <th class="right">calls run</th><th>note</th><th></th></tr>
+  {% set livever = settings['agent_l1_version'] if stage == 'L1' else settings['agent_l3_version'] %}
+  <h2>{{ stage }} &mdash; live: v{{ livever }}</h2>
+  <table style="margin-bottom:18px">
+  <tr><th></th><th>Version</th><th>Date</th><th>Model</th><th class="right">Chars</th>
+      <th class="right">Calls run</th><th>Note</th><th></th></tr>
   {% for r in rows %}
-    {% set live = (r.agent_version == (settings['agent_l1_version'] if stage == 'L1' else settings['agent_l3_version'])) %}
     <tr>
-      <td>{% if live %}<span class="pill completed">LIVE</span>{% endif %}</td>
-      <td>v{{ r.agent_version }}{% if not r.is_published %} <span class="pill">draft</span>{% endif %}</td>
-      <td class="dim">{{ r.retell_updated_at.strftime('%m-%d %H:%M') if r.retell_updated_at else '' }}</td>
+      <td>{% if r.agent_version == livever %}<span class="pill completed">LIVE</span>{% endif %}</td>
+      <td><b>v{{ r.agent_version }}</b>{% if not r.is_published %} <span class="pill">draft</span>{% endif %}</td>
+      <td class="dim">{{ r.retell_updated_at.strftime('%b %d %H:%M') if r.retell_updated_at else '' }}</td>
       <td class="dim">{{ r.model or '' }}</td>
       <td class="right dim">{{ r.prompt_chars }}</td>
       <td class="right">{{ r.calls_run }}</td>
-      <td>
-        <form class="inline" method="post" action="/campaign/prompt/note">
+      <td><form class="inline" method="post" action="/campaign/prompt/note">
           <input type="hidden" name="stage" value="{{ stage }}">
           <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
-          <input name="note" size="34" value="{{ r.change_note or '' }}"
-                 placeholder="what changed in this version">
-          <button type="submit">save</button>
-        </form>
-      </td>
-      <td>
-        {% if not live %}
+          <input name="note" style="width:280px" value="{{ r.change_note or '' }}"
+                 placeholder="what changed">
+          <button type="submit" class="ghost">Save</button></form></td>
+      <td>{% if r.agent_version != livever %}
         <form class="inline" method="post" action="/campaign/prompt"
-              onsubmit="return confirm('Make {{ stage }} v{{ r.agent_version }} live for NEW calls?')">
+              onsubmit="return confirm('Make {{ stage }} v{{ r.agent_version }} live for new calls?')">
           <input type="hidden" name="stage" value="{{ stage }}">
           <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
-          <button type="submit">make live</button>
-        </form>
-        {% endif %}
-      </td>
+          <button type="submit" class="ghost">Make live</button></form>{% endif %}</td>
     </tr>
   {% endfor %}
   </table>
   {% endif %}
 {% endfor %}
-
-{% if enrolled_rows %}
-<h2>Enrolled today</h2>
-<table>
-<tr><th>firm</th><th>source</th><th>status</th><th>dialed</th></tr>
-{% for r in enrolled_rows %}
-<tr><td><a href="/leads/{{ r.lead_id }}">{{ r.company }}</a></td>
-    <td class="dim">{{ r.source }}</td>
-    <td><span class="pill {{ r.status }}">{{ r.status }}</span></td>
-    <td class="dim">{{ r.dialed_at.strftime('%H:%M') if r.dialed_at else '' }}</td></tr>
-{% endfor %}
-</table>
-{% endif %}
 {% endblock %}

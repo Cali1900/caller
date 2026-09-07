@@ -57,6 +57,12 @@ class Config:
     DIGEST_FROM: str
     DIGEST_FROM_NAME: str
     SENDER_DOMAIN: str
+    SPACES_KEY: str
+    SPACES_SECRET: str
+    SPACES_ENDPOINT: str
+    SPACES_REGION: str
+    SPACES_BUCKET: str
+    SPACES_BACKUP_PREFIX: str
 
 
 def parse_allowlist(raw: str | None) -> frozenset:
@@ -97,4 +103,10 @@ def load_config() -> Config:
         # counselorai.io now, demandcounselor.com once it is warm: an env
         # change and a restart, nothing more.
         SENDER_DOMAIN=_required('SENDER_DOMAIN'),
+        SPACES_KEY=_required('SPACES_KEY'),
+        SPACES_SECRET=_required('SPACES_SECRET'),
+        SPACES_ENDPOINT=_required('SPACES_ENDPOINT'),
+        SPACES_REGION=_required('SPACES_REGION'),
+        SPACES_BUCKET=_required('SPACES_BUCKET'),
+        SPACES_BACKUP_PREFIX=_required('SPACES_BACKUP_PREFIX'),
     )

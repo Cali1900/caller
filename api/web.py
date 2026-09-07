@@ -38,6 +38,8 @@ STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'email_path', 'demo_pending', 'dnc', 'max_attempts', 'failed',
             'human_review', 'paused']
 STAGES = ['L1', 'L2', 'L3', 'L4', 'won', 'lost']
+DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
+        'Friday', 'Saturday']
 PAGE = 100
 
 
@@ -114,7 +116,7 @@ def _lead_query(q, status, stage, needs_you, limit, offset):
 
 @router.get('/', response_class=HTMLResponse)
 def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
-               needs_you: str = '', page: int = 1):
+               needs_you: str = '', page: int = 1, msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
@@ -138,8 +140,37 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
     return templates.TemplateResponse(request, 'leads.html', {
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
-        'stages': STAGES, 'total': total, 'qs': qs, 'page': page,
+        'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
+        'dialing_on': settings_mod.get('dialing_enabled'),
         'pages': max(1, (total + PAGE - 1) // PAGE)})
+
+
+@router.post('/leads/queue')
+async def leads_queue(request: Request):
+    """
+    "Add to campaign" - puts the selected leads in the STANDING QUEUE.
+
+    This does NOT start dialing. Dialing is one explicit switch that defaults
+    to off; queueing a thousand leads with the switch off places zero calls.
+    """
+    form = await request.form()
+    ids = form.getlist('lead_id')
+    action = form.get('action', 'add')
+    if not ids:
+        return RedirectResponse('/?msg=nothing+selected', status_code=303)
+    target = 'active' if action == 'add' else 'pool'
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE leads SET pool_status = %s, updated_at = now()
+                    WHERE lead_id = ANY(%s::uuid[]) AND pool_status <> 'done'""",
+                (target, ids))
+            n = cur.rowcount
+    verb = 'added to' if action == 'add' else 'removed from'
+    on = settings_mod.get('dialing_enabled')
+    msg = (f'{n} lead(s) {verb} the queue.'
+           + ('' if on else ' Dialing is OFF - nothing will be called until you turn it on.'))
+    return RedirectResponse(f'/?msg={urllib.parse.quote(msg)}', status_code=303)
 
 
 @router.get('/leads/{lead_id}', response_class=HTMLResponse)
@@ -298,38 +329,59 @@ def campaign_page(request: Request, msg: str = ''):
     cfg = _cfg()
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
-        c = campaigns.status(cfg)
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT count(*) FILTER (WHERE pool_status='pool')   AS pool,
-                          count(*) FILTER (WHERE pool_status='active') AS active,
-                          (SELECT count(*) FROM suppression)           AS suppressed
-                     FROM leads""")
-            pool = cur.fetchone()
+                """SELECT
+                     count(*) FILTER (WHERE pool_status='pool')            AS pool,
+                     count(*) FILTER (WHERE pool_status='active')          AS queued,
+                     count(*) FILTER (WHERE pool_status='active'
+                                        AND first_dialed_at IS NULL)       AS queued_new,
+                     count(*) FILTER (WHERE pool_status='active'
+                                        AND first_dialed_at IS NOT NULL
+                                        AND status IN ('callback','no_answer','new','queued'))
+                                                                           AS queued_carry,
+                     count(*) FILTER (WHERE first_dialed_at IS NOT NULL
+                                        AND (first_dialed_at AT TIME ZONE %s)::date
+                                            = (now() AT TIME ZONE %s)::date) AS new_today,
+                     (SELECT count(*) FROM suppression)                    AS suppressed
+                   FROM leads""", (cfg.OPERATOR_TIMEZONE, cfg.OPERATOR_TIMEZONE))
+            queue = cur.fetchone()
             cur.execute('SELECT * FROM dialing_windows ORDER BY dow')
             windows = cur.fetchall()
-            cur.execute(
-                """SELECT cl.source, cl.dialed_at, l.company, l.status, l.lead_id
-                     FROM campaign_leads cl JOIN leads l ON l.lead_id = cl.lead_id
-                    WHERE cl.campaign_date = %s
-                    ORDER BY array_position(ARRAY['rollover','callback','retry','fresh'],
-                                            cl.source), l.company LIMIT 300""",
-                (campaigns.campaign_date(cfg),))
-            enrolled = cur.fetchall()
     prompt_rows = {'L1': prompts_mod.listing(cfg, 'L1'),
                    'L3': prompts_mod.listing(cfg, 'L3')}
     st = settings_mod.all_settings(force=True)
     avg = (st['dial_interval_min'] + st['dial_interval_max']) / 2.0
     per_hour = round(3600.0 / avg * st['max_concurrent'], 1) if avg else 0
+    remaining = max(0, st['daily_cap'] - (queue['new_today'] or 0))
+    hours_left = round(remaining / per_hour, 1) if per_hour else 0
     return templates.TemplateResponse(request, 'campaign.html', {
-        'hdr': hdr, 'c': c, 'pool': pool,
-        'enrolled_rows': enrolled, 'msg': msg, 'settings': st,
-        'per_hour': per_hour, 'windows': windows, 'days': DAYS,
-        'prompt_rows': prompt_rows,
-        'today': campaigns.campaign_date(cfg)})
+        'hdr': hdr, 'queue': queue, 'msg': msg, 'settings': st,
+        'per_hour': per_hour, 'remaining': remaining, 'hours_left': hours_left,
+        'windows': windows, 'days': DAYS, 'prompt_rows': prompt_rows})
 
 
-DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+@router.post('/campaign/dialing')
+def campaign_dialing(on: str = Form(...)):
+    """
+    THE SWITCH. Replaces the old start button, and defaults to off.
+
+    One place, deliberately: adding leads must never be able to start dialing.
+    """
+    settings_mod.set_many({'dialing_enabled': on}, updated_by='operator')
+    live = settings_mod.all_settings(force=True)['dialing_enabled']
+    msg = 'DIALING IS ON' if live else 'dialing is paused'
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg)}',
+                            status_code=303)
+
+
+@router.post('/campaign/cap')
+def campaign_cap(daily_cap: str = Form(...)):
+    r = settings_mod.set_many({'daily_cap': daily_cap})
+    msg = (f"cap set to {r['set']['daily_cap']} new leads/day" if r['ok']
+           else 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items()))
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg)}',
+                            status_code=303)
 
 
 @router.post('/campaign/spacing')

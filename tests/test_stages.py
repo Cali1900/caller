@@ -38,18 +38,23 @@ def _get(db, lid):
 
 @pytest.fixture
 def enrolled(db, cfg_env, monkeypatch):
-    """A started campaign with the window out of the way."""
+    """Standing queue: put leads in it and switch dialing on."""
     monkeypatch.setattr('api.windows.LEGAL_WINDOW', '')
     monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
-    date = campaigns.campaign_date(cfg_env)
-    campaigns.ensure(cfg_env, date); campaigns.start(cfg_env, date)
+    from api import settings as settings_mod
+    settings_mod._cache.update(at=0.0, values=None)
+    settings_mod.set_many({'dialing_enabled': 'true', 'daily_cap': 1000},
+                          updated_by='test')
 
-    def enrol(lid):
+    def _queue(ids):
+        if not isinstance(ids, (list, tuple)):
+            ids = [ids]
         with db.cursor() as cur:
-            cur.execute("""INSERT INTO campaign_leads (campaign_date, lead_id, source)
-                           VALUES (%s,%s,'fresh') ON CONFLICT DO NOTHING""", (date, lid))
+            cur.execute("UPDATE leads SET pool_status='active' "
+                        "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
         db.commit()
-    return enrol
+        settings_mod._cache.update(at=0.0, values=None)
+    return _queue
 
 
 # --------------------------------------------------------------------------

@@ -83,61 +83,47 @@ def assert_not_suppressed(conn, phone_e164: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# THE DAILY CAP
+# THE SWITCH
 #
-# The cap is a TOTAL, not a fresh budget: 200 means 200 dials, never 200 fresh
-# plus however many carry-overs happened to exist.
+# This replaces the old START button. Removing the daily ritual removed what
+# stopped "add 500 leads" becoming "dial 500 now" - and a guard by OMISSION
+# disappears the moment the thing it depended on does. So it is now one
+# explicit setting, DEFAULTING TO OFF, that a person turns on deliberately.
 #
-# The single exception is deliberate. A carry-over is a promise already made -
-# a receptionist asked to be called back. A fresh lead is a cold call. If
-# carry-overs alone meet or exceed the cap they still dial, and zero fresh are
-# added. The cap bends for the promise and never for the cold list.
-#
-# Enrolment already limits how many fresh leads enter a campaign. This is the
-# second, authoritative check at dial time: enrolment can be re-run, a cap can
-# be lowered mid-day, and neither should be able to overshoot.
+# Checked in the selection query AND here before the dial, because a batch can
+# be claimed and then paused mid-flight.
 # ---------------------------------------------------------------------------
 
 
-def assert_under_cap(conn, campaign_date, source: str) -> None:
-    """Raises DialRefused when a FRESH lead would exceed the day's cap."""
-    if source != 'fresh':
-        return                      # promised callbacks beat cold calls
+def assert_dialing_enabled(settings) -> None:
+    """Raises DialRefused unless dialing has been explicitly switched on."""
+    if not settings.get('dialing_enabled'):
+        raise DialRefused('dialing is switched OFF - refusing')
 
+
+# ---------------------------------------------------------------------------
+# THE DAILY CAP
+#
+# The cap counts NEW leads only, by leads.first_dialed_at. A callback, an L3
+# follow-up or a retry is a promise already made and goes AHEAD of new leads
+# without consuming the budget - the same asymmetry as before, expressed
+# against a standing queue instead of a per-day campaign.
+# ---------------------------------------------------------------------------
+
+
+def assert_under_daily_cap(conn, lead, settings, operator_tz: str) -> None:
+    """Raises DialRefused when a NEW lead would exceed today's cap."""
+    if lead.get('first_dialed_at') is not None:
+        return                      # already-started lead: not new, never capped
+
+    cap = settings.get('daily_cap')
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT c.daily_cap,
-                      (SELECT count(*) FROM campaign_leads cl
-                        WHERE cl.campaign_date = c.campaign_date
-                          AND cl.dialed_at IS NOT NULL) AS dialed
-                 FROM campaigns c
-                WHERE c.campaign_date = %s""",
-            (campaign_date,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise DialRefused(f'no campaign for {campaign_date} - refusing')
-    if row['dialed'] >= row['daily_cap']:
-        raise DialRefused(
-            f'daily cap reached ({row["dialed"]}/{row["daily_cap"]}) - refusing fresh'
-        )
-
-
-def assert_campaign_running(conn, campaign_date) -> None:
-    """
-    Re-checked immediately before the dial so PAUSE takes effect on leads that
-    were already claimed. Without this, pressing pause still lets the current
-    batch dial out, which is exactly the moment someone presses it.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            'SELECT started_at, paused FROM campaigns WHERE campaign_date = %s',
-            (campaign_date,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        raise DialRefused(f'no campaign for {campaign_date} - refusing')
-    if row['started_at'] is None:
-        raise DialRefused(f'campaign {campaign_date} not started - refusing')
-    if row['paused']:
-        raise DialRefused(f'campaign {campaign_date} is paused - refusing')
+            """SELECT count(*) AS n FROM leads
+                WHERE first_dialed_at IS NOT NULL
+                  AND (first_dialed_at AT TIME ZONE %s)::date
+                      = (now() AT TIME ZONE %s)::date""",
+            (operator_tz, operator_tz))
+        used = cur.fetchone()['n']
+    if used >= cap:
+        raise DialRefused(f'daily cap reached ({used}/{cap} new leads today)')

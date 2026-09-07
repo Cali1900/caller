@@ -29,6 +29,10 @@ SPEC = {
     # happened to be sitting in the Retell dashboard. See migration 009.
     'agent_l1_version': (9, int, 'live L1 agent version', 0, 9999),
     'agent_l3_version': (1, int, 'live L3 agent version', 0, 9999),
+    # THE SWITCH. Replaces the old start button. Defaults to OFF: adding
+    # leads to the queue must never be able to start dialing.
+    'dialing_enabled': (False, bool, 'dialing on/off', None, None),
+    'daily_cap':       (100,   int,  'new leads per day', 1, 5000),
 }
 
 _cache = {'at': 0.0, 'values': None}
@@ -46,7 +50,11 @@ def all_settings(force: bool = False) -> dict:
                 cur.execute('SELECT key, value FROM settings')
                 for r in cur.fetchall():
                     if r['key'] in SPEC:
-                        values[r['key']] = SPEC[r['key']][1](r['value'])
+                        caster = SPEC[r['key']][1]
+                        raw = r['value']
+                        values[r['key']] = (
+                            str(raw).strip().lower() in ('1', 'true', 'on', 'yes')
+                            if caster is bool else caster(raw))
     except Exception as exc:
         # A settings outage must not stop dialing at an UNKNOWN cadence - fall
         # back to the conservative defaults above, which are slower, not faster.
@@ -69,10 +77,15 @@ def set_many(pairs: dict, updated_by: str = 'operator') -> dict:
             errors[k] = 'unknown setting'; continue
         default, cast, label, lo, hi = SPEC[k]
         try:
-            v = cast(raw)
+            if cast is bool:
+                v = str(raw).strip().lower() in ('1', 'true', 'on', 'yes')
+            else:
+                v = cast(raw)
         except (TypeError, ValueError):
             errors[k] = 'not a number'; continue
-        if cast is str:
+        if cast is bool:
+            pass
+        elif cast is str:
             v = v.strip()
             if not v:
                 errors[k] = 'cannot be blank'; continue

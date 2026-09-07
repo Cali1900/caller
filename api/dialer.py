@@ -14,16 +14,17 @@ remove exactly one and watch exactly one test go red:
     CAMPAIGN_JOIN               nothing dials outside a started campaign
     assert_not_suppressed       re-check, for a number suppressed mid-batch
     assert_dialable             the allowlist
-    assert_campaign_running     pause, for a lead already claimed
-    assert_under_cap            the daily cap
+    assert_dialing_enabled      THE SWITCH - defaults off, replaces START
+    assert_under_daily_cap      new leads per day; carry-overs are exempt
+    QUEUE_MEMBERSHIP            pool_status='active' - "add to campaign"
 """
 
 import time
 
-from api import campaigns, db, retell, settings as settings_mod, windows
+from api import db, retell, settings as settings_mod, windows
 from api.config import load_config
-from api.guards import (DialRefused, assert_campaign_running, assert_dialable,
-                        assert_not_suppressed, assert_under_cap)
+from api.guards import (DialRefused, assert_dialable, assert_dialing_enabled,
+                        assert_not_suppressed, assert_under_daily_cap)
 
 # A suppressed number must never be a CANDIDATE, not merely never dialed.
 SUPPRESSION_JOIN = (
@@ -42,25 +43,22 @@ STAGE_DIALABLE = "AND l.stage IN ('L1', 'L3')"
 # touching the dialer.
 REPLIED_GUARD = "AND l.replied_at IS NULL"
 
-# Nothing dials until a campaign exists, has been STARTed, and is not paused.
-# Uploading leads does not dial. Enrolling them does not dial. Only START.
-CAMPAIGN_JOIN = """
-    JOIN campaign_leads cl
-      ON cl.lead_id = l.lead_id AND cl.campaign_date = %(date)s
-    JOIN campaigns c
-      ON c.campaign_date = cl.campaign_date
-     AND c.started_at IS NOT NULL
-     AND NOT c.paused
-"""
+# THE STANDING QUEUE. A lead is queued when pool_status='active' - that is
+# what "add to campaign" sets. There is no per-day campaign and no enrol step.
+#
+# Uploading does not queue. Queueing does not dial. Only the dialing_enabled
+# switch dials, and it defaults to OFF.
+QUEUE_MEMBERSHIP = "AND l.pool_status = 'active'"
 
 SELECT_DUE = """
     SELECT l.lead_id, l.phone_e164, l.status, l.stage, l.attempts,
            l.company, l.dm_name, l.dm_title, l.dm_email, l.emailed_at,
-           l.callback_person, cl.source
+           l.callback_person, l.first_dialed_at,
+           CASE WHEN l.first_dialed_at IS NULL THEN 'fresh' ELSE 'carryover' END
+             AS source
       FROM leads l
-      {campaign}
-     WHERE cl.dialed_at IS NULL
-       AND l.pool_status = 'active'
+     WHERE true
+       {queue}
        AND l.status IN ('new', 'callback', 'no_answer', 'queued')
        AND l.next_attempt_at <= now()
        {stage_dialable}
@@ -68,9 +66,11 @@ SELECT_DUE = """
        {suppression}
        {legal_window}
        {preference_window}
-     ORDER BY array_position(ARRAY['rollover','callback','retry','fresh'],
-                             cl.source),
-              l.next_attempt_at
+     -- CARRY-OVERS FIRST. first_dialed_at IS NULL sorts last, so anything
+     -- already started - callbacks, L3 follow-ups, retries - goes ahead of
+     -- new leads. Nothing is ever dropped: what is not reached stays queued
+     -- and comes up again tomorrow.
+     ORDER BY (l.first_dialed_at IS NULL), l.next_attempt_at
        FOR UPDATE OF l SKIP LOCKED
      LIMIT %(limit)s
 """
@@ -78,7 +78,7 @@ SELECT_DUE = """
 
 def _build_select():
     return SELECT_DUE.format(
-        campaign=CAMPAIGN_JOIN,
+        queue=QUEUE_MEMBERSHIP,
         stage_dialable=STAGE_DIALABLE,
         replied_guard=REPLIED_GUARD,
         suppression=SUPPRESSION_JOIN,
@@ -104,18 +104,20 @@ def select_and_claim(cfg, date=None, limit: int = 10):
     Rollovers sort first: a lead due yesterday that never got dialed has
     waited longest.
     """
-    date = date or campaigns.campaign_date(cfg)
+    # The switch is checked HERE too, so a paused queue produces no
+    # candidates at all rather than claims that are refused one by one.
+    if not settings_mod.get('dialing_enabled'):
+        return []
     claimed = []
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(_build_select(), {'date': date, 'limit': limit})
+            cur.execute(_build_select(), {'limit': limit})
             for r in cur.fetchall():
                 cur.execute(
                     """UPDATE leads SET status = 'dialing', last_called_at = now(),
                                         updated_at = now()
                         WHERE lead_id = %s""", (r['lead_id'],))
-                claimed.append({**r, 'prior_status': r['status'],
-                                'campaign_date': date})
+                claimed.append({**r, 'prior_status': r['status']})
     return claimed
 
 
@@ -132,9 +134,8 @@ def _revert(lead, outcome, detail):
 
 _REFUSAL_OUTCOMES = (
     ('suppressed', 'refused_suppressed'),
-    ('cap', 'refused_cap'),
-    ('paused', 'refused_paused'),
-    ('not started', 'refused_not_started'),
+    ('switched OFF', 'refused_paused'),
+    ('daily cap', 'refused_cap'),
     ('allowlist', 'refused_allowlist'),
     ('DIAL_MODE', 'refused_allowlist'),
 )
@@ -143,7 +144,7 @@ _REFUSAL_OUTCOMES = (
 def dial_one(cfg, lead, use_web: bool = False):
     """Guard, then dial. Returns the call_id, or None if refused/failed."""
     phone = lead['phone_e164']
-    date = lead.get('campaign_date') or campaigns.campaign_date(cfg)
+    st = settings_mod.all_settings()
     try:
         with db.get_conn() as conn:
             # All four re-checked in the SAME transaction as the dial. The
@@ -151,8 +152,8 @@ def dial_one(cfg, lead, use_web: bool = False):
             # end with "remove me", or someone can hit pause, while an earlier
             # batch is still in flight.
             assert_not_suppressed(conn, phone)
-            assert_campaign_running(conn, date)
-            assert_under_cap(conn, date, lead.get('source', 'fresh'))
+            assert_dialing_enabled(st)
+            assert_under_daily_cap(conn, lead, st, cfg.OPERATOR_TIMEZONE)
             assert_dialable(phone, cfg)
 
             # Every {{variable}} any prompt uses, built in one place. An
@@ -166,16 +167,13 @@ def dial_one(cfg, lead, use_web: bool = False):
 
             with conn.cursor() as cur:
                 cur.execute(
-                    """UPDATE leads SET last_call_id = %s, attempts = attempts + 1,
-                                        updated_at = now()
+                    """UPDATE leads
+                          SET last_call_id = %s, attempts = attempts + 1,
+                              -- stamped ONCE: this is how the daily cap counts
+                              -- new leads without a retry consuming budget
+                              first_dialed_at = COALESCE(first_dialed_at, now()),
+                              updated_at = now()
                         WHERE lead_id = %s""", (call_id, lead['lead_id']))
-                cur.execute(
-                    """UPDATE campaign_leads SET dialed_at = now()
-                        WHERE campaign_date = %s AND lead_id = %s""",
-                    (date, lead['lead_id']))
-                cur.execute(
-                    """UPDATE campaigns SET dialed_count = dialed_count + 1
-                        WHERE campaign_date = %s""", (date,))
             _audit(conn, lead['lead_id'], phone, 'dialed', None, call_id)
             return call_id
 

@@ -12,14 +12,26 @@ import urllib.request
 BREVO_URL = 'https://api.brevo.com/v3/smtp/email'
 
 
-def send(cfg, to: str, subject: str, text: str, timeout: int = 20) -> dict:
-    """Returns {'ok': bool, 'detail': str}. Never raises."""
+def send(cfg, to: str, subject: str, text: str, timeout: int = 20,
+         attachments=None) -> dict:
+    """
+    Returns {'ok': bool, 'detail': str}. Never raises.
+
+    attachments: [(filename, bytes)] - base64'd inline. Used by the weekly
+    suppression backup, which must leave this droplet.
+    """
     payload = {
         'sender': {'email': cfg.DIGEST_FROM, 'name': cfg.DIGEST_FROM_NAME},
         'to': [{'email': to}],
         'subject': subject,
         'textContent': text,
     }
+    if attachments:
+        import base64
+        payload['attachment'] = [
+            {'name': name, 'content': base64.b64encode(blob).decode()}
+            for name, blob in attachments
+        ]
     req = urllib.request.Request(
         BREVO_URL, data=json.dumps(payload).encode(), method='POST',
         headers={'api-key': cfg.BREVO_API_KEY,

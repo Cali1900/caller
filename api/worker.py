@@ -29,7 +29,9 @@ DRAIN_EVERY = 10
 # "try Tuesday" already gave the answer, and making a human re-approve it is
 # how Tuesday gets missed. Rollover is idempotent, so running it on a tick is
 # safe.
-MAINTAIN_EVERY = 300
+# No daily maintenance loop any more. With a STANDING QUEUE there is nothing
+# to enrol and nothing to roll over: a lead that is not reached simply stays
+# queued and comes up again when it is next due.
 # Scoring runs on EVERY call. As a queue drain, not inline in the webhook
 # handler: the webhook drain must stay fast, and a transient LLM outage must
 # not leave calls permanently unscored.
@@ -66,20 +68,6 @@ def _maybe_digest(cfg):
         print(f'[worker] digest FAILED: {r["detail"]}', flush=True)
 
 
-def _maintain(cfg):
-    """Keep today's campaign correct: it exists, yesterday's undialed leads
-    have carried over, and any new callbacks or retries are enrolled."""
-    from api import campaigns
-    campaigns.ensure(cfg)
-    roll = campaigns.rollover(cfg)
-    counts = campaigns.enroll(cfg)
-    if roll['rolled_over'] or counts['callback'] or counts['retry'] or counts['fresh']:
-        print(f'[worker] maintain: rollover={roll} enrol={counts}', flush=True)
-    if roll['flagged']:
-        print(f'[worker] {roll["flagged"]} lead(s) hit the '
-              f'{campaigns.ROLLOVER_FLAG_DAYS}-day rollover flag', flush=True)
-
-
 def _safe(label, fn, *args):
     try:
         return fn(*args)
@@ -92,7 +80,7 @@ def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
-    from api import alerts, campaigns, dialer, drafts, drain, scorer
+    from api import alerts, dialer, drafts, drain, scorer
     from api.config import load_config
 
     # Fail fast and loudly on bad config rather than idling in a loop that
@@ -106,6 +94,10 @@ def main():
     if cfg.DIAL_MODE == 'allowlist' and not cfg.DIAL_ALLOWLIST:
         print('[worker] allowlist is EMPTY - nothing can be dialed. '
               'That is correct, not a bug.', flush=True)
+    from api import settings as _s
+    if not _s.get('dialing_enabled'):
+        print('[worker] dialing is SWITCHED OFF. Nothing will dial until it is '
+              'turned on from /campaign.', flush=True)
 
     import random
     from api import settings as settings_mod
@@ -120,7 +112,6 @@ def main():
     last_drain = 0.0
     last_dial = 0.0
     dial_gap = _next_gap()
-    last_maintain = 0.0
     last_score = 0.0
     last_alert = 0.0
     last_digest = 0.0
@@ -133,10 +124,6 @@ def main():
             n = _safe('drain', drain.drain_once)
             if n:
                 print(f'[worker] drained {n} event(s)', flush=True)
-
-        if now - last_maintain >= MAINTAIN_EVERY:
-            last_maintain = now
-            _safe('maintain', _maintain, cfg)
 
         if now - last_score >= SCORE_EVERY:
             last_score = now

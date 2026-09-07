@@ -74,6 +74,12 @@ services:
       DIGEST_FROM: ${DIGEST_FROM:?DIGEST_FROM not set}
       DIGEST_FROM_NAME: ${DIGEST_FROM_NAME:?DIGEST_FROM_NAME not set}
       SENDER_DOMAIN: ${SENDER_DOMAIN:?SENDER_DOMAIN not set}
+      SPACES_KEY: ${SPACES_KEY:?SPACES_KEY not set}
+      SPACES_SECRET: ${SPACES_SECRET:?SPACES_SECRET not set}
+      SPACES_ENDPOINT: ${SPACES_ENDPOINT:?SPACES_ENDPOINT not set}
+      SPACES_REGION: ${SPACES_REGION:?SPACES_REGION not set}
+      SPACES_BUCKET: ${SPACES_BUCKET:?SPACES_BUCKET not set}
+      SPACES_BACKUP_PREFIX: ${SPACES_BACKUP_PREFIX:?SPACES_BACKUP_PREFIX not set}
     command: >
       uvicorn api.main:app --host 0.0.0.0 --port 4100
     ports:
@@ -117,6 +123,12 @@ services:
       DIGEST_FROM: ${DIGEST_FROM:?DIGEST_FROM not set}
       DIGEST_FROM_NAME: ${DIGEST_FROM_NAME:?DIGEST_FROM_NAME not set}
       SENDER_DOMAIN: ${SENDER_DOMAIN:?SENDER_DOMAIN not set}
+      SPACES_KEY: ${SPACES_KEY:?SPACES_KEY not set}
+      SPACES_SECRET: ${SPACES_SECRET:?SPACES_SECRET not set}
+      SPACES_ENDPOINT: ${SPACES_ENDPOINT:?SPACES_ENDPOINT not set}
+      SPACES_REGION: ${SPACES_REGION:?SPACES_REGION not set}
+      SPACES_BUCKET: ${SPACES_BUCKET:?SPACES_BUCKET not set}
+      SPACES_BACKUP_PREFIX: ${SPACES_BACKUP_PREFIX:?SPACES_BACKUP_PREFIX not set}
     command: python -m api.worker
     healthcheck:
       # The worker touches a heartbeat each loop. Stale heartbeat = unhealthy.
