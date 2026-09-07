@@ -1,0 +1,102 @@
+# Caller — outbound dialer for PI law firms.
+#
+# This file lives in THIS repo, next to the code it runs. One repo, one key.
+#
+# Project name derives from the directory (/root/caller -> "caller"), so it
+# cannot collide with the "legalflow" project on this box.
+#
+# ---------------------------------------------------------------------------
+# HARD RULE: no default-fallback interpolation anywhere in this file. Not once.
+# (i.e. never the dash form of ${VAR...}; always the question-mark form.)
+# Every variable uses ${VAR:?...}. A silent fallback to a stale value is the
+# worst failure shape available - it looks exactly like success. A missing
+# value must stop the stack, loudly, here.
+#
+# HARD RULE: Postgres binds 127.0.0.1 in the FIRST version of this file.
+# Not something to fix later.
+#
+# NOTE on DIAL_ALLOWLIST: it uses ${VAR?...} (no colon) rather than ${VAR:?...}.
+# The colon form treats an EMPTY value as missing, but an empty allowlist is a
+# meaningful, correct state - it dials nothing, which is exactly what dev wants.
+# The no-colon form still has NO default and still fails loudly when the
+# variable is absent; it only permits a deliberate empty value. Every other
+# variable keeps the colon form, because empty is meaningless for all of them.
+# ---------------------------------------------------------------------------
+
+services:
+  caller-postgres:
+    image: postgres:16
+    container_name: caller-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CALLER_DB_NAME:?CALLER_DB_NAME not set}
+      POSTGRES_USER: ${CALLER_DB_USER:?CALLER_DB_USER not set}
+      POSTGRES_PASSWORD: ${CALLER_DB_PASSWORD:?CALLER_DB_PASSWORD not set}
+    volumes:
+      - caller-pgdata:/var/lib/postgresql/data
+    ports:
+      # LOOPBACK ONLY. Never 0.0.0.0.
+      - "127.0.0.1:${CALLER_DB_PORT:?CALLER_DB_PORT not set}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CALLER_DB_USER:?CALLER_DB_USER not set} -d ${CALLER_DB_NAME:?CALLER_DB_NAME not set}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  caller-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: caller-api
+    restart: unless-stopped
+    depends_on:
+      caller-postgres:
+        condition: service_healthy
+    environment:
+      CALLER_DB_HOST: caller-postgres
+      CALLER_DB_PORT: 5432
+      CALLER_DB_NAME: ${CALLER_DB_NAME:?CALLER_DB_NAME not set}
+      CALLER_DB_USER: ${CALLER_DB_USER:?CALLER_DB_USER not set}
+      CALLER_DB_PASSWORD: ${CALLER_DB_PASSWORD:?CALLER_DB_PASSWORD not set}
+      DIAL_MODE: ${DIAL_MODE:?DIAL_MODE not set}
+      DIAL_ALLOWLIST: ${DIAL_ALLOWLIST?DIAL_ALLOWLIST not set - set it empty to allow no numbers}
+    command: >
+      uvicorn api.main:app --host 0.0.0.0 --port 4100
+    ports:
+      # Phase 4 puts the CRM behind an SSH tunnel. Loopback from day one.
+      - "127.0.0.1:${CALLER_API_PORT:?CALLER_API_PORT not set}:4100"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4100/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  caller-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: caller-worker
+    restart: unless-stopped
+    depends_on:
+      caller-postgres:
+        condition: service_healthy
+    environment:
+      CALLER_DB_HOST: caller-postgres
+      CALLER_DB_PORT: 5432
+      CALLER_DB_NAME: ${CALLER_DB_NAME:?CALLER_DB_NAME not set}
+      CALLER_DB_USER: ${CALLER_DB_USER:?CALLER_DB_USER not set}
+      CALLER_DB_PASSWORD: ${CALLER_DB_PASSWORD:?CALLER_DB_PASSWORD not set}
+      DIAL_MODE: ${DIAL_MODE:?DIAL_MODE not set}
+      DIAL_ALLOWLIST: ${DIAL_ALLOWLIST?DIAL_ALLOWLIST not set - set it empty to allow no numbers}
+    command: python -m api.worker
+    healthcheck:
+      # The worker touches a heartbeat each loop. Stale heartbeat = unhealthy.
+      test: ["CMD-SHELL", "python -c \"import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/caller_worker_heartbeat') < 60 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  caller-pgdata:
