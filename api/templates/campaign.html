@@ -33,6 +33,49 @@
   </div>
 
   <div class="card">
+    <h2>Spacing</h2>
+    <p class="dim">Changes take effect on the next tick. No restart.</p>
+    <form method="post" action="/campaign/spacing">
+      <div class="kv">
+        <div>at a time</div><div>
+          <input name="max_concurrent" type="number" min="1" max="10" size="3"
+                 value="{{ settings.max_concurrent }}"></div>
+        <div>gap min (s)</div><div>
+          <input name="dial_interval_min" type="number" min="15" max="3600" size="5"
+                 value="{{ settings.dial_interval_min }}"></div>
+        <div>gap max (s)</div><div>
+          <input name="dial_interval_max" type="number" min="15" max="7200" size="5"
+                 value="{{ settings.dial_interval_max }}"></div>
+      </div>
+      <p><button type="submit">save spacing</button></p>
+    </form>
+    <p class="dim">Random within the range each tick &mdash; a fixed cadence is
+       itself a pattern. Currently about <b>{{ per_hour }}</b> calls/hour, so a
+       cap of {{ c.daily_cap if c else 100 }} spreads over roughly
+       <b>{{ ((c.daily_cap if c else 100) / per_hour)|round(1) if per_hour else '?' }}</b> hours.</p>
+  </div>
+
+  <div class="card">
+    <h2>Calling window</h2>
+    <p class="dim">In the <b>called party's</b> local time. These can only ever
+       NARROW the legal 08:00&ndash;20:30 window, never widen it.</p>
+    <form method="post" action="/campaign/windows">
+      <table>
+      <tr><th>day</th><th>on</th><th>from</th><th>to</th></tr>
+      {% for w in windows %}
+      <tr>
+        <td>{{ days[w.dow] }}</td>
+        <td><input type="checkbox" name="enabled_{{ w.dow }}" {% if w.enabled %}checked{% endif %}></td>
+        <td><input type="time" name="start_{{ w.dow }}" value="{{ w.start_time.strftime('%H:%M') }}"></td>
+        <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td>
+      </tr>
+      {% endfor %}
+      </table>
+      <p><button type="submit">save window</button></p>
+    </form>
+  </div>
+
+  <div class="card">
     <h2>Pool</h2>
     <div class="kv">
       <div>in pool</div><div>{{ pool.pool or 0 }} <span class="dim">uploaded, idle</span></div>

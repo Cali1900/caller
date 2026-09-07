@@ -46,6 +46,8 @@ class Config:
     RETELL_FROM_NUMBER: str
     AGENT_L1: str
     AGENT_L1_VERSION: int
+    AGENT_L3: str
+    AGENT_L3_VERSION: int
     OPERATOR_TIMEZONE: str
 
     ANTHROPIC_API_KEY: str
@@ -54,6 +56,7 @@ class Config:
     DIGEST_TO: str
     DIGEST_FROM: str
     DIGEST_FROM_NAME: str
+    SENDER_DOMAIN: str
 
 
 def parse_allowlist(raw: str | None) -> frozenset:
@@ -80,6 +83,8 @@ def load_config() -> Config:
         RETELL_FROM_NUMBER=_required('RETELL_FROM_NUMBER'),
         AGENT_L1=_required('AGENT_L1'),
         AGENT_L1_VERSION=int(_required('AGENT_L1_VERSION')),
+        AGENT_L3=_required('AGENT_L3'),
+        AGENT_L3_VERSION=int(_required('AGENT_L3_VERSION')),
         OPERATOR_TIMEZONE=_required('OPERATOR_TIMEZONE'),
         ANTHROPIC_API_KEY=_required('ANTHROPIC_API_KEY'),
         SCORER_MODEL=_required('SCORER_MODEL'),
@@ -87,4 +92,9 @@ def load_config() -> Config:
         DIGEST_TO=_required('DIGEST_TO'),
         DIGEST_FROM=_required('DIGEST_FROM'),
         DIGEST_FROM_NAME=_required('DIGEST_FROM_NAME'),
+        # The email sequencer does not exist yet. The value exists FIRST so
+        # the code that reads it can never be written with a literal domain.
+        # counselorai.io now, demandcounselor.com once it is warm: an env
+        # change and a restart, nothing more.
+        SENDER_DOMAIN=_required('SENDER_DOMAIN'),
     )

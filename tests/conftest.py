@@ -125,6 +125,16 @@ def db(test_db, monkeypatch):
                      calls, campaign_leads, campaigns, leads, suppression
             RESTART IDENTITY CASCADE
         """)
+        # dialing_windows and settings are CONFIG, not data - tests mutate them
+        # (disabling weekdays, changing spacing) and nothing reset them, so a
+        # test could pass or fail depending on which ran before it. Restore
+        # both to their seeded state every test.
+        cur.execute("""
+            UPDATE dialing_windows
+               SET enabled = (dow BETWEEN 1 AND 5),
+                   start_time = '09:00', end_time = '17:00'
+        """)
+        cur.execute('TRUNCATE settings')
     conn.commit()
     yield conn
     conn.rollback()

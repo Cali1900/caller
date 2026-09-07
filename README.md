@@ -11,7 +11,122 @@ and the data.
 is not part of CounselorAI and does not share `lf-postgres` — see
 BUILD_BRIEF.md for the three load-bearing reasons.
 
-## Status: PHASE 4 COMPLETE — the CRM
+## Dial spacing and windows — operator-controlled, no deploy
+
+Both live in the `settings` table and the `dialing_windows` table, edited on
+`/campaign`. **Env is only the first-boot seed** — changing an env var needs a
+container recreate, which is a deploy step.
+
+| control | default | why |
+|---|---|---|
+| `max_concurrent` | **1** | THE spacing control. With a batch limit of 10 a single tick could place ten calls 0.2s apart and defeat any interval. |
+| `dial_interval_min/max` | **210–300s** | re-rolled every tick. A fixed cadence is itself a pattern. |
+| `daily_cap` | **100** | first month |
+| weekday windows | Mon–Fri 09:00–17:00 | client-local; can only NARROW the legal 08:00–20:30 window |
+
+The screen shows the consequence, not just the number: at 1 call per ~4 min
+that is **14.1 calls/hour**, so 100 spreads over **~7.1 hours**. Out-of-range
+input is **refused, not clamped** — a typo that halves your spacing should be
+visible.
+
+**The gap is re-armed BEFORE the dial**, so the next call is a fixed
+wall-clock wait from this one regardless of how the last one ended. A busy
+signal cannot pull the next dial forward, and `busy` backs that lead off
+**15 minutes** (not the generic ladder) because a busy means a human is there.
+
+### Timezone spread — decided, not built
+
+Selection today orders by carry-over source then `next_attempt_at`, with **no
+timezone spread**. The exposure is real but the cause is the *window filter*,
+not the sort: at 5am Pacific, East Coast leads are the only rows that pass, so
+they can eat the cap before California opens.
+
+**Decision (2026-09-07): segment the list and load one region per day.** One
+region can absorb the cap (8h window x 14.1/hr = 113 capacity vs 100), so
+proportional selection would buy nothing at this volume, and per-region days
+give *attributable* score comparisons in phase 7 — the same reasoning that
+made us pin the agent version.
+
+Two things to know about that choice: `enroll()` does **not** filter on
+`leads.segment`, so this is zero-code only if you upload one region at a time;
+and carry-overs auto-enrol regardless of region, so days are clean for
+`source='fresh'` but not perfectly clean overall.
+
+## ⚠️ A guard is only tested if the test ISOLATES it
+
+Three times now a guard has been removed and the suite stayed green, because
+some *other* filter already excluded the same row. A test that passes for the
+wrong reason is worse than no test: it reports coverage that does not exist.
+
+| phase | guard | what masked it |
+|---|---|---|
+| 2 | TCPA legal window (08:00–20:30) | the operator preference window (09:00–17:00) is strictly **narrower**, so the legal window never bound. Only observable once the preference is widened. |
+| 2 | campaign started/not-paused SQL gate | `assert_campaign_running()` already refused at dial time, so `run_once()` returned 0 either way. Only observable at **selection**, where the SQL gate stops the lead being *claimed*. |
+| 5 | `REPLIED_GUARD` (`replied_at IS NULL`) | the test used `record_reply()`, which also sets `status='completed'` — and the status filter already excluded it. Only observable when `replied_at` is set while status stays **dialable**. |
+
+**The rule:** to test a guard, construct a row that every *other* filter would
+let through, so the guard under test is the only thing that can exclude it.
+Then remove the guard and watch that specific test go red.
+
+`scripts/break_pass.sh` enforces the second half — it requires the **named
+expected test** to fail, not merely that something did. All three cases above
+were found by that check, not by review.
+
+## Status: PHASE 5 COMPLETE — L2 and L3
+
+```
+L1 cold call  ──confirmed email──▶  L2 you email them  ──"I emailed them"──▶  L3 follow-up
+   agent_f10e…v7                       nothing dials                    agent_934d…v0, +3 days
+```
+
+**L1 → L2 fires only on a CONFIRMED email**, in the same transaction as the
+capture. A lead sitting at L1 with a confirmed email is a state nobody can
+reason about, and an unconfirmed one must never walk the ladder — a wrong
+email is a dead lead that looks live.
+
+**L2 never dials.** At L2 we owe them an email and haven't sent it; calling
+would ask a question we're about to answer ourselves. Enforced in the
+selection query (`STAGE_DIALABLE`), with its own break-pass entry.
+
+**L3 uses the name.** The opener is *"Hi, it's Alex calling back for Sara — I
+sent over a demand letter sample a few days ago."* The prompt carries a KNOWN
+block (firm, contact, title, email, when we emailed) and an explicit **never
+re-ask** section. Its scoring rubric adds `reasked_known_info` as the worst
+fault an L3 call can commit — deduct 4 — because re-asking tells the firm
+nobody listened the first time.
+
+### The seam for the coming email automation
+
+`stages.mark_emailed(lead_id, emailed_by=…)` is the **only** implementation of
+L2 → L3. The button calls it with `operator`; the sequencer from
+demandcounselor.com will call it with `auto:demandcounselor.com`. Two callers,
+one transition — a test asserts the web handler contains no `UPDATE leads`, so
+the automation cannot quietly become a second implementation.
+
+`leads.replied_at` and `dialer.REPLIED_GUARD` are **already in the selection
+query** and nothing sets them yet. A reply must stop the follow-up call dead;
+adding that guard later would mean changing the dialer at the same moment the
+sender arrives. `stages.record_reply()` is the matching writer, waiting.
+
+### ⚠️ A live bug this phase caught — and what it invalidates
+
+The L1 prompt has referenced `{{company}}` since it was written and **the
+dialer never passed it** — Retell leaves an unsupplied variable in the prompt
+text verbatim, so the agent was reasoning about a literal `{{company}}`.
+`retell.dynamic_vars()` now builds the whole variable set in one place, and a
+test parses the shipped L3 prompt and asserts every `{{var}}` it uses is
+supplied.
+
+**⚠️ EVERY CALL BEFORE 2026-09-07 RAN WITH A LITERAL `{{company}}` IN THE
+PROMPT.** The agent did not know which firm it was calling. **The five phase-3
+call scores are therefore PROVISIONAL** — they measure an agent operating
+without the firm's name, which is a different conversation. The **latency**
+numbers stand (prompt size and model are unaffected by an unresolved
+variable), but any conclusion drawn from `agent_score`, `outcome_score` or the
+failure mix on those five calls needs re-measuring on the fixed prompt before
+it is treated as real.
+
+## Phase 4 — the CRM
 
 Four server-rendered screens, no build step, no login. **It lands on the
 leads list**, not a numbers page — open it at 11am and see where each firm

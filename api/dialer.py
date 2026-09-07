@@ -20,7 +20,7 @@ remove exactly one and watch exactly one test go red:
 
 import time
 
-from api import campaigns, db, retell, windows
+from api import campaigns, db, retell, settings as settings_mod, windows
 from api.config import load_config
 from api.guards import (DialRefused, assert_campaign_running, assert_dialable,
                         assert_not_suppressed, assert_under_cap)
@@ -30,6 +30,17 @@ SUPPRESSION_JOIN = (
     'AND NOT EXISTS (SELECT 1 FROM suppression s '
     'WHERE s.phone_e164 = l.phone_e164)'
 )
+
+# L2 NEVER DIALS. At L2 we owe them an email and have not sent it; calling
+# would ask a question we are about to answer ourselves. Isolated as a
+# constant so removing it is a single, visible edit.
+STAGE_DIALABLE = "AND l.stage IN ('L1', 'L3')"
+
+# A REPLY STOPS THE FOLLOW-UP DEAD. Nothing sets replied_at yet - the coming
+# sequencer from demandcounselor.com owns reply detection - but the guard
+# lives in the selection query from the start so the sender slots in without
+# touching the dialer.
+REPLIED_GUARD = "AND l.replied_at IS NULL"
 
 # Nothing dials until a campaign exists, has been STARTed, and is not paused.
 # Uploading leads does not dial. Enrolling them does not dial. Only START.
@@ -44,13 +55,16 @@ CAMPAIGN_JOIN = """
 
 SELECT_DUE = """
     SELECT l.lead_id, l.phone_e164, l.status, l.stage, l.attempts,
-           l.dm_name, l.callback_person, cl.source
+           l.company, l.dm_name, l.dm_title, l.dm_email, l.emailed_at,
+           l.callback_person, cl.source
       FROM leads l
       {campaign}
      WHERE cl.dialed_at IS NULL
        AND l.pool_status = 'active'
        AND l.status IN ('new', 'callback', 'no_answer', 'queued')
        AND l.next_attempt_at <= now()
+       {stage_dialable}
+       {replied_guard}
        {suppression}
        {legal_window}
        {preference_window}
@@ -65,6 +79,8 @@ SELECT_DUE = """
 def _build_select():
     return SELECT_DUE.format(
         campaign=CAMPAIGN_JOIN,
+        stage_dialable=STAGE_DIALABLE,
+        replied_guard=REPLIED_GUARD,
         suppression=SUPPRESSION_JOIN,
         legal_window=windows.LEGAL_WINDOW,
         preference_window=windows.PREFERENCE_WINDOW,
@@ -139,15 +155,13 @@ def dial_one(cfg, lead, use_web: bool = False):
             assert_under_cap(conn, date, lead.get('source', 'fresh'))
             assert_dialable(phone, cfg)
 
-            dynamic = {
-                'lead_id': str(lead['lead_id']),
-                'callback_person': lead.get('callback_person') or '',
-                'dm_name': lead.get('dm_name') or '',
-            }
+            # Every {{variable}} any prompt uses, built in one place. An
+            # unsupplied variable is left in the prompt text verbatim.
+            dynamic = retell.dynamic_vars(lead)
             if use_web:
-                resp = retell.create_web_call(cfg, lead['lead_id'], dynamic)
+                resp = retell.create_web_call(cfg, lead, dynamic)
             else:
-                resp = retell.create_phone_call(cfg, phone, lead['lead_id'], dynamic)
+                resp = retell.create_phone_call(cfg, phone, lead, dynamic)
             call_id = getattr(resp, 'call_id', None)
 
             with conn.cursor() as cur:
@@ -187,11 +201,22 @@ def dial_one(cfg, lead, use_web: bool = False):
         return None
 
 
-def run_once(cfg=None, limit: int = 10) -> int:
+def run_once(cfg=None, limit: int = None) -> int:
+    """
+    One tick. Dials at most `max_concurrent` leads - operator-set, default 1.
+
+    This limit is the real spacing control. The worker's interval governs how
+    often a tick happens; THIS governs how many calls a tick can fire. With a
+    batch limit of 10 a single tick could place ten calls 0.2s apart, which
+    defeats any interval however wide.
+    """
     cfg = cfg or load_config()
+    if limit is None:
+        limit = settings_mod.get('max_concurrent')
     placed = 0
     for lead in select_and_claim(cfg, limit=limit):
         if dial_one(cfg, lead) is not None:
             placed += 1
-        time.sleep(0.2)
+        if placed < limit:
+            time.sleep(0.2)
     return placed

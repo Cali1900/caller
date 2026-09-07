@@ -17,7 +17,14 @@ import traceback
 HEARTBEAT = '/tmp/caller_worker_heartbeat'
 TICK_SECONDS = 5
 DRAIN_EVERY = 10
-DIAL_EVERY = 120
+# DIAL SPACING IS OPERATOR-CONTROLLED, NOT HARDCODED.
+# The interval is re-rolled from settings on EVERY tick, random within
+# [dial_interval_min, dial_interval_max]. A fixed cadence is itself a
+# pattern; jitter is the point, not a nicety.
+#
+# The wait is purely TIME based and is re-armed at the START of a tick, so
+# how the previous call ended - busy, no answer, anything - can never pull
+# the next dial forward. Three busies in a row cannot fire three calls.
 # Carry-overs AUTO-ENROL. Nobody approves a callback: a receptionist who said
 # "try Tuesday" already gave the answer, and making a human re-approve it is
 # how Tuesday gets missed. Rollover is idempotent, so running it on a tick is
@@ -100,8 +107,19 @@ def main():
         print('[worker] allowlist is EMPTY - nothing can be dialed. '
               'That is correct, not a bug.', flush=True)
 
+    import random
+    from api import settings as settings_mod
+
+    def _next_gap():
+        s_ = settings_mod.all_settings()
+        lo, hi = s_['dial_interval_min'], s_['dial_interval_max']
+        if lo > hi:
+            lo, hi = hi, lo
+        return random.uniform(lo, hi)
+
     last_drain = 0.0
     last_dial = 0.0
+    dial_gap = _next_gap()
     last_maintain = 0.0
     last_score = 0.0
     last_alert = 0.0
@@ -137,11 +155,17 @@ def main():
             last_digest = now
             _safe('digest', _maybe_digest, cfg)
 
-        if now - last_dial >= DIAL_EVERY:
+        if now - last_dial >= dial_gap:
+            # Re-arm BEFORE dialing, and re-roll the jitter, so the next dial
+            # is a fixed wall-clock wait from this one no matter what the call
+            # does or how long it takes.
             last_dial = now
             n = _safe('dialer', dialer.run_once, cfg)
+            prev_gap = dial_gap
+            dial_gap = _next_gap()
             if n:
-                print(f'[worker] placed {n} call(s)', flush=True)
+                print(f'[worker] placed {n} call(s) after {prev_gap:.0f}s; '
+                      f'next in ~{dial_gap:.0f}s', flush=True)
 
         with open(HEARTBEAT, 'w') as f:
             f.write(str(time.time()))

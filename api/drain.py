@@ -24,7 +24,7 @@ THE THREE TRAPS, and how this module handles each:
 
 import json
 
-from api import db
+from api import db, stages
 
 # PHASE 2: the retry ladder is per REASON, not a flat escalation.
 # "busy" means someone is there right now - come back soon. "no answer" means
@@ -284,6 +284,20 @@ def _handle_call_analyzed(conn, call: dict) -> None:
     cb_requested = _bool_field(analysis, 'callback_requested')
     cb_when = _field(analysis, 'callback_when')
     cb_person = _field(analysis, 'callback_person')
+    # L3 only: the whole point of the follow-up call. NULL means never asked,
+    # which is different from "no" - phase 6 reads this as one of its gates.
+    saw_email = _bool_field(analysis, 'decision_maker_saw_email')
+    next_step = _field(analysis, 'best_next_step')
+
+    if saw_email is not None or next_step is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE leads
+                      SET dm_saw_email = COALESCE(%s, dm_saw_email),
+                          best_next_step = COALESCE(%s, best_next_step),
+                          updated_at = now()
+                    WHERE lead_id = %s""",
+                (saw_email, next_step, lead_id))
 
     # A NAME IS A WIN even when the call otherwise failed - store it
     # regardless of which branch we take below. That is half the objective,
@@ -368,6 +382,13 @@ def _handle_call_analyzed(conn, call: dict) -> None:
         _activity(conn, lead_id, call_id,
                   f'email captured ({"confirmed" if confirmed else "UNCONFIRMED"})',
                   email)
+        # L1 -> L2 the moment a CONFIRMED email lands, in this same
+        # transaction. The capture and the stage move must commit together:
+        # a lead sitting at L1 with a confirmed email is a state nobody can
+        # reason about, and it would never be picked up for a follow-up.
+        if confirmed:
+            with conn.cursor() as cur:
+                stages.advance_to_l2(cur, lead_id, f'confirmed on call {call_id}')
         return
 
     if name:

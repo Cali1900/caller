@@ -26,7 +26,8 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from api import campaigns, db, digest as digest_mod, upload as upload_mod
+from api import (campaigns, db, digest as digest_mod, settings as settings_mod,
+                 stages, upload as upload_mod)
 from api.config import load_config
 
 router = APIRouter()
@@ -231,6 +232,24 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
     return RedirectResponse(f'/leads/{lead_id}?saved=Saved.', status_code=303)
 
 
+@router.post('/leads/{lead_id}/emailed')
+def lead_emailed(lead_id: str, emailed_by: str = Form('operator')):
+    """
+    "I emailed them" - L2 -> L3, follow-up due in 3 days.
+
+    This handler does NOT contain the transition. stages.mark_emailed() does,
+    because the coming sequencer from demandcounselor.com will call the same
+    function with emailed_by='auto:<domain>'. Two callers, one transition.
+    """
+    row = stages.mark_emailed(lead_id, emailed_by=emailed_by)
+    if row is None:
+        msg = 'Not at L2 - nothing changed. (Already emailed, or no confirmed email yet.)'
+    else:
+        msg = f"Marked emailed. Follow-up call queued for {row['next_attempt_at']:%Y-%m-%d}."
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                            status_code=303)
+
+
 @router.post('/leads/{lead_id}/dnc')
 def lead_dnc(lead_id: str):
     """
@@ -267,6 +286,8 @@ def campaign_page(request: Request, msg: str = ''):
                           (SELECT count(*) FROM suppression)           AS suppressed
                      FROM leads""")
             pool = cur.fetchone()
+            cur.execute('SELECT * FROM dialing_windows ORDER BY dow')
+            windows = cur.fetchall()
             cur.execute(
                 """SELECT cl.source, cl.dialed_at, l.company, l.status, l.lead_id
                      FROM campaign_leads cl JOIN leads l ON l.lead_id = cl.lead_id
@@ -275,10 +296,68 @@ def campaign_page(request: Request, msg: str = ''):
                                             cl.source), l.company LIMIT 300""",
                 (campaigns.campaign_date(cfg),))
             enrolled = cur.fetchall()
+    st = settings_mod.all_settings(force=True)
+    avg = (st['dial_interval_min'] + st['dial_interval_max']) / 2.0
+    per_hour = round(3600.0 / avg * st['max_concurrent'], 1) if avg else 0
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': c, 'pool': pool,
-        'enrolled_rows': enrolled, 'msg': msg,
+        'enrolled_rows': enrolled, 'msg': msg, 'settings': st,
+        'per_hour': per_hour, 'windows': windows, 'days': DAYS,
         'today': campaigns.campaign_date(cfg)})
+
+
+DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+
+@router.post('/campaign/spacing')
+def campaign_spacing(max_concurrent: str = Form(...),
+                     dial_interval_min: str = Form(...),
+                     dial_interval_max: str = Form(...)):
+    """
+    Spacing is the OPERATOR's setting, changed here rather than in env,
+    because an env change needs a container recreate.
+    """
+    r = settings_mod.set_many({'max_concurrent': max_concurrent,
+                               'dial_interval_min': dial_interval_min,
+                               'dial_interval_max': dial_interval_max})
+    if r['ok']:
+        v = r['set']
+        msg = (f"spacing: {v.get('max_concurrent','-')} at a time, "
+               f"{v.get('dial_interval_min','-')}-{v.get('dial_interval_max','-')}s apart "
+               f"(takes effect on the next tick, no restart)")
+    else:
+        msg = 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items())
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
+                            status_code=303)
+
+
+@router.post('/campaign/windows')
+async def campaign_windows(request: Request):
+    """
+    Per-weekday calling window, in the CALLED PARTY's local time.
+
+    These can only ever NARROW the TCPA window - the legal 08:00-20:30 check is
+    ANDed in separately and no value here can widen past it.
+    """
+    form = await request.form()
+    changed = []
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            for dow in range(7):
+                enabled = form.get(f'enabled_{dow}') == 'on'
+                start = (form.get(f'start_{dow}') or '09:00').strip()
+                end = (form.get(f'end_{dow}') or '17:00').strip()
+                cur.execute(
+                    """UPDATE dialing_windows
+                          SET enabled=%s, start_time=%s::time, end_time=%s::time
+                        WHERE dow=%s AND (enabled, start_time, end_time)
+                              IS DISTINCT FROM (%s, %s::time, %s::time)""",
+                    (enabled, start, end, dow, enabled, start, end))
+                if cur.rowcount:
+                    changed.append(DAYS[dow])
+    msg = ('windows updated: ' + ', '.join(changed)) if changed else 'windows unchanged'
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
+                            status_code=303)
 
 
 @router.post('/campaign/action')

@@ -51,42 +51,93 @@ def _client(cfg) -> Retell:
     return Retell(api_key=cfg.RETELL_API_KEY)
 
 
-def create_phone_call(cfg, to_number: str, lead_id, dynamic_vars=None):
+# Which Retell agent runs which stage. L2 is deliberately absent: at L2 we OWE
+# them an email and nothing dials.
+STAGE_AGENTS = {
+    'L1': ('AGENT_L1', 'AGENT_L1_VERSION'),
+    'L3': ('AGENT_L3', 'AGENT_L3_VERSION'),
+}
+
+
+def agent_for(cfg, stage: str):
+    """(agent_id, version) for a stage. Raises for a stage that must not dial."""
+    try:
+        aid, ver = STAGE_AGENTS[stage]
+    except KeyError:
+        raise ValueError(f'no dialing agent for stage {stage!r} - refusing')
+    return getattr(cfg, aid), getattr(cfg, ver)
+
+
+def dynamic_vars(lead) -> dict:
     """
-    Place an outbound call. Returns the Retell call object.
+    Every {{variable}} any prompt references, as STRINGS.
+
+    Retell substitutes these into the prompt; an unsupplied variable is left
+    in the text, so the agent reads "{{company}}" aloud or reasons about a
+    literal placeholder. The L1 prompt has referenced {{company}} since it was
+    written and we never passed it - caught 2026-09-07. Build the whole set
+    here, once, so a prompt edit cannot silently outrun the dialer.
+    """
+    name = (lead.get('dm_name') or '').strip()
+    title = (lead.get('dm_title') or '').strip()
+    emailed = lead.get('emailed_at')
+    return {
+        'company': (lead.get('company') or 'the firm').strip(),
+        'dm_name': name,
+        'dm_title': title,
+        # renders as ", Intake Manager" or "" so the prompt reads naturally
+        'dm_title_suffix': f', {title}' if title else '',
+        'dm_email': (lead.get('dm_email') or '').strip(),
+        'emailed_when': emailed.strftime('%A') if emailed else 'a few days ago',
+        'callback_person': (lead.get('callback_person') or '').strip(),
+        'lead_id': str(lead.get('lead_id') or ''),
+    }
+
+
+def create_phone_call(cfg, to_number: str, lead, dynamic=None):
+    """
+    Place an outbound call, using the agent for the LEAD'S STAGE.
 
     The caller MUST have passed the dial guard before reaching this function.
     Nothing in here re-checks the allowlist - that is the dialer's job, and
     keeping it there means there is exactly one place the guard can be
     bypassed rather than two.
     """
+    stage = lead.get('stage') or 'L1'
+    agent_id, agent_version = agent_for(cfg, stage)
+    lead_id = lead.get('lead_id')
     resp = _client(cfg).call.create_phone_call(
         from_number=cfg.RETELL_FROM_NUMBER,
         to_number=to_number,
-        override_agent_id=cfg.AGENT_L1,
+        override_agent_id=agent_id,
         # PIN THE VERSION. Retell can report more than one agent version as
         # published at once, which leaves "which prompt did this call run"
         # ambiguous - and an unpublished version carrying the webhook_url
         # means a call happens and NO events are ever delivered, which reads
         # as a broken drain rather than a missing webhook. Naming the version
         # removes the guess, and calls.prompt_version records what ran.
-        override_agent_version=cfg.AGENT_L1_VERSION,
+        override_agent_version=agent_version,
         # metadata is how the drain finds the lead. Matching on
         # leads.last_call_id alone breaks the moment a lead is re-dialed
         # before its previous webhooks have drained.
-        metadata={'lead_id': str(lead_id)},
-        retell_llm_dynamic_variables=dynamic_vars or {},
+        metadata={'lead_id': str(lead_id), 'stage': stage},
+        retell_llm_dynamic_variables=dynamic if dynamic is not None
+                                     else dynamic_vars(lead),
     )
     return resp
 
 
-def create_web_call(cfg, lead_id, dynamic_vars=None):
+def create_web_call(cfg, lead, dynamic=None):
     """Browser call. No telephony, no risk - this is rollout step 1."""
+    if not isinstance(lead, dict):          # tolerate a bare lead_id
+        lead = {'lead_id': lead, 'stage': 'L1'}
+    agent_id, agent_version = agent_for(cfg, lead.get('stage') or 'L1')
     return _client(cfg).call.create_web_call(
-        agent_id=cfg.AGENT_L1,
-        agent_version=cfg.AGENT_L1_VERSION,
-        metadata={'lead_id': str(lead_id)},
-        retell_llm_dynamic_variables=dynamic_vars or {},
+        agent_id=agent_id,
+        agent_version=agent_version,
+        metadata={'lead_id': str(lead.get('lead_id')), 'stage': lead.get('stage')},
+        retell_llm_dynamic_variables=dynamic if dynamic is not None
+                                     else dynamic_vars(lead),
     )
 
 

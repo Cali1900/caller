@@ -37,7 +37,9 @@ WHAT_HAPPENED = [
     'demo_agreed', 'demo_declined', 'transferred', 'other',
 ]
 DEDUCTIONS = ['rambled', 'no_email_ask', 'no_spellback', 'talked_over',
-              'sounded_salesy', 'no_disclosure', 'repeated_the_same_ask']
+              'sounded_salesy', 'no_disclosure', 'repeated_the_same_ask',
+              # L3 only
+              'reasked_known_info', 'no_name_in_opener', 'pitched']
 NEXT_MOVE = ['retry', 'email_path', 'drop', 'human_review']
 WE_GOT = ['name', 'email', 'callback', 'title', 'nothing']
 
@@ -63,6 +65,32 @@ SCHEMA = {
                  'next_move', 'needs_human'],
     'additionalProperties': False,
 }
+
+L3_RUBRIC = """
+THIS IS AN L3 FOLLOW-UP CALL, NOT A COLD CALL. Score it against a different
+bar. We already have the name and the email from an earlier call, and we have
+since emailed them. The agent's only job on THIS call is to find out whether
+the decision maker actually saw that email, and if so whether there is a good
+time to talk.
+
+outcome_score (0-10) for L3:
+  10  confirmed they saw it AND got a specific time to reach the decision maker
+   7  confirmed they saw it, no time yet
+   5  did not see it, but agreed we should resend / got a better address
+   3  callback time only
+   1  reached a human, learned nothing
+   0  no human reached
+
+agent_score for L3 - START AT 10 and deduct the shared faults, PLUS these,
+which matter more here than on a cold call:
+  reasked_known_info   asked for the name or the email we already have. This
+                       is the worst fault an L3 call can commit: it tells the
+                       firm nobody was listening the first time. Deduct 4.
+  no_name_in_opener    opened without using the contact's name when we had one
+  pitched              turned a check-in into a pitch
+
+A polite, brief L3 call that learns "he never saw it" is a GOOD call
+(high agent_score) with a middling outcome_score. Score it that way."""
 
 SYSTEM = """You score outbound calls for a service that phones personal-injury
 law firms and asks the front desk one question: who handles their demand
@@ -155,7 +183,11 @@ def build_prompt(row) -> str:
         f"Stage: {row.get('stage')}\n"
         f"Duration: {round((row.get('duration_ms') or 0)/1000)}s\n"
         f"Disconnection reason: {row.get('disconnection_reason')}\n"
-        f"Fields the voice platform extracted: {json.dumps(extracted or {})}\n\n"
+        f"Fields the voice platform extracted: {json.dumps(extracted or {})}\n"
+        + (f"ALREADY KNOWN BEFORE THIS CALL (asking for any of it again is "
+           f"reasked_known_info): name={row.get('dm_name')!r} "
+           f"email={row.get('dm_email')!r}\n" if row.get('stage') == 'L3' else '')
+        + "\n"
         f"TRANSCRIPT\n----------\n{row.get('transcript') or '(no transcript - the call never connected)'}\n"
     )
 
@@ -184,7 +216,9 @@ def score_call(cfg, call_id: str) -> dict:
         thinking={'type': 'adaptive'},
         output_config={'effort': 'low',
                        'format': {'type': 'json_schema', 'schema': SCHEMA}},
-        system=SYSTEM,
+        # The L3 bar is different: re-asking something we already know is the
+        # worst fault on a follow-up and barely registers on a cold call.
+        system=SYSTEM + (L3_RUBRIC if row.get('stage') == 'L3' else ''),
         messages=[{'role': 'user', 'content': build_prompt(row)}],
     )
     if resp.stop_reason == 'refusal':
