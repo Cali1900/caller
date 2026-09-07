@@ -11,7 +11,40 @@ and the data.
 is not part of CounselorAI and does not share `lf-postgres` — see
 BUILD_BRIEF.md for the three load-bearing reasons.
 
-## Status: PHASE 1 built — still nothing can dial
+## Status: PHASE 1 COMPLETE — verified end to end on a real call
+
+`dialed -> call_ended -> call_analyzed -> lead row` proven on 2026-09-07 with
+`dm_name`, `dm_email` and **`dm_email_confirmed = TRUE`** captured off a real
+spellback. Replay is idempotent, unsigned POSTs 401, break pass red on four
+guards. `DIAL_ALLOWLIST` still contains one number.
+
+## Measured latency — the model is the lever, not the prompt
+
+Four real calls, one variable at a time. p50, ms:
+
+| version | model | prompt | e2e | llm | tts |
+|---|---|---|---|---|---|
+| v1 | claude-5-sonnet | 5,338 ch | 2592 | 2201 | 165 |
+| v2 | claude-5-sonnet | 3,368 ch | 2325 | 2040 | 132 |
+| v3 | claude-5-sonnet | 8,047 ch | 3179 | 2836 | 212 |
+| **v4** | **gpt-4.1** | **8,047 ch** | **792** | **508** | **139** |
+
+**v3 vs v4 is a controlled test — identical prompt, identical voice and
+endpointing settings, only the model differs: llm p50 2836 -> 508, a 82%
+drop.** Prompt length is real but second order: within one model, trimming
+5,338 -> 3,368 chars bought only 161 ms, and the cost per char roughly doubles
+as the prompt grows (0.082 ms/char at 3-5k, 0.170 ms/char at 8k). The longest
+prompt on the fast model still beat the shortest prompt on the slow one by
+1,500 ms.
+
+TTS (132-212 ms) and ASR (125-181 ms) never mattered. `responsiveness` was
+already at ceiling, so endpointing was never the cause either.
+
+Anything recorded in `prompt_versions` (phase 3) must carry the **model** as
+well as the prompt text, or a score change after a swap like this is
+unattributable.
+
+## (superseded) Phase 1 build notes — still nothing can dial
 
 Retell client, webhook inbox, drain and dialer are in and tested.
 `DIAL_ALLOWLIST` is **empty**, so no number can be dialed.
