@@ -70,14 +70,8 @@ def test_unrestricted_permits():
 
 # --- config: absent vs empty is a deliberate asymmetry --------------------
 
-def test_absent_dial_mode_defaults_to_allowlist(monkeypatch):
+def test_absent_dial_mode_defaults_to_allowlist(base_env):
     """Absent -> allowlist. A misconfigured box is inert, not loose."""
-    monkeypatch.delenv('DIAL_MODE', raising=False)
-    for k, v in [('CALLER_DB_HOST', 'h'), ('CALLER_DB_PORT', '5432'),
-                 ('CALLER_DB_NAME', 'n'), ('CALLER_DB_USER', 'u'),
-                 ('CALLER_DB_PASSWORD', 'p')]:
-        monkeypatch.setenv(k, v)
-    monkeypatch.delenv('DIAL_ALLOWLIST', raising=False)
     from api.config import load_config
     cfg = load_config()
     assert cfg.DIAL_MODE == 'allowlist'
@@ -87,13 +81,9 @@ def test_absent_dial_mode_defaults_to_allowlist(monkeypatch):
         assert_dialable(MINE, cfg)
 
 
-def test_empty_dial_mode_is_garbage_not_a_default(monkeypatch):
+def test_empty_dial_mode_is_garbage_not_a_default(base_env):
     """EMPTY is not ABSENT. Empty stays empty and the guard refuses it."""
-    monkeypatch.setenv('DIAL_MODE', '')
-    for k, v in [('CALLER_DB_HOST', 'h'), ('CALLER_DB_PORT', '5432'),
-                 ('CALLER_DB_NAME', 'n'), ('CALLER_DB_USER', 'u'),
-                 ('CALLER_DB_PASSWORD', 'p')]:
-        monkeypatch.setenv(k, v)
+    base_env.setenv('DIAL_MODE', '')
     from api.config import load_config
     cfg = load_config()
     assert cfg.DIAL_MODE == ''
@@ -111,10 +101,18 @@ def test_parse_allowlist():
 
 # --- required config raises rather than defaulting ------------------------
 
-def test_missing_db_setting_raises(monkeypatch):
+def test_missing_db_setting_raises(base_env):
     from api.config import ConfigError, load_config
     for k in ('CALLER_DB_HOST', 'CALLER_DB_PORT', 'CALLER_DB_NAME',
               'CALLER_DB_USER', 'CALLER_DB_PASSWORD'):
-        monkeypatch.delenv(k, raising=False)
+        base_env.delenv(k, raising=False)
+    with pytest.raises(ConfigError):
+        load_config()
+
+
+def test_missing_retell_setting_raises(base_env):
+    """Retell credentials are required too - no quiet default."""
+    from api.config import ConfigError, load_config
+    base_env.delenv('RETELL_API_KEY', raising=False)
     with pytest.raises(ConfigError):
         load_config()

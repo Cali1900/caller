@@ -60,6 +60,9 @@ services:
       CALLER_DB_PASSWORD: ${CALLER_DB_PASSWORD:?CALLER_DB_PASSWORD not set}
       DIAL_MODE: ${DIAL_MODE:?DIAL_MODE not set}
       DIAL_ALLOWLIST: ${DIAL_ALLOWLIST?DIAL_ALLOWLIST not set - set it empty to allow no numbers}
+      RETELL_API_KEY: ${RETELL_API_KEY:?RETELL_API_KEY not set}
+      RETELL_FROM_NUMBER: ${RETELL_FROM_NUMBER:?RETELL_FROM_NUMBER not set}
+      AGENT_L1: ${AGENT_L1:?AGENT_L1 not set}
     command: >
       uvicorn api.main:app --host 0.0.0.0 --port 4100
     ports:
@@ -89,6 +92,9 @@ services:
       CALLER_DB_PASSWORD: ${CALLER_DB_PASSWORD:?CALLER_DB_PASSWORD not set}
       DIAL_MODE: ${DIAL_MODE:?DIAL_MODE not set}
       DIAL_ALLOWLIST: ${DIAL_ALLOWLIST?DIAL_ALLOWLIST not set - set it empty to allow no numbers}
+      RETELL_API_KEY: ${RETELL_API_KEY:?RETELL_API_KEY not set}
+      RETELL_FROM_NUMBER: ${RETELL_FROM_NUMBER:?RETELL_FROM_NUMBER not set}
+      AGENT_L1: ${AGENT_L1:?AGENT_L1 not set}
     command: python -m api.worker
     healthcheck:
       # The worker touches a heartbeat each loop. Stale heartbeat = unhealthy.

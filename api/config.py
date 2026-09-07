@@ -42,6 +42,10 @@ class Config:
     DIAL_MODE: str
     DIAL_ALLOWLIST: frozenset
 
+    RETELL_API_KEY: str
+    RETELL_FROM_NUMBER: str
+    AGENT_L1: str
+
 
 def parse_allowlist(raw: str | None) -> frozenset:
     """Comma-separated E.164. Empty means empty, which dials nothing."""
@@ -63,4 +67,7 @@ def load_config() -> Config:
         DB_PASSWORD=_required('CALLER_DB_PASSWORD'),
         DIAL_MODE=mode,
         DIAL_ALLOWLIST=parse_allowlist(os.getenv('DIAL_ALLOWLIST')),
+        RETELL_API_KEY=_required('RETELL_API_KEY'),
+        RETELL_FROM_NUMBER=_required('RETELL_FROM_NUMBER'),
+        AGENT_L1=_required('AGENT_L1'),
     )

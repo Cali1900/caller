@@ -1,16 +1,19 @@
 """
 Caller API.
 
-Phase 0: health only. The webhook route arrives in phase 1 - it is the ONE
-public route this service will ever expose, and it will do a single insert
-and return 200.
+Phase 1: health + the Retell webhook. The webhook is the ONE public route
+this service exposes; it does a single insert and returns 200.
 """
 
 from fastapi import FastAPI
 
-from api import db
+from api import db, webhooks
 
 app = FastAPI(title='caller', docs_url=None, redoc_url=None)
+
+# The only public route. Everything else in this service is reachable through
+# an SSH tunnel only (phase 4).
+app.include_router(webhooks.router)
 
 
 @app.get('/health')
