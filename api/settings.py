@@ -18,6 +18,13 @@ SPEC = {
     'max_concurrent':    (1,   int, 'calls in flight at once', 1, 10),
     'dial_interval_min': (210, int, 'min seconds between dials', 15, 3600),
     'dial_interval_max': (300, int, 'max seconds between dials', 15, 7200),
+    # Sender identity lives here, not in env: counselorai.io now,
+    # demandcounselor.com once warm, and that must be a field the operator
+    # edits rather than a container recreate.
+    'sender_email': ('sean@counselorai.io', str, 'from address', None, None),
+    'sender_name':  ('Sean',                str, 'from name', None, None),
+    'sender_company_line': ('CounselorAI LLC · [ADDRESS TBD]', str,
+                           'footer line', None, None),
 }
 
 _cache = {'at': 0.0, 'values': None}
@@ -60,8 +67,14 @@ def set_many(pairs: dict, updated_by: str = 'operator') -> dict:
         try:
             v = cast(raw)
         except (TypeError, ValueError):
-            errors[k] = f'not a number'; continue
-        if not (lo <= v <= hi):
+            errors[k] = 'not a number'; continue
+        if cast is str:
+            v = v.strip()
+            if not v:
+                errors[k] = 'cannot be blank'; continue
+            if k == 'sender_email' and ('@' not in v or '.' not in v.split('@')[-1]):
+                errors[k] = 'not an email address'; continue
+        elif not (lo <= v <= hi):
             errors[k] = f'must be between {lo} and {hi}'; continue
         clean[k] = v
 

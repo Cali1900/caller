@@ -16,9 +16,12 @@ import io
 import re
 from zoneinfo import ZoneInfo, available_timezones
 
-from api import db
+from api import db, timezones
 
-REQUIRED = ('company', 'phone', 'timezone')
+# timezone is NOT required: it is derived from state when absent. An explicit
+# timezone column still WINS - it is the authoritative override.
+REQUIRED = ('company', 'phone')
+NEEDS_ONE_OF = ('timezone', 'state')
 OPTIONAL = ('city', 'state', 'segment', 'external_ref')
 
 _ZONES = available_timezones()
@@ -73,6 +76,10 @@ def parse_csv(text: str):
     missing = [c for c in REQUIRED if c not in headers]
     if missing:
         return [], [{'line': 0, 'reason': f'missing required column(s): {missing}'}]
+    if not any(c in headers for c in NEEDS_ONE_OF):
+        return [], [{'line': 0,
+                     'reason': 'need a timezone column or a state column '
+                               '(state is mapped to IANA; timezone overrides)'}]
 
     ok, rejects = [], []
     for i, raw in enumerate(reader, start=2):      # line 1 is the header
@@ -80,16 +87,33 @@ def parse_csv(text: str):
                for k, v in raw.items() if k}
         company = row.get('company', '')
         phone = normalize_phone(row.get('phone', ''))
-        tz = validate_timezone(row.get('timezone', ''))
+        raw_tz = row.get('timezone', '')
+        state = row.get('state', '')
 
         if not company:
             rejects.append({'line': i, 'reason': 'blank company'}); continue
         if phone is None:
             rejects.append({'line': i, 'reason': f'unparseable phone {row.get("phone","")!r}'}); continue
-        if tz is None:
-            rejects.append({'line': i, 'reason': f'invalid IANA timezone {row.get("timezone","")!r}'}); continue
+
+        # An explicit timezone is authoritative. Only derive when absent.
+        if raw_tz:
+            tz = validate_timezone(raw_tz)
+            if tz is None:
+                rejects.append({'line': i,
+                                'reason': f'invalid IANA timezone {raw_tz!r}'}); continue
+            tz_source, needs_review = 'csv', False
+        elif state:
+            tz, tz_source, needs_review = timezones.for_state(state)
+            if tz_source == 'default':
+                rejects.append({'line': i,
+                                'reason': f'unrecognised state {state!r} - '
+                                          f'add a timezone column for this row'}); continue
+        else:
+            rejects.append({'line': i,
+                            'reason': 'no timezone and no state'}); continue
 
         ok.append({'company': company, 'phone_e164': phone, 'timezone': tz,
+                   'tz_source': tz_source, 'tz_needs_review': needs_review,
                    **{k: (row.get(k) or None) for k in OPTIONAL}})
     return ok, rejects
 
@@ -109,10 +133,12 @@ def upload(text: str):
                 cur.execute(
                     """INSERT INTO leads (company, phone_e164, timezone, city,
                                           state, segment, external_ref,
+                                          tz_source, tz_needs_review,
                                           pool_status, status)
                        VALUES (%(company)s, %(phone_e164)s, %(timezone)s, %(city)s,
                                %(state)s, COALESCE(%(segment)s,'default'),
-                               %(external_ref)s, 'pool', 'new')
+                               %(external_ref)s, %(tz_source)s,
+                               %(tz_needs_review)s, 'pool', 'new')
                        ON CONFLICT (phone_e164) DO NOTHING""",
                     r)
                 if cur.rowcount:
@@ -122,6 +148,8 @@ def upload(text: str):
                            SELECT lead_id, 'uploaded', 'added to pool', %s
                              FROM leads WHERE phone_e164 = %s""",
                         (r['company'], r['phone_e164']))
+    flagged = sum(1 for r in rows if r.get('tz_needs_review'))
     return {'parsed': len(rows), 'inserted': inserted,
             'duplicates': len(rows) - inserted,
-            'rejected': len(rejects), 'rejects': rejects[:50]}
+            'rejected': len(rejects), 'rejects': rejects[:50],
+            'timezone_needs_review': flagged}

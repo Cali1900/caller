@@ -286,6 +286,16 @@ def _handle_call_analyzed(conn, call: dict) -> None:
     cb_person = _field(analysis, 'callback_person')
     # L3 only: the whole point of the follow-up call. NULL means never asked,
     # which is different from "no" - phase 6 reads this as one of its gates.
+    # Her own name, if she offered it. NEVER a required ask - it exists so the
+    # follow-up email can reference the call instead of reading as cold
+    # outreach, which is the whole value of having made the call.
+    gatekeeper = _field(analysis, 'gatekeeper_name')
+    if gatekeeper:
+        with conn.cursor() as cur:
+            cur.execute(
+                'UPDATE leads SET gatekeeper_name = COALESCE(%s, gatekeeper_name),'
+                ' updated_at = now() WHERE lead_id = %s', (gatekeeper, lead_id))
+
     saw_email = _bool_field(analysis, 'decision_maker_saw_email')
     next_step = _field(analysis, 'best_next_step')
 

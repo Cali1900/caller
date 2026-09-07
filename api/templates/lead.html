@@ -80,6 +80,44 @@
   </div>
 </div>
 
+<div class="card" id="draft">
+  <h2>Draft follow-up email &mdash; NOT SENT</h2>
+  {% if draft %}
+    <p class="dim">Generated {{ draft.generated_at.strftime('%Y-%m-%d %H:%M') }}
+      {% if draft.edited_at %} &middot; edited {{ draft.edited_at.strftime('%Y-%m-%d %H:%M') }} by {{ draft.edited_by }}{% endif %}
+      &middot; variant <b>{{ draft.variant }}</b>
+      {% if draft.variant == 'without_name' %}<span class="dim">(no gatekeeper name captured)</span>{% endif %}
+    </p>
+    <form method="post" action="/leads/{{ lead.lead_id }}/draft/save">
+      <div class="kv">
+        <div>to</div><div>{{ draft.to_email }}</div>
+        <div>subject</div><div><input name="subject" value="{{ draft.subject }}" size="60"></div>
+      </div>
+      <textarea name="body" rows="22" style="width:100%;margin-top:8px">{{ draft.body }}</textarea>
+      <p>
+        <button type="submit">save draft</button>
+      </p>
+    </form>
+    <form class="inline" method="post" action="/leads/{{ lead.lead_id }}/draft/regenerate"
+          onsubmit="return confirm('Regenerate from the template? Your edits will be lost.')">
+      <button type="submit">regenerate</button>
+    </form>
+    {% if lead.stage == 'L2' %}
+      <form class="inline" method="post" action="/leads/{{ lead.lead_id }}/emailed">
+        <input type="hidden" name="emailed_by" value="operator">
+        <button type="submit">mark as sent</button>
+      </form>
+      <span class="dim">&mdash; you send it from your own mail client; this only
+        records that you did, and queues the L3 follow-up call in 3 days</span>
+    {% endif %}
+    <p class="dim">Nothing in this system sends email. Copy it out, send it
+       yourself, then mark it sent.</p>
+  {% else %}
+    <p class="dim">No draft. One is written automatically once a
+       <b>confirmed</b> email is captured.</p>
+  {% endif %}
+</div>
+
 <h2>Activity &mdash; {{ timeline|length }} events</h2>
 <div class="timeline">
 {% for t in timeline %}

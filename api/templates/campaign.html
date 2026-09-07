@@ -56,6 +56,20 @@
   </div>
 
   <div class="card">
+    <h2>Sender</h2>
+    <p class="dim">Used in the draft emails. Change the domain here when
+       demandcounselor.com is warm &mdash; no restart.</p>
+    <form method="post" action="/campaign/sender">
+      <div class="kv">
+        <div>from address</div><div><input name="sender_email" size="30" value="{{ settings.sender_email }}"></div>
+        <div>from name</div><div><input name="sender_name" size="20" value="{{ settings.sender_name }}"></div>
+        <div>footer line</div><div><input name="sender_company_line" size="34" value="{{ settings.sender_company_line }}"></div>
+      </div>
+      <p><button type="submit">save sender</button></p>
+    </form>
+  </div>
+
+  <div class="card">
     <h2>Calling window</h2>
     <p class="dim">In the <b>called party's</b> local time. These can only ever
        NARROW the legal 08:00&ndash;20:30 window, never widen it.</p>

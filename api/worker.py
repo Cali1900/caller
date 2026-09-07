@@ -92,7 +92,7 @@ def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
-    from api import alerts, campaigns, dialer, drain, scorer
+    from api import alerts, campaigns, dialer, drafts, drain, scorer
     from api.config import load_config
 
     # Fail fast and loudly on bad config rather than idling in a loop that
@@ -143,6 +143,11 @@ def main():
             r = _safe('scorer', scorer.score_pending, cfg)
             if r and (r['scored'] or r['failed']):
                 print(f'[worker] scored {r["scored"]}, failed {r["failed"]}', flush=True)
+            # Drafts are GENERATED here and never sent. Same tick as scoring
+            # because both are post-call work that must not touch the dialer.
+            d = _safe('drafts', drafts.generate_pending)
+            if d and d['drafted']:
+                print(f'[worker] drafted {d["drafted"]} email(s) - NOT sent', flush=True)
 
         if now - last_alert >= ALERT_EVERY:
             last_alert = now

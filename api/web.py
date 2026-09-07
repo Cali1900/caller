@@ -26,8 +26,8 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from api import (campaigns, db, digest as digest_mod, settings as settings_mod,
-                 stages, upload as upload_mod)
+from api import (campaigns, db, digest as digest_mod, drafts as drafts_mod,
+                 settings as settings_mod, stages, upload as upload_mod)
 from api.config import load_config
 
 router = APIRouter()
@@ -154,6 +154,8 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
             cur.execute('SELECT * FROM suppression WHERE phone_e164 = %s',
                         (lead['phone_e164'],))
             suppressed = cur.fetchone()
+            cur.execute('SELECT * FROM email_drafts WHERE lead_id = %s', (lead_id,))
+            draft = cur.fetchone()
 
             # Every call, with both scores and what they actually said.
             cur.execute(
@@ -203,7 +205,8 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         local = '?'
     return templates.TemplateResponse(request, 'lead.html', {
         'hdr': hdr, 'lead': lead, 'timeline': timeline,
-        'suppressed': suppressed, 'local_time': local, 'saved': saved})
+        'suppressed': suppressed, 'local_time': local, 'saved': saved,
+        'draft': draft})
 
 
 @router.post('/leads/{lead_id}/edit')
@@ -230,6 +233,22 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
                        VALUES (%s,'note','contact edited by hand',%s)""",
                     (lead_id, f'email {old or "(none)"} -> {dm_email.strip() or "(none)"}'))
     return RedirectResponse(f'/leads/{lead_id}?saved=Saved.', status_code=303)
+
+
+@router.post('/leads/{lead_id}/draft/save')
+def draft_save(lead_id: str, subject: str = Form(...), body: str = Form(...)):
+    ok = drafts_mod.save_edit(lead_id, subject, body)
+    msg = 'Draft saved.' if ok else 'No draft to save.'
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}#draft',
+                            status_code=303)
+
+
+@router.post('/leads/{lead_id}/draft/regenerate')
+def draft_regenerate(lead_id: str):
+    d = drafts_mod.generate_for(lead_id, force=True)
+    msg = 'Draft regenerated from the template.' if d else 'Could not generate (needs a confirmed email).'
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}#draft',
+                            status_code=303)
 
 
 @router.post('/leads/{lead_id}/emailed')
@@ -327,6 +346,22 @@ def campaign_spacing(max_concurrent: str = Form(...),
                f"(takes effect on the next tick, no restart)")
     else:
         msg = 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items())
+    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
+                            status_code=303)
+
+
+@router.post('/campaign/sender')
+def campaign_sender(sender_email: str = Form(...), sender_name: str = Form(...),
+                    sender_company_line: str = Form(...)):
+    """
+    From-address is a FIELD, not an env var: counselorai.io now,
+    demandcounselor.com once warm, and that switch should not be a deploy.
+    """
+    r = settings_mod.set_many({'sender_email': sender_email,
+                               'sender_name': sender_name,
+                               'sender_company_line': sender_company_line})
+    msg = (f"sender set to {r['set'].get('sender_email','')}" if r['ok']
+           else 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items()))
     return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
                             status_code=303)
 
