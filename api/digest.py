@@ -98,6 +98,27 @@ def _deductions(conn, date, tz):
         return cur.fetchall()
 
 
+def _rules(conn, date, tz):
+    """
+    Named rules from the AGENT'S OWN PROMPT that were broken today.
+
+    Separate from deductions on purpose. A deduction is a generic fault
+    ("repeated the same ask"); a broken rule is the prompt's OWN rule, by its
+    own name. The difference tells you which fix applies: an unnamed fault
+    means the prompt needs the rule, a named one means the model is ignoring a
+    rule that is already there.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT r AS rule, count(*) AS n
+              FROM call_scores s
+              JOIN calls c ON c.call_id = s.call_id
+              CROSS JOIN LATERAL unnest(s.rules_violated) AS r
+             WHERE (c.created_at AT TIME ZONE %s)::date = %s::date
+             GROUP BY r ORDER BY n DESC, r""", (tz, date))
+        return cur.fetchall()
+
+
 def _flagged(conn, date, tz):
     with conn.cursor() as cur:
         cur.execute(
@@ -124,6 +145,7 @@ def build(cfg, date=None):
         wins = _wins(conn, date, tz)
         deds = _deductions(conn, date, tz)
         flagged = _flagged(conn, date, tz)
+        rules = _rules(conn, date, tz)
         quotes = {f['what_happened']: _quotes(conn, date, tz, f['what_happened'])
                   for f in fails}
 
@@ -168,6 +190,16 @@ def build(cfg, date=None):
         for d in deds:
             L.append(f"    {d['deduction']:<24} {d['n']} call"
                      f"{'' if d['n'] == 1 else 's'}")
+        L.append("")
+
+    if rules:
+        L.append("PROMPT RULES BROKEN")
+        L.append("  (named rules from the agent's own prompt - a rule that is"
+                 " NOT here")
+        L.append("   was either kept or does not exist in the prompt at all)")
+        for r in rules:
+            L.append(f"    {r['rule']:<34} {r['n']} call"
+                     f"{'' if r['n'] == 1 else 's'}")
         L.append("")
 
     if flagged:

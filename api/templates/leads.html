@@ -78,6 +78,7 @@
     <input type="checkbox" id="selall"></th>
   <th>Firm</th><th>Campaign</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
   <th>Contact</th><th>Email</th><th>Follow-up</th><th class="right">Calls</th>
+  <th class="right">Emails</th><th>Last email</th>
   <th class="right">Agent</th><th class="right">Outcome</th><th>Last said</th><th>Last call</th></tr>
 {% for l in leads %}
 <tr>
@@ -102,17 +103,19 @@
       {% elif l.email_state == 'clicked' %}<span class="es clicked">clicked{% if l.first_minutes is not none %}
         · {{ l.first_minutes }}m after send{% endif %}</span>{% if l.clicks > 1 %}
         <span class="dim">×{{ l.clicks }}</span>{% endif %}
-      {% elif l.email_state == 'sent' %}<span class="es sent">sent {{ l.emailed_at.strftime('%b %-d') if l.emailed_at else '' }}</span>
+      {% elif l.email_state == 'sent' %}<span class="es sent">sent {{ l.emailed_at | ago }}</span>
       {% elif l.email_state == 'draft_ready' %}<span class="es ready">draft ready</span>
       {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
   <td class="right dim">{{ l.call_count or 0 }}</td>
+  <td class="right dim">{{ l.email_count or 0 }}</td>
+  <td class="dim">{{ l.last_email_at.strftime('%b %d %H:%M') if l.last_email_at else '' }}</td>
   <td class="right"><span class="score {{ l.agent_class }}">{{ l.last_agent if l.last_agent is not none else '' }}</span></td>
   <td class="right"><span class="score {{ l.outcome_class }}">{{ l.last_outcome_score if l.last_outcome_score is not none else '' }}</span></td>
   <td class="dim"><span class="quote-cell">{% if l.their_words %}&ldquo;{{ l.their_words|truncate(50) }}&rdquo;{% endif %}</span></td>
   <td class="dim">{{ l.last_called_at.strftime('%b %d %H:%M') if l.last_called_at else '' }}</td>
 </tr>
 {% else %}
-<tr><td colspan="15" class="dim">No leads match.
+<tr><td colspan="17" class="dim">No leads match.
   {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV above to fill the pool.{% endif %}</td></tr>
 {% endfor %}
 </table>

@@ -196,9 +196,18 @@ def test_the_web_handler_does_not_contain_the_transition(db):
 
 
 def test_only_l2_can_be_marked_emailed(db, cfg_env):
+    """
+    And it RAISES rather than returning None, so the caller can tell "not at
+    L2" from "already sent". Collapsing the two reported a lead stuck at L1 as
+    an email that had already gone out - which is what happened on the first
+    real Send now.
+    """
+    import pytest as _pytest
     for stage in ('L1', 'L3'):
         lid = _lead(db, stage=stage, phone_e164=f'+1555222{ord(stage[1]):04d}')
-        assert stages.mark_emailed(lid, emailed_by='operator') is None
+        with _pytest.raises(stages.NotAtL2) as e:
+            stages.mark_emailed(lid, emailed_by='operator')
+        assert stage in str(e.value), 'the error must say which stage it is at'
 
 
 # --------------------------------------------------------------------------

@@ -102,7 +102,14 @@ def send_one(cfg, lead_id) -> dict:
         # 3. CLAIM THE SEND BEFORE MAKING IT. mark_emailed is write-once, so
         #    this is what makes a double send impossible. Losing one email to a
         #    crash beats sending a second one to a real person.
-        claimed = stages.mark_emailed(lead_id, emailed_by=f'auto:{cfg.SENDER_DOMAIN}')
+        try:
+            claimed = stages.mark_emailed(lead_id,
+                                          emailed_by=f'auto:{cfg.SENDER_DOMAIN}')
+        except stages.NotAtL2 as exc:
+            with db.get_conn() as conn:
+                with conn.cursor() as cur:
+                    _audit(cur, lead_id, to_email, 'refused_not_at_l2', str(exc))
+            return {'sent': False, 'detail': str(exc)}
         if claimed is None:
             with db.get_conn() as conn:
                 with conn.cursor() as cur:
@@ -186,7 +193,13 @@ def send_manual(cfg, lead_id, sent_by: str = 'operator') -> dict:
                     _audit(cur, lead_id, to_email, 'refused_no_draft', 'no draft')
                     return {'sent': False, 'detail': 'no draft to send'}
 
-        claimed = stages.mark_emailed(lead_id, emailed_by=sent_by)
+        try:
+            claimed = stages.mark_emailed(lead_id, emailed_by=sent_by)
+        except stages.NotAtL2 as exc:
+            with db.get_conn() as conn:
+                with conn.cursor() as cur:
+                    _audit(cur, lead_id, to_email, 'refused_not_at_l2', str(exc))
+            return {'sent': False, 'detail': str(exc)}
         if claimed is None:
             with db.get_conn() as conn:
                 with conn.cursor() as cur:

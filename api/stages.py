@@ -29,6 +29,15 @@ from api import db
 
 # L3's automatic follow-up is gone; a follow-up is its own campaign. Kept as
 # a named number because the L3 prompt in Retell still says "a few days ago".
+class NotAtL2(RuntimeError):
+    """
+    mark_emailed was called on a lead that has not reached L2.
+
+    Distinct from "already sent", which returns None. Collapsing the two made
+    a lead stuck at L1 report as an email that had already gone out.
+    """
+
+
 FOLLOWUP_DAYS = 3
 
 
@@ -97,7 +106,21 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 (when, emailed_by, lead_id))
             row = cur.fetchone()
             if row is None:
-                return None
+                # WHY it refused, not just that it did. These are different
+                # problems: "already sent" means stop, "not at L2" means the
+                # lead never reached the stage where a send is owed. Reporting
+                # the second as the first sent Sean looking for an email that
+                # was never sent.
+                cur.execute("""SELECT stage, emailed_at FROM leads
+                                WHERE lead_id = %s""", (lead_id,))
+                cur_row = cur.fetchone()
+                if cur_row is None:
+                    raise NotAtL2('no such lead')
+                if cur_row['emailed_at'] is not None:
+                    return None                      # genuinely already sent
+                raise NotAtL2(
+                    f"lead is at {cur_row['stage']}, not L2 - a send is only "
+                    f"owed once a confirmed email has advanced it")
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, stage, summary, detail)
                    VALUES (%s, 'email_sent', 'L2', 'emailed - waiting on them', %s)""",

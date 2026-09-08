@@ -36,6 +36,23 @@ from api.config import load_config
 router = APIRouter()
 templates = Jinja2Templates(directory='api/templates')
 
+
+def _ago(when):
+    """'5m ago'. A relative time answers "is this fresh?" without arithmetic."""
+    if not when:
+        return ''
+    import datetime as _dt
+    secs = (_dt.datetime.now(_dt.UTC) - when).total_seconds()
+    if secs < 60:
+        return 'just now'
+    for unit, n in (('m', 60), ('h', 3600), ('d', 86400)):
+        if secs < n * 60 or unit == 'd':
+            return f'{int(secs // n)}{unit} ago'
+    return when.strftime('%b %-d')
+
+
+templates.env.filters['ago'] = _ago
+
 STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'email_path', 'demo_pending', 'dnc', 'max_attempts', 'failed',
             'human_review', 'paused']
@@ -136,6 +153,7 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                sc.outcome_score AS last_outcome_score,
                sc.their_words,
                ck.clicks, ck.first_minutes,
+               em.email_count, em.last_email_at,
                cc.name AS campaign_name, cc.is_running AS campaign_running
           FROM leads l
           LEFT JOIN campaign_configs cc ON cc.campaign_id = l.campaign_id
@@ -143,6 +161,14 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
           LEFT JOIN LATERAL (
               SELECT count(*) AS clicks, min(minutes_since_sent) AS first_minutes
                 FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck ON true
+          -- Emails SENT, from the audit - the only record of what actually
+          -- went out. leads.emailed_at is one timestamp and will not survive
+          -- the drip, which sends up to four.
+          LEFT JOIN LATERAL (
+              SELECT count(*) AS email_count, max(created_at) AS last_email_at
+                FROM email_audit ea
+               WHERE ea.lead_id = l.lead_id
+                 AND ea.outcome IN ('sent', 'sent_manual')) em ON true
           LEFT JOIN LATERAL (
               SELECT s.agent_score, s.outcome_score, s.their_words
                 FROM call_scores s JOIN calls c ON c.call_id = s.call_id
@@ -270,6 +296,7 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
             # Every call, with both scores and what they actually said.
             cur.execute(
                 """SELECT c.*, s.agent_score, s.outcome_score, s.agent_deductions,
+                          s.rules_violated,
                           s.what_happened, s.where_it_broke, s.their_words,
                           s.needs_human, a.last_error AS score_error
                      FROM calls c
@@ -297,6 +324,7 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
             'agent_class': _score_class(c['agent_score']),
             'outcome_class': _score_class(c['outcome_score']),
             'agent_deductions': c['agent_deductions'],
+            'rules_violated': c['rules_violated'],
             'what_happened': c['what_happened'],
             'where_it_broke': c['where_it_broke'], 'their_words': c['their_words'],
             'needs_human': c['needs_human'], 'score_error': c['score_error'],
@@ -369,6 +397,19 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
     # failed to get a confirmation for was stuck - correcting the address and
     # ticking confirmed produced nothing, with no button to press.
     if confirmed is True and dm_email.strip():
+        # ADVANCE THE STAGE TOO. A confirmed email is the L1 -> L2 event
+        # whether the agent captured it or a person typed it: at L2 we hold the
+        # address and OWE them a send.
+        #
+        # Without this the lead sat at L1 with a draft it could never send -
+        # mark_emailed only fires at L2, so "Send now" refused every time.
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT stage FROM leads WHERE lead_id = %s', (lead_id,))
+                r = cur.fetchone()
+                if r and r['stage'] == 'L1':
+                    stages.advance_to_l2(cur, lead_id,
+                                         source='email confirmed by hand')
         if drafts_mod.get(lead_id) is None:
             if drafts_mod.generate_for(lead_id):
                 msg = msg.rstrip('.') + '. Draft generated.'

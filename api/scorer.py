@@ -59,12 +59,53 @@ SCHEMA = {
         'we_got': {'type': 'array', 'items': {'enum': WE_GOT}},
         'next_move': {'enum': NEXT_MOVE},
         'needs_human': {'type': 'boolean'},
+        # NAMED rules from the agent's own prompt that it broke. Free strings,
+        # not an enum: the prompt is operator-edited, and a fixed list would
+        # drift away from it silently - which is the bug this whole field
+        # exists to fix.
+        'rules_violated': {'type': 'array', 'items': {'type': 'string'}},
     },
     'required': ['outcome_score', 'agent_score', 'agent_deductions',
                  'what_happened', 'where_it_broke', 'their_words', 'we_got',
-                 'next_move', 'needs_human'],
+                 'next_move', 'needs_human', 'rules_violated'],
     'additionalProperties': False,
 }
+
+RULES_RUBRIC = """
+
+THE AGENT'S OWN PROMPT IS BELOW, exactly as the agent received it for this
+call. Score conduct AGAINST THESE RULES, not against a generic idea of a good
+call.
+
+  * Read the rules the prompt actually states. Many are NAMED - an Anti-Loop
+    Rule, a One-Redirect Rule, a two-turn email gate, answer-and-stop on
+    screening questions. Use the prompt's OWN NAME for a rule in
+    rules_violated, spelled as the prompt spells it.
+  * A rule the prompt does not contain cannot be violated. Do not invent
+    rules, and do not import conventions from other scripts you have seen.
+  * If the prompt states no named rules, rules_violated is empty. An empty
+    list is a real answer.
+  * Judge only what the TRANSCRIPT shows. A rule the agent had no occasion to
+    apply was not broken.
+
+This matters because "it repeated itself" and "it broke the Anti-Loop Rule"
+are different findings. The first suggests the prompt needs rewriting; the
+second says the model is ignoring a rule that is already there. Those have
+different fixes, and only the second is visible if you name the rule.
+
+AGENT PROMPT (version {version})
+--------------------------------
+{prompt_text}
+--------------------------------
+"""
+
+NO_PROMPT_RUBRIC = """
+
+THE AGENT'S PROMPT FOR THIS VERSION IS NOT ON FILE, so rule compliance cannot
+be judged. Leave rules_violated EMPTY - an empty list here means "not
+assessed", and inventing rule names from a generic idea of good conduct is
+exactly what this field exists to replace.
+"""
 
 L3_RUBRIC = """
 THIS IS AN L3 FOLLOW-UP CALL, NOT A COLD CALL. Score it against a different
@@ -167,10 +208,25 @@ def _call_row(conn, call_id):
             """SELECT c.call_id, c.lead_id, c.stage, c.transcript,
                       c.disconnection_reason, c.duration_ms, c.analysis,
                       l.company, l.dm_name, l.dm_email, l.dm_email_confirmed,
-                      (SELECT version FROM prompt_versions pv
-                        WHERE pv.stage = c.stage
-                        ORDER BY pv.version DESC LIMIT 1) AS prompt_version
-                 FROM calls c JOIN leads l ON l.lead_id = c.lead_id
+                      -- THE PROMPT ROW FOR THE VERSION THAT ACTUALLY DIALED.
+                      --
+                      -- prompt_version is an FK to prompt_versions.version (a
+                      -- surrogate key), which is why the old query stamped one
+                      -- - but it took the NEWEST row for the stage, so scores
+                      -- for v15 calls were stamped 17 and every score was
+                      -- attributed to a prompt that did not place it. This
+                      -- keeps the FK and picks the RIGHT row.
+                      pv.version AS prompt_version,
+                      c.agent_version AS agent_version_ran,
+                      -- and the prompt TEXT of that exact version, so the
+                      -- scorer judges the rules the agent was given rather
+                      -- than a generic notion of good conduct.
+                      pv.prompt_text
+                 FROM calls c
+                 JOIN leads l ON l.lead_id = c.lead_id
+                 LEFT JOIN prompt_versions pv
+                        ON pv.agent_id = c.agent_id
+                       AND pv.agent_version = c.agent_version
                 WHERE c.call_id = %s""", (call_id,))
         return cur.fetchone()
 
@@ -190,6 +246,22 @@ def build_prompt(row) -> str:
         + "\n"
         f"TRANSCRIPT\n----------\n{row.get('transcript') or '(no transcript - the call never connected)'}\n"
     )
+
+
+def _rules_section(row) -> str:
+    """
+    The agent's prompt, for the version that actually dialed.
+
+    Missing prompt text is NOT an error: a version synced before prompt capture,
+    or a Retell outage during sync, must not stop a call being scored. It
+    degrades to "not assessed" and says so, rather than letting the model fall
+    back on a generic rubric and present the result as rule compliance.
+    """
+    text = (row.get('prompt_text') or '').strip()
+    if not text:
+        return NO_PROMPT_RUBRIC
+    return RULES_RUBRIC.format(version=row.get('agent_version_ran'),
+                               prompt_text=text)
 
 
 def score_call(cfg, call_id: str) -> dict:
@@ -218,7 +290,9 @@ def score_call(cfg, call_id: str) -> dict:
                        'format': {'type': 'json_schema', 'schema': SCHEMA}},
         # The L3 bar is different: re-asking something we already know is the
         # worst fault on a follow-up and barely registers on a cold call.
-        system=SYSTEM + (L3_RUBRIC if row.get('stage') == 'L3' else ''),
+        system=(SYSTEM
+                + (L3_RUBRIC if row.get('stage') == 'L3' else '')
+                + _rules_section(row)),
         messages=[{'role': 'user', 'content': build_prompt(row)}],
     )
     if resp.stop_reason == 'refusal':
@@ -235,10 +309,14 @@ def score_call(cfg, call_id: str) -> dict:
                        call_id, lead_id, stage, prompt_version,
                        outcome_score, agent_score, agent_deductions,
                        what_happened, where_it_broke, their_words, we_got,
-                       next_move, needs_human, model,
+                       next_move, needs_human, rules_violated, model,
                        input_tokens, output_tokens, cost_cents)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (call_id) DO UPDATE SET
+                       -- prompt_version is in here on purpose: re-scoring a
+                       -- call must be able to CORRECT an attribution that was
+                       -- wrong, not preserve it.
+                       prompt_version=EXCLUDED.prompt_version,
                        outcome_score=EXCLUDED.outcome_score,
                        agent_score=EXCLUDED.agent_score,
                        agent_deductions=EXCLUDED.agent_deductions,
@@ -246,13 +324,16 @@ def score_call(cfg, call_id: str) -> dict:
                        where_it_broke=EXCLUDED.where_it_broke,
                        their_words=EXCLUDED.their_words,
                        we_got=EXCLUDED.we_got, next_move=EXCLUDED.next_move,
-                       needs_human=EXCLUDED.needs_human, model=EXCLUDED.model,
+                       needs_human=EXCLUDED.needs_human,
+                       rules_violated=EXCLUDED.rules_violated,
+                       model=EXCLUDED.model,
                        scored_at=now()""",
                 (call_id, row['lead_id'], row['stage'], row['prompt_version'],
                  _clamp(data['outcome_score']), _clamp(data['agent_score']),
                  data['agent_deductions'], data['what_happened'],
                  data['where_it_broke'], data['their_words'], data['we_got'],
-                 data['next_move'], data['needs_human'], served,
+                 data['next_move'], data['needs_human'],
+                 data.get('rules_violated') or [], served,
                  resp.usage.input_tokens, resp.usage.output_tokens, cost))
             cur.execute(
                 """INSERT INTO score_attempts (call_id, attempts, last_error, last_try_at)

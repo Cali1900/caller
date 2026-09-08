@@ -99,7 +99,7 @@
 </div>
 
 <div class="card" id="draft">
-  <h2>Draft follow-up email &mdash; NOT SENT</h2>
+  <h2>Follow-up email{% if not lead.emailed_at %} &mdash; NOT SENT{% endif %}</h2>
   {% if draft %}
     <p class="dim">Generated {{ draft.generated_at.strftime('%Y-%m-%d %H:%M') }}
       {% if draft.edited_at %} &middot; edited {{ draft.edited_at.strftime('%Y-%m-%d %H:%M') }} by {{ draft.edited_by }}{% endif %}
@@ -124,9 +124,16 @@
          <span class="dim">saves your edits &mdash; sends nothing</span></p>
     </form>
 
+    {% if saved %}
+      {# The redirect anchors to #draft, so a banner at the top of the page is
+         scrolled past and never seen. Say it HERE, where the button was. #}
+      <p class="{% if 'NOT SENT' in saved or 'REJECTED' in saved %}sentbar bad{% else %}sentbar{% endif %}">{{ saved }}</p>
+    {% endif %}
+
     {% if lead.emailed_at %}
-      <p class="sentbar"><b>Sent {{ lead.emailed_at.strftime('%b %-d at %H:%M') }} UTC</b>
-         by {{ lead.emailed_by or 'operator' }}.
+      <p class="sentbar"><b>Sent {{ lead.emailed_at.strftime('%b %-d, %H:%M') }} UTC</b>
+         &middot; to {{ draft.to_email }}
+         &middot; by {{ lead.emailed_by or 'operator' }}.
          {% if clicks and clicks.clicks %}<br>Clicked {{ clicks.clicks }}&times;{% if clicks.first_minutes is not none %},
            first {{ clicks.first_minutes }}m after send{% endif %}.{% endif %}</p>
     {% else %}
@@ -194,6 +201,8 @@
           {% if t.needs_human %}<span class="pill human_review">needs you</span>{% endif %}
         </div>
         {% if t.agent_deductions %}<div class="dim">deductions: {{ t.agent_deductions|join(', ') }}</div>{% endif %}
+        {% if t.rules_violated %}<div class="brokerule">broke: {{ t.rules_violated|join(' · ') }}
+          <span class="dim">&mdash; named rules from the prompt this call ran</span></div>{% endif %}
         {% if t.where_it_broke %}<div class="dim">{{ t.where_it_broke }}</div>{% endif %}
         {% if t.their_words %}<div class="quote">"{{ t.their_words }}"</div>{% endif %}
       {% else %}

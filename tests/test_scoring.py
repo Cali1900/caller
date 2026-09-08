@@ -207,3 +207,137 @@ def test_the_scorer_never_writes_to_prompt_versions(db, cfg_env, a_call, mock_ll
     src = inspect.getsource(scorer)
     assert 'UPDATE prompt_versions' not in src
     assert 'INSERT INTO prompt_versions' not in src
+
+
+# ---------------------------------------------------------------------------
+# THE SCORER JUDGES AGAINST THE AGENT'S OWN PROMPT
+# ---------------------------------------------------------------------------
+
+def test_every_schema_field_reaches_the_database():
+    """
+    REGRESSION GUARD for a shape that has now bitten four times: a field is
+    added to the schema, the model returns it, and the INSERT - which names its
+    columns explicitly - silently drops it. rules_violated was the fourth.
+    """
+    import re
+    src = open('/app/api/scorer.py').read()
+    props = re.search(r"'properties': \{(.*?)\n    \},", src, re.S).group(1)
+    fields = re.findall(r"^\s+'([a-z_]+)':", props, re.M)
+    cols = re.search(r'INSERT INTO call_scores \((.*?)\)\s*\n\s*VALUES',
+                     src, re.S).group(1)
+    missing = [f for f in fields if f not in cols]
+    assert fields, 'no schema fields found - the check itself is broken'
+    assert not missing, (
+        f'these scorer fields never reach the database: {missing}. '
+        f'Add them to the INSERT column list.')
+
+
+def test_the_prompt_the_agent_ran_is_sent_to_the_scorer(db, cfg_env, a_call):
+    """
+    THE POINT. Without the prompt the scorer judges a generic notion of good
+    conduct and cannot know the call had named rules at all.
+    """
+    from api import db as dbm, scorer
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE calls SET agent_version = 15,
+                                            agent_id = %s
+                            WHERE call_id = 'c_score'""", (cfg_env.AGENT_L1,))
+            cur.execute("""INSERT INTO prompt_versions
+                              (stage, agent_id, agent_version, prompt_text,
+                               model, prompt_chars, changed_by, change_note,
+                               is_published)
+                           VALUES ('L1',%s,15,
+                                   'ANTI-LOOP RULE: never repeat a question.',
+                                   'gpt-4.1',41,'t','',true)""",
+                        (cfg_env.AGENT_L1,))
+    with dbm.get_conn() as conn:
+        row = scorer._call_row(conn, 'c_score')
+    section = scorer._rules_section(row)
+    assert 'ANTI-LOOP RULE' in section, 'the agent prompt must be in the rubric'
+    assert 'version 15' in section, 'and it must name the version that ran'
+
+
+def test_a_missing_prompt_degrades_to_not_assessed(db, cfg_env, a_call):
+    """
+    A version synced before prompt capture, or a Retell outage during sync,
+    must not stop a call being scored - and must not let the model fall back on
+    a generic rubric and present that as rule compliance.
+    """
+    from api import db as dbm, scorer
+    with dbm.get_conn() as conn:
+        row = scorer._call_row(conn, 'c_score')
+    section = scorer._rules_section(row)
+    assert 'NOT ON FILE' in section
+    assert 'EMPTY' in section
+
+
+def test_the_score_is_attributed_to_the_version_that_actually_dialed(db, cfg_env,
+                                                                     a_call,
+                                                                     mock_llm):
+    """
+    REGRESSION. prompt_version was stamped with the surrogate PK of the NEWEST
+    prompt_versions row for the stage - so three real scores said 17 for calls
+    that ran v15, and every score was attributed to a prompt that did not
+    place it. That breaks the only question the field exists to answer.
+    """
+    from api import db as dbm, scorer
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE calls SET agent_version = 15, agent_id = %s
+                            WHERE call_id='c_score'""", (cfg_env.AGENT_L1,))
+            cur.execute("""INSERT INTO prompt_versions
+                              (stage, agent_id, agent_version, prompt_text,
+                               model, prompt_chars, changed_by, change_note,
+                               is_published)
+                           VALUES ('L1',%s,15,'the v15 prompt','gpt-4.1',14,
+                                   't','',true) RETURNING version""",
+                        (cfg_env.AGENT_L1,))
+            want = cur.fetchone()['version']
+            # a NEWER row that must NOT be picked - this is what the old query
+            # took, stamping 17 on calls that ran v15.
+            cur.execute("""INSERT INTO prompt_versions
+                              (stage, agent_id, agent_version, prompt_text,
+                               model, prompt_chars, changed_by, change_note,
+                               is_published)
+                           VALUES ('L1',%s,99,'newer','gpt-4.1',5,'t','',true)""",
+                        (cfg_env.AGENT_L1,))
+    mock_llm(GOOD)
+    scorer.score_call(cfg_env, 'c_score')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT cs.prompt_version, pv.agent_version
+                             FROM call_scores cs
+                             JOIN prompt_versions pv ON pv.version = cs.prompt_version
+                            WHERE cs.call_id='c_score'""")
+            got = cur.fetchone()
+            assert got['prompt_version'] == want
+            assert got['agent_version'] == 15, \
+                'the score must point at the prompt that PLACED the call'
+
+
+def test_rules_violated_is_stored(db, cfg_env, a_call, mock_llm):
+    from api import db as dbm, scorer
+    mock_llm({**GOOD, 'rules_violated': ['Anti-Loop Rule', 'One-Redirect Rule']})
+    scorer.score_call(cfg_env, 'c_score')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rules_violated FROM call_scores WHERE call_id='c_score'")
+            assert cur.fetchone()['rules_violated'] == ['Anti-Loop Rule',
+                                                        'One-Redirect Rule']
+
+
+def test_rule_names_are_not_hardcoded_anywhere(db):
+    """
+    The prompt is OPERATOR-EDITED. A fixed list of rule names in the code would
+    drift away from it silently, which is the exact failure this field exists
+    to fix - the scorer would report on rules the prompt no longer has.
+    """
+    import re
+    src = open('/app/api/scorer.py').read()
+    # The rubric may NAME examples in prose, but nothing may enumerate them as
+    # data the code matches on.
+    enum_like = re.findall(r"RULES?\w*\s*=\s*[\(\[\{]", src)
+    assert not enum_like, f'rule names must not be a code-side list: {enum_like}'
+    assert "'rules_violated': {'type': 'array', 'items': {'type': 'string'}}" in src, \
+        'rules_violated must be free strings, not an enum'

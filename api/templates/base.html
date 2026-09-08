@@ -214,6 +214,10 @@ a.camptag.running{background:#fdf8ea;color:#7a5a10;border-color:#e8d08a;font-wei
 .sendbar{display:flex;gap:8px;align-items:center;margin:.6em 0 0}
 .sentbar{background:#e7f2ea;border:1px solid #9fc9ae;color:#1f5c37;
   border-radius:6px;padding:8px 12px;margin:.6em 0 0}
+.sentbar.bad{background:#fdf2ee;border-color:#f3d9d0;color:#8f3320}
+/* A broken rule is louder than a deduction: it names something the prompt
+   explicitly told the agent to do. */
+.brokerule{color:#8a2f22;font-weight:600;margin-top:2px}
 pre.transcript{white-space:pre-wrap;background:var(--fog-bg);border:1px solid var(--border);
   border-radius:8px;padding:14px;margin:8px 0;max-height:360px;overflow:auto;
   font:13px/1.65 ui-monospace,Menlo,monospace;color:var(--body)}
