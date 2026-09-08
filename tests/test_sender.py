@@ -223,3 +223,106 @@ def test_it_sends_as_the_campaigns_verified_sender(db, outbox, allow_all):
     sender.send_one(allow_all, lid)
     assert outbox[0]['sender_email'] == 'sean@demandcounselor.com'
     assert outbox[0]['sender_name'] == 'Sean'
+
+
+# ---------------------------------------------------------------------------
+# SEND NOW — pressed by a person looking at the draft
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def client(db, cfg_env):
+    from fastapi.testclient import TestClient
+    import api.web            # noqa: F401
+    from api.main import app
+    return TestClient(app)
+
+
+def test_send_now_works_on_a_MANUAL_campaign(db, outbox, allow_all, monkeypatch):
+    """
+    The auto gate refuses a manual campaign - which is exactly the case here.
+    The operator IS the decision; the exclusions exist to substitute for a
+    human reading the draft, and a human has just read it.
+    """
+    lid, cid = _ready_lead('manual@firm.com')
+    c.update(cid, email_1_mode='manual')
+    monkeypatch.setenv('EMAIL_MODE', 'unrestricted')
+    from api.config import load_config
+    assert sender.send_manual(load_config(), lid)['sent'] is True
+    assert len(outbox) == 1
+
+
+def test_send_now_still_obeys_the_dev_allowlist(db, outbox, monkeypatch):
+    """A person clicking a button is not a reason to weaken the guard."""
+    monkeypatch.setenv('EMAIL_MODE', 'allowlist')
+    monkeypatch.setenv('EMAIL_ALLOWLIST', '')
+    lid, _ = _ready_lead('blocked@firm.com')
+    from api.config import load_config
+    assert sender.send_manual(load_config(), lid)['sent'] is False
+    assert outbox == []
+
+
+def test_send_now_cannot_send_twice(db, outbox, allow_all):
+    """A double click must not put two emails on the wire."""
+    lid, _ = _ready_lead('double@firm.com')
+    assert sender.send_manual(allow_all, lid)['sent'] is True
+    assert sender.send_manual(allow_all, lid)['sent'] is False
+    assert len(outbox) == 1
+
+
+def test_send_now_sends_the_body_WITH_the_tracked_link(db, outbox, allow_all):
+    """
+    The link must survive the send path, not just the copy path.
+    """
+    from api import clicks
+    lid, _ = _ready_lead('tracked@firm.com')
+    sender.send_manual(allow_all, lid)
+    body = outbox[0]['body']
+    assert '/c/' in body, f'no tracked link in the sent body: {body[:200]}'
+    assert clicks.token_for(lid) in body
+
+
+def test_the_copy_path_and_the_send_path_carry_the_SAME_body(db, outbox, allow_all):
+    """
+    Copy reads the textarea, which renders draft.body; Send transmits
+    draft.body. Same bytes - so a tracked link cannot exist on one path and be
+    missing from the other.
+    """
+    from api import drafts as d
+    lid, _ = _ready_lead('same@firm.com')
+    on_screen = d.get(lid)['body']
+    sender.send_manual(allow_all, lid)
+    assert outbox[0]['body'] == on_screen
+
+
+def test_i_sent_it_stamps_without_sending(db, outbox, allow_all, client):
+    """The third path: he sent it from his own inbox. Nothing goes on the
+    wire, but we still know it went and when."""
+    from api import db as dbm
+    lid, _ = _ready_lead('own-inbox@firm.com')
+    r = client.post(f'/leads/{lid}/emailed', follow_redirects=False)
+    assert r.status_code == 303
+    assert outbox == [], 'I sent it must never send'
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT emailed_at FROM leads WHERE lead_id=%s', (lid,))
+            assert cur.fetchone()['emailed_at'] is not None
+
+
+def test_a_refused_send_says_NOT_SENT(db, client, monkeypatch):
+    monkeypatch.setenv('EMAIL_MODE', 'allowlist')
+    monkeypatch.setenv('EMAIL_ALLOWLIST', '')
+    lid, _ = _ready_lead('refused@firm.com')
+    r = client.post(f'/leads/{lid}/draft/send', follow_redirects=False)
+    assert 'NOT+SENT' in r.headers['location'] or 'NOT%20SENT' in r.headers['location']
+
+
+def test_the_panel_flips_to_sent_and_offers_no_send_button(db, client, outbox,
+                                                           allow_all):
+    """'panel flips to sent <time>'."""
+    lid, _ = _ready_lead('flips@firm.com')
+    body = client.get(f'/leads/{lid}').text
+    assert 'Send now' in body
+    sender.send_manual(allow_all, lid)
+    body = client.get(f'/leads/{lid}').text
+    assert 'Sent ' in body
+    assert 'Send now' not in body, 'a sent draft must not offer Send now again'

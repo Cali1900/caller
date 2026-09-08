@@ -392,6 +392,22 @@ def draft_regenerate(lead_id: str):
                             status_code=303)
 
 
+@router.post('/leads/{lead_id}/draft/send')
+def draft_send(lead_id: str):
+    """
+    SEND NOW. The app puts it on the wire, through the dev allowlist.
+
+    Separate from "I sent it", which only stamps. Two buttons because they are
+    two different claims about the world, and only one of them can be checked.
+    """
+    from api import sender as sender_mod
+    r = sender_mod.send_manual(_cfg(), lead_id)
+    msg = ('Sent.' if r['sent']
+           else f"NOT SENT - {r['detail']}")
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}#draft',
+                            status_code=303)
+
+
 @router.post('/leads/{lead_id}/emailed')
 def lead_emailed(lead_id: str, emailed_by: str = Form('operator')):
     """

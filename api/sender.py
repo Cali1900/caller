@@ -142,6 +142,90 @@ def send_one(cfg, lead_id) -> dict:
         return {'sent': False, 'detail': f'{type(exc).__name__}: {exc}'}
 
 
+def send_manual(cfg, lead_id, sent_by: str = 'operator') -> dict:
+    """
+    SEND NOW, pressed by a person looking at the draft.
+
+    Deliberately NOT the auto gate. autosend.eligibility() refuses when the
+    campaign is on manual, which is exactly the case here - the operator is
+    the decision. The exclusions it enforces (confirmed email, a name, the
+    domain check) exist to substitute for a human reading the draft; a human
+    has just read it.
+
+    WHAT STILL HOLDS, because a person clicking a button is not a reason to
+    weaken them:
+      * assert_emailable - the dev allowlist. Fails closed.
+      * mark_emailed write-once - the send is CLAIMED before the API call, so
+        a double click cannot send twice.
+      * every attempt audited, sent or refused.
+
+    The body sent is the STORED draft, tracked link and all - the same bytes
+    the Copy button copies.
+    """
+    to_email = None
+    try:
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT * FROM leads WHERE lead_id = %s', (lead_id,))
+                lead = cur.fetchone()
+                if lead is None:
+                    return {'sent': False, 'detail': 'no such lead'}
+                lead = dict(lead)
+                to_email = (lead.get('dm_email') or '').strip()
+                camp = (campaigns.get(lead['campaign_id'])
+                        if lead.get('campaign_id') else {}) or {}
+
+                try:
+                    guards.assert_emailable(to_email, cfg)
+                except EmailRefused as exc:
+                    _audit(cur, lead_id, to_email, 'refused_allowlist', str(exc))
+                    return {'sent': False, 'detail': str(exc)}
+
+                draft = drafts.get(lead_id)
+                if not draft:
+                    _audit(cur, lead_id, to_email, 'refused_no_draft', 'no draft')
+                    return {'sent': False, 'detail': 'no draft to send'}
+
+        claimed = stages.mark_emailed(lead_id, emailed_by=sent_by)
+        if claimed is None:
+            with db.get_conn() as conn:
+                with conn.cursor() as cur:
+                    _audit(cur, lead_id, to_email, 'refused_already_sent',
+                           'emailed_at was already set')
+            return {'sent': False, 'detail': 'already sent'}
+
+        result = mail.send(cfg, to_email, draft['subject'], draft['body'],
+                           sender_email=camp.get('sender_email'),
+                           sender_name=camp.get('sender_name'))
+
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                if result.get('ok'):
+                    _audit(cur, lead_id, to_email, 'sent_manual',
+                           f"by {sent_by} as {camp.get('sender_email')}")
+                else:
+                    # The stamp STAYS - see send_one. We do not know whether
+                    # Brevo accepted it, and un-stamping invites a second send.
+                    _audit(cur, lead_id, to_email, 'send_failed',
+                           str(result.get('detail'))[:400])
+                    cur.execute(
+                        """INSERT INTO activity (lead_id, kind, summary, detail)
+                           VALUES (%s,'note','SEND FAILED - needs a person',%s)""",
+                        (lead_id, str(result.get('detail'))[:400]))
+        return {'sent': bool(result.get('ok')),
+                'detail': str(result.get('detail'))[:200]}
+
+    except Exception as exc:
+        try:
+            with db.get_conn() as conn:
+                with conn.cursor() as cur:
+                    _audit(cur, lead_id, to_email, 'refused_error',
+                           f'{type(exc).__name__}: {exc}')
+        except Exception:
+            pass
+        return {'sent': False, 'detail': f'{type(exc).__name__}: {exc}'}
+
+
 def run_once(cfg, limit: int = 25) -> dict:
     sent = refused = 0
     for lead_id in due(cfg, limit):

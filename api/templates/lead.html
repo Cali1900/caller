@@ -74,7 +74,7 @@
         <option value="{{ st }}" {% if st == lead.status %}selected{% endif %}>{{ st }}</option>
         {% endfor %}
       </select>
-      <button type="submit" class="ghost">Set by hand</button>
+      <button type="submit" class="ghost">Update status</button>
       <span class="dim">Your choice overrules the system, and lands on the
         timeline as a hand change.</span>
     </form>
@@ -119,26 +119,47 @@
           {% endif %}</div>
         <div>subject</div><div><input name="subject" value="{{ draft.subject }}" size="60"></div>
       </div>
-      <textarea name="body" rows="22" style="width:100%;margin-top:8px">{{ draft.body }}</textarea>
-      <p>
-        <button type="submit">save draft</button>
-      </p>
+      <textarea name="body" rows="22" style="width:100%;margin-top:8px" id="draftbody">{{ draft.body }}</textarea>
+      <p><button type="submit">save draft</button>
+         <span class="dim">saves your edits &mdash; sends nothing</span></p>
     </form>
+
+    {% if lead.emailed_at %}
+      <p class="sentbar"><b>Sent {{ lead.emailed_at.strftime('%b %-d at %H:%M') }} UTC</b>
+         by {{ lead.emailed_by or 'operator' }}.
+         {% if clicks and clicks.clicks %}<br>Clicked {{ clicks.clicks }}&times;{% if clicks.first_minutes is not none %},
+           first {{ clicks.first_minutes }}m after send{% endif %}.{% endif %}</p>
+    {% else %}
+      <div class="sendbar">
+        <form class="inline" method="post" action="/leads/{{ lead.lead_id }}/draft/send"
+              onsubmit="return confirm('Send this to {{ draft.to_email }} now, through Brevo?')">
+          <button type="submit" class="gold">Send now</button>
+        </form>
+        <button type="button" class="ghost" id="copydraft">Copy</button>
+        <form class="inline" method="post" action="/leads/{{ lead.lead_id }}/emailed">
+          <input type="hidden" name="emailed_by" value="operator">
+          <button type="submit" class="ghost">I sent it</button>
+        </form>
+      </div>
+      <p class="dim" style="margin-top:.4em">
+        <b>Send now</b> &mdash; the app sends it through Brevo, from
+        {% if campaign %}{{ campaign.sender_email }}{% else %}the campaign sender{% endif %},
+        and records the time.<br>
+        <b>Copy</b> then <b>I sent it</b> &mdash; if you would rather send from
+        your own inbox. Copy puts the body on your clipboard exactly as it is
+        here, <b>tracked link included</b>; "I sent it" only records that you
+        did.<br>
+        Either way the sample link is tracked, so a click shows up on this lead.
+      </p>
+    {% endif %}
+
+    <p style="margin-top:.8em">
     <form class="inline" method="post" action="/leads/{{ lead.lead_id }}/draft/regenerate"
           onsubmit="return confirm('Regenerate from the template? Your edits will be lost.')">
-      <button type="submit">regenerate</button>
+      <button type="submit" class="ghost">regenerate</button>
     </form>
-    {% if lead.stage == 'L2' %}
-      <form class="inline" method="post" action="/leads/{{ lead.lead_id }}/emailed">
-        <input type="hidden" name="emailed_by" value="operator">
-        <button type="submit">mark as sent</button>
-      </form>
-      <span class="dim">&mdash; you send it from your own mail client; this only
-        records that you did, and when. No follow-up call is
-        scheduled &mdash; a follow-up is its own campaign.</span>
-    {% endif %}
-    <p class="dim">Nothing in this system sends email. Copy it out, send it
-       yourself, then mark it sent.</p>
+    <span class="dim">rewrites from the campaign template, discarding your edits</span>
+    </p>
   {% else %}
     {% if lead.dm_email and lead.dm_email_confirmed %}
       <p class="dim">No draft yet, but this lead has a <b>confirmed</b> email
@@ -193,4 +214,28 @@
   <p class="dim">Nothing has happened to this lead yet.</p>
 {% endfor %}
 </div>
+
+<script>
+// COPY THE BODY EXACTLY AS IT IS - tracked link included. It copies the
+// TEXTAREA's current value, so what lands on the clipboard is what is on
+// screen, edits and all.
+(function () {
+  var btn = document.getElementById('copydraft');
+  var box = document.getElementById('draftbody');
+  if (!btn || !box) return;
+  btn.addEventListener('click', function () {
+    box.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    if (navigator.clipboard && !ok) {
+      navigator.clipboard.writeText(box.value).then(function () {
+        btn.textContent = 'Copied';
+      }, function () { btn.textContent = 'Press Ctrl+C'; });
+      return;
+    }
+    btn.textContent = ok ? 'Copied' : 'Press Ctrl+C';
+    setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+  });
+})();
+</script>
 {% endblock %}
