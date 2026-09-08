@@ -17,6 +17,10 @@
       {% for s in statuses %}<option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
     <select name="stage"><option value="">any stage</option>
       {% for s in stages %}<option value="{{ s }}" {% if s == stage %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <select name="email_state"><option value="">any email state</option>
+      {% for v, lbl in [('draft_ready','draft ready'), ('sent','sent'),
+                        ('replied','replied'), ('none','no draft')] %}
+      <option value="{{ v }}" {% if v == email_state %}selected{% endif %}>{{ lbl }}</option>{% endfor %}</select>
     <label class="dim"><input type="checkbox" name="needs_you" value="1" {% if needs_you %}checked{% endif %}> needs you</label>
     <button type="submit">Search</button>
     <a class="dim" href="/">reset</a>
@@ -45,7 +49,7 @@
 <tr>
   <th style="width:28px"><input type="checkbox" onclick="for(const b of document.querySelectorAll('input[name=lead_id]'))b.checked=this.checked"></th>
   <th>Firm</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
-  <th>Contact</th><th>Email</th><th class="right">Calls</th>
+  <th>Contact</th><th>Email</th><th>Follow-up</th><th class="right">Calls</th>
   <th class="right">Agent</th><th class="right">Outcome</th><th>Last said</th><th>Last call</th></tr>
 {% for l in leads %}
 <tr>
@@ -62,6 +66,10 @@
   <td>{% if l.dm_email %}{{ l.dm_email }}
         {% if l.dm_email_confirmed %}<span class="pill completed">confirmed</span>
         {% else %}<span class="pill human_review">unconfirmed</span>{% endif %}{% endif %}</td>
+  <td>{% if l.email_state == 'replied' %}<span class="es replied">replied</span>
+      {% elif l.email_state == 'sent' %}<span class="es sent">sent {{ l.emailed_at.strftime('%b %-d') if l.emailed_at else '' }}</span>
+      {% elif l.email_state == 'draft_ready' %}<span class="es ready">draft ready</span>
+      {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
   <td class="right dim">{{ l.call_count or 0 }}</td>
   <td class="right"><span class="score {{ l.agent_class }}">{{ l.last_agent if l.last_agent is not none else '' }}</span></td>
   <td class="right"><span class="score {{ l.outcome_class }}">{{ l.last_outcome_score if l.last_outcome_score is not none else '' }}</span></td>
@@ -69,7 +77,7 @@
   <td class="dim">{{ l.last_called_at.strftime('%b %d %H:%M') if l.last_called_at else '' }}</td>
 </tr>
 {% else %}
-<tr><td colspan="13" class="dim">No leads match.
+<tr><td colspan="14" class="dim">No leads match.
   {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV from the campaign screen.{% endif %}</td></tr>
 {% endfor %}
 </table>

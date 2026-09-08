@@ -90,7 +90,15 @@
     </p>
     <form method="post" action="/leads/{{ lead.lead_id }}/draft/save">
       <div class="kv">
-        <div>to</div><div>{{ draft.to_email }}</div>
+        <div>from</div><div>
+          {% if campaign %}{{ campaign.sender_name }} &lt;{{ campaign.sender_email }}&gt;
+            <span class="dim">&middot; from <a href="/campaign/{{ campaign.campaign_id }}">{{ campaign.name }}</a></span>
+          {% else %}<span class="dim">no campaign &mdash; sender unknown</span>{% endif %}</div>
+        <div>to</div><div>{{ draft.to_email }}
+          {% if lead.dm_email and draft.to_email != lead.dm_email %}
+            <span class="warn">&#9888; the contact is now {{ lead.dm_email }}{% if lead.emailed_at %}
+              &mdash; this draft was already sent to the address above{% endif %}</span>
+          {% endif %}</div>
         <div>subject</div><div><input name="subject" value="{{ draft.subject }}" size="60"></div>
       </div>
       <textarea name="body" rows="22" style="width:100%;margin-top:8px">{{ draft.body }}</textarea>

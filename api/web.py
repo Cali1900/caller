@@ -83,7 +83,26 @@ _NEEDS_YOU_PREDICATE = """
 _NEEDS_YOU_COUNT = f"SELECT count(*) AS n FROM leads l WHERE {_NEEDS_YOU_PREDICATE}"
 
 
-def _lead_query(q, status, stage, needs_you, limit, offset):
+# THE EMAIL STATE OF A LEAD, in one expression so the list and the filter can
+# never disagree about what "draft ready" means.
+#
+# Precedence is the order things happen in: a reply outranks a send, a send
+# outranks a draft. NO OPEN TRACKING - Apple Mail Privacy Protection pre-loads
+# pixels, so an "opened" count on a list of lawyers is noise. Replies only.
+#
+# 'replied' is INERT: nothing writes leads.replied_at yet. The column is here
+# so the state is visible the day detection lands, not a claim that it works.
+_EMAIL_STATE = """
+    CASE WHEN l.replied_at IS NOT NULL           THEN 'replied'
+         WHEN l.emailed_at IS NOT NULL           THEN 'sent'
+         WHEN d.lead_id IS NOT NULL              THEN 'draft_ready'
+         ELSE 'none' END
+"""
+
+EMAIL_STATES = ('draft_ready', 'sent', 'replied', 'none')
+
+
+def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
     where, params = ["1=1"], []
     if q:
         where.append("(l.company ILIKE %s OR l.phone_e164 ILIKE %s "
@@ -96,13 +115,17 @@ def _lead_query(q, status, stage, needs_you, limit, offset):
         where.append("l.stage = %s"); params.append(stage)
     if needs_you:
         where.append(_NEEDS_YOU_PREDICATE)
+    if email_state in EMAIL_STATES:
+        where.append(f'({_EMAIL_STATE.strip()}) = %s'); params.append(email_state)
     sql = f"""
         SELECT l.*,
+               ({_EMAIL_STATE.strip()}) AS email_state,
                (SELECT count(*) FROM calls c WHERE c.lead_id = l.lead_id) AS call_count,
                sc.agent_score  AS last_agent,
                sc.outcome_score AS last_outcome_score,
                sc.their_words
           FROM leads l
+          LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
           LEFT JOIN LATERAL (
               SELECT s.agent_score, s.outcome_score, s.their_words
                 FROM call_scores s JOIN calls c ON c.call_id = s.call_id
@@ -116,30 +139,39 @@ def _lead_query(q, status, stage, needs_you, limit, offset):
 
 @router.get('/', response_class=HTMLResponse)
 def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
-               needs_you: str = '', page: int = 1, msg: str = ''):
+               needs_you: str = '', email_state: str = '', page: int = 1,
+               msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
         sql, params, where, cparams = _lead_query(
-            q, status, stage, needs_you, PAGE, (page - 1) * PAGE)
+            q, status, stage, needs_you, PAGE, (page - 1) * PAGE, email_state)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
-            cur.execute(f"SELECT count(*) AS n FROM leads l WHERE {' AND '.join(where)}",
-                        cparams)
+            # The same draft join as the list query - the email-state predicate
+            # references it, and a count that cannot see `d` would 500 or, worse,
+            # silently disagree with the rows on screen.
+            cur.execute(
+                f"""SELECT count(*) AS n FROM leads l
+                     LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+                    WHERE {' AND '.join(where)}""",
+                cparams)
             total = cur.fetchone()['n']
     for r in rows:
         r['agent_class'] = _score_class(r.get('last_agent'))
         r['outcome_class'] = _score_class(r.get('last_outcome_score'))
     qs = urllib.parse.urlencode(
         {k: v for k, v in
-         (('q', q), ('status', status), ('stage', stage), ('needs_you', needs_you))
+         (('q', q), ('status', status), ('stage', stage),
+          ('needs_you', needs_you), ('email_state', email_state))
          if v})
     return templates.TemplateResponse(request, 'leads.html', {
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
+        'email_state': email_state,
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + PAGE - 1) // PAGE)})
@@ -253,10 +285,14 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         local = datetime.datetime.now(ZoneInfo(lead['timezone'])).strftime('%a %H:%M')
     except Exception:
         local = '?'
+    # The sender identity is the CAMPAIGN's, and it is shown on the draft
+    # because you copy this into a mail client by hand - if the From: is not
+    # in front of you, you cannot check you are sending as the right person.
+    camp = campaigns.get(lead['campaign_id']) if lead.get('campaign_id') else None
     return templates.TemplateResponse(request, 'lead.html', {
         'hdr': hdr, 'lead': lead, 'timeline': timeline,
         'suppressed': suppressed, 'local_time': local, 'saved': saved,
-        'draft': draft})
+        'draft': draft, 'campaign': camp})
 
 
 @router.post('/leads/{lead_id}/edit')
@@ -277,12 +313,25 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
                 (dm_name.strip(), dm_title.strip(), dm_email.strip(),
                  confirmed, notes.strip(), lead_id))
             old = (prev or {}).get('dm_email')
-            if old != (dm_email.strip() or None):
+            changed = old != (dm_email.strip() or None)
+            if changed:
                 cur.execute(
                     """INSERT INTO activity (lead_id, kind, summary, detail)
                        VALUES (%s,'note','contact edited by hand',%s)""",
                     (lead_id, f'email {old or "(none)"} -> {dm_email.strip() or "(none)"}'))
-    return RedirectResponse(f'/leads/{lead_id}?saved=Saved.', status_code=303)
+
+    msg = 'Saved.'
+    if changed:
+        # The draft holds its own copy of the address. Leaving it stale means
+        # copying an address you already corrected into your mail client.
+        outcome = drafts_mod.retarget(lead_id, dm_email)
+        if outcome == 'updated':
+            msg = 'Saved. Draft now addressed to the corrected email.'
+        elif outcome == 'already_sent':
+            msg = ('Saved. The draft was ALREADY SENT, so its To: still shows '
+                   'the old address - that is where the mail went.')
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                            status_code=303)
 
 
 @router.post('/leads/{lead_id}/draft/save')

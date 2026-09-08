@@ -164,6 +164,14 @@ td .quote-cell{display:block;max-width:220px}
 .banner{background:var(--gold-wash);border:1px solid #eadfc4;color:#6b5417;
   padding:11px 15px;border-radius:var(--radius);margin-bottom:16px;font-size:14px}
 .banner.warn{background:#fdf2ee;border-color:#f3d9d0;color:#8f3320}
+.warn{color:#8a2f22;font-weight:600}
+/* Email state. Only the two that NEED a person are loud; if everything is
+   highlighted, nothing is. */
+.es{display:inline-block;font:11px/1.5 Sora,sans-serif;letter-spacing:.03em;
+  padding:2px 8px;border-radius:10px;white-space:nowrap}
+.es.ready{background:#fdf3d6;color:#7a5a10;border:1px solid #e8d08a;font-weight:600}
+.es.replied{background:#e7f2ea;color:#1f5c37;border:1px solid #9fc9ae;font-weight:600}
+.es.sent{background:transparent;color:#8b8b8b;border:1px solid #e2e0dc}
 pre.transcript{white-space:pre-wrap;background:var(--fog-bg);border:1px solid var(--border);
   border-radius:8px;padding:14px;margin:8px 0;max-height:360px;overflow:auto;
   font:13px/1.65 ui-monospace,Menlo,monospace;color:var(--body)}

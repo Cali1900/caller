@@ -142,6 +142,51 @@ def generate_for(lead_id, force: bool = False):
             return d
 
 
+def retarget(lead_id, new_email: str):
+    """
+    Point an UNSENT draft at a corrected address.
+
+    The draft stores to_email at generation time. Correcting the contact email
+    on the lead used to leave that copy behind, so the address you had already
+    fixed was still the one sitting in the draft - and the whole point of this
+    screen is that you copy what you see into your mail client.
+
+    A SENT draft is left alone. Its to_email is a record of where the mail
+    actually went; rewriting it would falsify history. leads.emailed_at is the
+    sent marker.
+
+    Returns 'updated', 'already_sent', or None when there is nothing to do.
+    """
+    new_email = (new_email or '').strip()
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT l.emailed_at, d.to_email
+                             FROM leads l
+                             JOIN email_drafts d ON d.lead_id = l.lead_id
+                            WHERE l.lead_id = %s""", (lead_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None                     # no draft to retarget
+            if row['to_email'] == new_email:
+                return None
+            if row['emailed_at'] is not None:
+                # Deliberately visible: the draft and the contact now disagree,
+                # and that is a fact about the past, not a bug to paper over.
+                cur.execute(
+                    """INSERT INTO activity (lead_id, kind, summary, detail)
+                       VALUES (%s,'note','contact email changed AFTER sending',%s)""",
+                    (lead_id, f"draft still records {row['to_email']} - "
+                              f"that is where the mail went"))
+                return 'already_sent'
+            cur.execute('UPDATE email_drafts SET to_email=%s WHERE lead_id=%s',
+                        (new_email, lead_id))
+            cur.execute(
+                """INSERT INTO activity (lead_id, kind, summary, detail)
+                   VALUES (%s,'note','draft retargeted to the corrected email',%s)""",
+                (lead_id, f"{row['to_email']} -> {new_email or '(none)'}"))
+            return 'updated'
+
+
 def save_edit(lead_id, subject: str, body: str, edited_by: str = 'operator'):
     with db.get_conn() as conn:
         with conn.cursor() as cur:
