@@ -1,0 +1,62 @@
+{% extends "base.html" %}{% block title %}Funnel · Caller{% endblock %}
+{% block body %}
+
+
+<h1>Funnel</h1>
+<p class="dim">Where leads stop. The percentage is <b>of the previous step</b>,
+   because that is the number that says where people drop &mdash; a percentage
+   of the top makes every late step look terrible and hides which one is
+   actually leaking.</p>
+
+<form method="get" class="card toolbar">
+  <select name="campaign_id">
+    <option value="">all campaigns</option>
+    {% for c in campaigns %}
+    <option value="{{ c.campaign_id }}" {% if campaign_id == c.campaign_id|string %}selected{% endif %}>{{ c.name }}</option>
+    {% endfor %}
+  </select>
+  <select name="agent_version">
+    <option value="">any prompt version</option>
+    {% for v in versions %}
+    <option value="{{ v }}" {% if agent_version == v|string %}selected{% endif %}>v{{ v }}</option>
+    {% endfor %}
+  </select>
+  <span class="dim">first dialed</span>
+  <input type="date" name="date_from" value="{{ date_from }}">
+  <span class="dim">to</span>
+  <input type="date" name="date_to" value="{{ date_to }}">
+  <button type="submit">Apply</button>
+  <a class="dim" href="/funnel">all time</a>
+</form>
+
+{% if thin %}
+<div class="banner warn">Too few leads to call any step the worst &mdash; a
+  funnel this young has not tested its steps, and naming a "worst" one would
+  point at the wrong thing.</div>
+{% endif %}
+
+{% if date_from or date_to %}
+<p class="dim">Cohort: leads <b>first dialed</b> in this range, followed all
+   the way down. A recent range looks worse than it is &mdash; leads dialed
+   yesterday have not had time to click.</p>
+{% endif %}
+
+<table>
+<tr><th>Step</th><th class="right">Count</th><th class="right">of previous</th>
+    <th class="right">drop</th><th></th></tr>
+{% for r in rows %}
+<tr class="{% if r.worst %}worststep{% endif %}">
+  <td>{{ r.label }}</td>
+  <td class="right"><b>{{ r.n }}</b></td>
+  <td class="right dim">{% if r.pct is not none %}{{ r.pct }}%{% else %}&mdash;{% endif %}</td>
+  <td class="right">{% if r.drop_n %}<span class="dim">&minus;{{ r.drop_n }} ({{ r.drop_pct }}%)</span>{% endif %}</td>
+  <td>{% if r.worst %}<span class="worsttag">WORST STEP</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+
+<p class="dim" style="margin-top:1em">
+  <b>replied</b> and <b>demo booked</b> are measured against <b>emailed</b>,
+  not against each other &mdash; they are outcomes of the same step rather
+  than a sequence, so they never compete for "worst step".</p>
+{% endblock %}

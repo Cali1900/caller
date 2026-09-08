@@ -26,7 +26,7 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from api import (campaigns, clicks as clicks_mod, db,
+from api import (campaigns, clicks as clicks_mod, db, funnel as funnel_mod,
                  digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
                  prompts as prompts_mod, stages,
@@ -612,6 +612,29 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
         'preview': drafts_mod.preview(camp, lead=pv_lead),
         'preview_lead': pv_lead, 'preview_real': pv_real,
         'running': campaigns.running()})
+
+
+@router.get('/funnel', response_class=HTMLResponse)
+def funnel_page(request: Request, campaign_id: str = '', agent_version: str = '',
+                date_from: str = '', date_to: str = ''):
+    """
+    Where leads stop, and which step is worst.
+
+    A COHORT funnel: the date range selects the leads FIRST DIALED in that
+    window and follows that same set down. Mixing a Monday call with a
+    Thursday email would produce percentages nobody can read.
+    """
+    cfg = _cfg()
+    with db.get_conn() as conn:
+        hdr = _header(conn, cfg)
+    data = funnel_mod.build(campaign_id, agent_version, date_from, date_to)
+    return templates.TemplateResponse(request, 'funnel.html', {
+        'hdr': hdr, 'rows': data['rows'], 'counts': data['counts'],
+        'thin': data['thin'],
+        'campaigns': campaigns.list_all(),
+        'versions': funnel_mod.versions_seen(campaign_id),
+        'campaign_id': campaign_id, 'agent_version': agent_version,
+        'date_from': date_from, 'date_to': date_to})
 
 
 @router.get('/prompts', response_class=HTMLResponse)

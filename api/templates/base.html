@@ -218,6 +218,10 @@ a.camptag.running{background:#fdf8ea;color:#7a5a10;border-color:#e8d08a;font-wei
 /* A broken rule is louder than a deduction: it names something the prompt
    explicitly told the agent to do. */
 .brokerule{color:#8a2f22;font-weight:600;margin-top:2px}
+tr.worststep td{background:#fdf2ee}
+tr.worststep td:first-child{border-left:3px solid #8f3320;font-weight:600}
+.worsttag{display:inline-block;background:#8f3320;color:#fff;border-radius:3px;
+  font:10px/1.6 Sora,sans-serif;letter-spacing:.06em;padding:1px 7px}
 pre.transcript{white-space:pre-wrap;background:var(--fog-bg);border:1px solid var(--border);
   border-radius:8px;padding:14px;margin:8px 0;max-height:360px;overflow:auto;
   font:13px/1.65 ui-monospace,Menlo,monospace;color:var(--body)}
@@ -230,7 +234,7 @@ pre.transcript{white-space:pre-wrap;background:var(--fog-bg);border:1px solid va
 <header>
   <span class="brand">Counselor<span>AI</span> &middot; Caller</span>
   <nav>
-    <a href="/">Leads</a><a href="/campaigns">Campaigns</a><a href="/prompts">Prompts</a><a href="/today">Today</a>
+    <a href="/">Leads</a><a href="/campaigns">Campaigns</a><a href="/prompts">Prompts</a><a href="/funnel">Funnel</a><a href="/today">Today</a>
   </nav>
   <span class="spacer"></span>
   <span class="stat"><b>{{ hdr.dialed or 0 }}</b> dialed today</span>
