@@ -98,223 +98,234 @@ Same absence rule as the other extraction fields: a call where no conversation
 happened has the field ABSENT, not null-with-meaning.
 
 # ═══════════════════════════════════════════════════════════════════════
-# EMAIL DRIP  (specified 2026-09-08)
-# ═══════════════════════════════════════════════════════════════════════
-
-**L3 CALLING IS DESCOPED ENTIRELY. A follow-up is email, not a call.**
-
-This resolves the open question from the L3 unwiring: a campaign does NOT need
-to point at a Retell agent, because there is no follow-up call. `agent_l3_version`
-and `AGENT_L3` can come out of the app once the drip lands.
-
-## The shape
-
-Every call campaign has ONE email campaign attached, **1:1**. C1's email
-campaign is C1's — its own copy, its own intervals.
-
-Sending email 1 by hand puts the lead into the drip; it runs automatically
-from there.
-
-| | | |
-|---|---|---|
-| email 1 | **MANUAL** — Sean writes, reviews, sends | sets `emailed_at` |
-| email 2 | auto | +4 days |
-| email 3 | auto | +10 days |
-| email 4 | auto | +21 days |
-| | then stop | |
-
-**Intervals are measured FROM EMAIL 1, never from the previous email**, so the
-schedule cannot drift. 4 / 10 / 21 are the starting values and are adjustable
-per campaign. Each email has its own editable copy, in the same editor as
-email 1 (subject + body, both gatekeeper variants, live preview).
-
-`emailed_at` is therefore load-bearing twice over: it anchors the click timings
-AND the entire drip schedule. It is already write-once by design — marking
-twice is a no-op — and that must not change.
-
-## What stops the drip
-
-* **ANY reply** — including "not interested" and an out-of-office
-* **bounce** — dead address: stop and flag
-* **DNC / unsubscribe**
-* **demo booked**
-* **max emails reached**
-* **Sean stops it by hand**
-
-Every stop ALERTS and records WHY.
-
-⚠️ **REPLY DETECTION IS A HARD GATE. Nothing auto-sends until it works.**
-Four emails to someone who already answered is the worst thing this system can
-do, and it is the most common way these systems fail. This is the dial-guard of
-the email side: it gets a break definition, and the auto-sender refuses to run
-if detection is unavailable — fail closed, like `assert_dialable`.
-
-## Statuses
-
-Add: `emailed` (email 1 sent, drip running), `engaged` (clicked or replied —
-HOT), `demo_booked`, `won`, `lost` (**explicit no**), and `lost_no_response`
-(**the drip finished with nothing**).
-
-⚠️ **REFINED 2026-09-08: `lost` and `lost_no_response` are separate.** The
-first spec folded "drip finished with nothing" into `lost`. They are not the
-same event and must not share a status: an explicit no is a decision someone
-made, and silence is an absence of one. Only one of those is worth revisiting
-in ninety days, and a single `lost` bucket cannot tell them apart afterwards.
-
-**EVERY STATUS IS MANUALLY CHANGEABLE.** A dropdown on lead detail sets any of
-them at any time; the change goes to the timeline with WHO and WHEN. The system
-sets statuses automatically and Sean overrules it.
-
-**The qualified line is ENGAGED.** That is where he acts.
-
-## A bounce — `bad_email`, which is RECOVERABLE
-
-    bad_email   email 1 bounced, drip stopped, needs a person
-
-**Not `lost`.** A bounce means we probably have the right firm and the wrong
-address. That is recoverable; an explicit no is not.
-
-When it fires:
-
-* the drip stops immediately (already in the stop list)
-* the lead goes to `bad_email` and appears in **"needs you"**
-* **the bounced address is recorded** so it is visible what was tried
-
-### The restart is a BUTTON, never a side effect
-
-    1. bounce -> status bad_email, drip stops, shows in "need you"
-    2. Sean opens the lead, sees the bounced address and why
-    3. Sean corrects the email
-    4. Sean clicks RESTART DRIP  <- an explicit button
-
-⚠️ **CORRECTED 2026-09-08.** This section previously read "correcting the
-address restarts the drip", which is edit-triggered — **editing a field would
-have caused an email to send.** That is the same failure as adding leads
-starting a dial, and it was written without noticing. Sean caught it.
-
-**Step 4 must NOT be triggered by the status change or by saving the email.
-Changing a dropdown must never cause an email to send.**
-
-The button:
-
-* appears ONLY on a `bad_email` lead whose address has actually been corrected
-* fires the audited `emailed_at` reset (see the collision note below)
-* re-drafts email 1 and returns the lead to the NORMAL flow — manual or auto
-  per the campaign switch, not a special path that bypasses it
-* **starts the drip from zero, not email 2** — it never got a first touch
-* writes to the timeline: who, when, old address, new address
-
-**If the corrected address also fails validation, REFUSE and say why** rather
-than restarting into a second bounce. The restart runs the same
-`email_validation.check()` the auto-send exclusions use — one implementation,
-so a rule can never hold on one path and pass on the other.
-
-⚠️ **This collides with the write-once `emailed_at` rule, and the collision is
-the interesting part.** `mark_emailed()` is a deliberate no-op when
-`emailed_at` is already set, because restamping would silently change every
-"N minutes after send" already recorded against that lead.
-
-On a bounce that reasoning does not apply: **nothing was delivered, so there
-are no click timings to invalidate.** So the restart CLEARS `emailed_at` as an
-explicit, audited reset — a named operation that writes to the timeline — and
-`mark_emailed()` keeps its write-once guard untouched. Loosening the guard to
-allow the restart would trade a rare recoverable case against the property that
-protects every normal one.
-
-### A hard bounce goes on the DO-NOT-SEND list, not suppression
-
-**Three separate exclusion lists now, and they must stay separate:**
-
-| list | keyed on | why | who can lift it |
-|---|---|---|---|
-| suppression | phone / firm | **compliance**, damages behind it | nobody |
-| cooled (`lost_no_response`) | lead | business rule | Sean, by hand |
-| do-not-send | **the EMAIL ADDRESS** | the mailbox is dead | a new address just works |
-
-The do-not-send list is keyed on the ADDRESS, not the lead and not the firm. A
-dead mailbox is just dead: **if a good address for the same firm turns up
-later, it must still send.** Equally, if the same dead address appears on
-another lead, that must not send either.
-
-Sean: *"Suppression is compliance. A dead mailbox is just dead."*
-
-## After email 4 with no response — COOLED, not deleted
-
-`status = lost_no_response`, the drip stops, and **nothing automated ever
-contacts them again** — not the dialer, not a second drip, not a future
-sequencer.
-
-**Do not delete them.** We hold the name, a verified email, the firm and its
-demand volume. That is worth keeping even when the attempt failed — and it is
-exactly the data a cold re-approach would otherwise have to re-earn by calling
-the front desk again.
-
-### ⚠️ Zero opens AND zero bounces → flag "possibly bad address"
-
-A lead reaching `lost_no_response` having never bounced and never registered a
-single open is **different from one that was opened and ignored**. The first
-might not exist; the second is a real person who is not interested. Flag it as
-*possibly bad address* rather than filing it as plain silence.
-
-Brevo reports opens on emails 2-4 for free. **Weak, not conclusive** - but for
-the case where nothing else tells us anything, it is the only signal available.
-
-⚠️ **This LOOKS like it contradicts "never trigger anything from an open", and
-whoever builds it will hit that head-on. It does not, and the distinction is
-the whole point:**
-
-* an open **never** creates `engaged`, never scores, never stops the drip,
-  never alerts — a pre-loaded pixel must not be able to mean interest
-* the ABSENCE of every open across four sends, combined with zero bounces, is
-  a diagnostic label applied ONCE at a terminal state
-
-Apple pre-loading inflates opens; it never invents zero. So a zero is the one
-reading of that data Apple cannot manufacture — which is exactly why the
-absence is usable when the presence is not.
-
-⚠️ **`test_no_open_tracking_anywhere` will fail when this lands, correctly.**
-It currently forbids any open tracking in `api/`. The rule it should encode is
-narrower: **we never embed our own tracking pixel.** Consuming an open figure
-Brevo reports from its own pixel is a different thing. Narrow that test when
-the drip lands — deliberately, with this note as the reason — rather than
-deleting it.
-
-Add a **"cooled" filter** on the leads list to pull them up later. After ~90
-days Sean may reach out BY HAND with an actual reason — a new feature, a case
-study. **That is him writing one email, not a second drip.**
-
-⚠️ This permanent-exclusion property gets a break definition, and it is a
-DIFFERENT guard from suppression. Suppression is a compliance stop (they said
-remove me). This is a business stop: still contactable by a person, never by
-the machine. Two rules that happen to both mean "do not auto-contact" will
-drift apart the moment one of them is edited, so they get separate guards and
-separate tests.
-
-## Engagement scoring
-
-Per lead, visible in the list and **sortable**:
-
-| signal | weight |
-|---|---|
-| replied | strongest |
-| clicked | strong |
-| opened | **ZERO** |
-
-**Opens are recorded and never scored.** Apple Mail Privacy Protection
-pre-loads pixels, so an open fires whether or not a human looked. Store it,
-show it greyed as context, never score on it, never trigger anything from it.
-An open must not create `engaged`, must not stop the drip, must not alert.
-
-## Build order
-
-1. **click tracking** (item 7, in progress)
-2. **reply detection** — the guard, before ANY auto-send
-3. **bounce handling**
-4. **the drip itself**
-5. **statuses + manual override**
-6. **scoring**
-
-## B-page-visits — page-visit tracking on counselorai.io (queued 2026-09-08)
+# ⚠️ SUPERSEDED — EMAIL DRIP v1 (1:1 email campaign per call campaign)
+#
+# REPLACED 2026-09-08 by DRIP_BRIEF.md. The 1:1 model was wrong: it could not
+# express many drips, and it tied a lead's email sequence to the call campaign
+# that happened to source it. The replacement separates them - campaigns gain a
+# TYPE, and a lead MOVES between them.
+#
+# Kept only so a reader who finds the old model somewhere knows it was retired
+# on purpose rather than forgotten. Everything below this line is HISTORY.
+# Read DRIP_BRIEF.md instead.
+#
+# # EMAIL DRIP  (specified 2026-09-08)
+# # ═══════════════════════════════════════════════════════════════════════
+#
+# **L3 CALLING IS DESCOPED ENTIRELY. A follow-up is email, not a call.**
+#
+# This resolves the open question from the L3 unwiring: a campaign does NOT need
+# to point at a Retell agent, because there is no follow-up call. `agent_l3_version`
+# and `AGENT_L3` can come out of the app once the drip lands.
+#
+# ## The shape
+#
+# Every call campaign has ONE email campaign attached, **1:1**. C1's email
+# campaign is C1's — its own copy, its own intervals.
+#
+# Sending email 1 by hand puts the lead into the drip; it runs automatically
+# from there.
+#
+# | | | |
+# |---|---|---|
+# | email 1 | **MANUAL** — Sean writes, reviews, sends | sets `emailed_at` |
+# | email 2 | auto | +4 days |
+# | email 3 | auto | +10 days |
+# | email 4 | auto | +21 days |
+# | | then stop | |
+#
+# **Intervals are measured FROM EMAIL 1, never from the previous email**, so the
+# schedule cannot drift. 4 / 10 / 21 are the starting values and are adjustable
+# per campaign. Each email has its own editable copy, in the same editor as
+# email 1 (subject + body, both gatekeeper variants, live preview).
+#
+# `emailed_at` is therefore load-bearing twice over: it anchors the click timings
+# AND the entire drip schedule. It is already write-once by design — marking
+# twice is a no-op — and that must not change.
+#
+# ## What stops the drip
+#
+# * **ANY reply** — including "not interested" and an out-of-office
+# * **bounce** — dead address: stop and flag
+# * **DNC / unsubscribe**
+# * **demo booked**
+# * **max emails reached**
+# * **Sean stops it by hand**
+#
+# Every stop ALERTS and records WHY.
+#
+# ⚠️ **REPLY DETECTION IS A HARD GATE. Nothing auto-sends until it works.**
+# Four emails to someone who already answered is the worst thing this system can
+# do, and it is the most common way these systems fail. This is the dial-guard of
+# the email side: it gets a break definition, and the auto-sender refuses to run
+# if detection is unavailable — fail closed, like `assert_dialable`.
+#
+# ## Statuses
+#
+# Add: `emailed` (email 1 sent, drip running), `engaged` (clicked or replied —
+# HOT), `demo_booked`, `won`, `lost` (**explicit no**), and `lost_no_response`
+# (**the drip finished with nothing**).
+#
+# ⚠️ **REFINED 2026-09-08: `lost` and `lost_no_response` are separate.** The
+# first spec folded "drip finished with nothing" into `lost`. They are not the
+# same event and must not share a status: an explicit no is a decision someone
+# made, and silence is an absence of one. Only one of those is worth revisiting
+# in ninety days, and a single `lost` bucket cannot tell them apart afterwards.
+#
+# **EVERY STATUS IS MANUALLY CHANGEABLE.** A dropdown on lead detail sets any of
+# them at any time; the change goes to the timeline with WHO and WHEN. The system
+# sets statuses automatically and Sean overrules it.
+#
+# **The qualified line is ENGAGED.** That is where he acts.
+#
+# ## A bounce — `bad_email`, which is RECOVERABLE
+#
+#     bad_email   email 1 bounced, drip stopped, needs a person
+#
+# **Not `lost`.** A bounce means we probably have the right firm and the wrong
+# address. That is recoverable; an explicit no is not.
+#
+# When it fires:
+#
+# * the drip stops immediately (already in the stop list)
+# * the lead goes to `bad_email` and appears in **"needs you"**
+# * **the bounced address is recorded** so it is visible what was tried
+#
+# ### The restart is a BUTTON, never a side effect
+#
+#     1. bounce -> status bad_email, drip stops, shows in "need you"
+#     2. Sean opens the lead, sees the bounced address and why
+#     3. Sean corrects the email
+#     4. Sean clicks RESTART DRIP  <- an explicit button
+#
+# ⚠️ **CORRECTED 2026-09-08.** This section previously read "correcting the
+# address restarts the drip", which is edit-triggered — **editing a field would
+# have caused an email to send.** That is the same failure as adding leads
+# starting a dial, and it was written without noticing. Sean caught it.
+#
+# **Step 4 must NOT be triggered by the status change or by saving the email.
+# Changing a dropdown must never cause an email to send.**
+#
+# The button:
+#
+# * appears ONLY on a `bad_email` lead whose address has actually been corrected
+# * fires the audited `emailed_at` reset (see the collision note below)
+# * re-drafts email 1 and returns the lead to the NORMAL flow — manual or auto
+#   per the campaign switch, not a special path that bypasses it
+# * **starts the drip from zero, not email 2** — it never got a first touch
+# * writes to the timeline: who, when, old address, new address
+#
+# **If the corrected address also fails validation, REFUSE and say why** rather
+# than restarting into a second bounce. The restart runs the same
+# `email_validation.check()` the auto-send exclusions use — one implementation,
+# so a rule can never hold on one path and pass on the other.
+#
+# ⚠️ **This collides with the write-once `emailed_at` rule, and the collision is
+# the interesting part.** `mark_emailed()` is a deliberate no-op when
+# `emailed_at` is already set, because restamping would silently change every
+# "N minutes after send" already recorded against that lead.
+#
+# On a bounce that reasoning does not apply: **nothing was delivered, so there
+# are no click timings to invalidate.** So the restart CLEARS `emailed_at` as an
+# explicit, audited reset — a named operation that writes to the timeline — and
+# `mark_emailed()` keeps its write-once guard untouched. Loosening the guard to
+# allow the restart would trade a rare recoverable case against the property that
+# protects every normal one.
+#
+# ### A hard bounce goes on the DO-NOT-SEND list, not suppression
+#
+# **Three separate exclusion lists now, and they must stay separate:**
+#
+# | list | keyed on | why | who can lift it |
+# |---|---|---|---|
+# | suppression | phone / firm | **compliance**, damages behind it | nobody |
+# | cooled (`lost_no_response`) | lead | business rule | Sean, by hand |
+# | do-not-send | **the EMAIL ADDRESS** | the mailbox is dead | a new address just works |
+#
+# The do-not-send list is keyed on the ADDRESS, not the lead and not the firm. A
+# dead mailbox is just dead: **if a good address for the same firm turns up
+# later, it must still send.** Equally, if the same dead address appears on
+# another lead, that must not send either.
+#
+# Sean: *"Suppression is compliance. A dead mailbox is just dead."*
+#
+# ## After email 4 with no response — COOLED, not deleted
+#
+# `status = lost_no_response`, the drip stops, and **nothing automated ever
+# contacts them again** — not the dialer, not a second drip, not a future
+# sequencer.
+#
+# **Do not delete them.** We hold the name, a verified email, the firm and its
+# demand volume. That is worth keeping even when the attempt failed — and it is
+# exactly the data a cold re-approach would otherwise have to re-earn by calling
+# the front desk again.
+#
+# ### ⚠️ Zero opens AND zero bounces → flag "possibly bad address"
+#
+# A lead reaching `lost_no_response` having never bounced and never registered a
+# single open is **different from one that was opened and ignored**. The first
+# might not exist; the second is a real person who is not interested. Flag it as
+# *possibly bad address* rather than filing it as plain silence.
+#
+# Brevo reports opens on emails 2-4 for free. **Weak, not conclusive** - but for
+# the case where nothing else tells us anything, it is the only signal available.
+#
+# ⚠️ **This LOOKS like it contradicts "never trigger anything from an open", and
+# whoever builds it will hit that head-on. It does not, and the distinction is
+# the whole point:**
+#
+# * an open **never** creates `engaged`, never scores, never stops the drip,
+#   never alerts — a pre-loaded pixel must not be able to mean interest
+# * the ABSENCE of every open across four sends, combined with zero bounces, is
+#   a diagnostic label applied ONCE at a terminal state
+#
+# Apple pre-loading inflates opens; it never invents zero. So a zero is the one
+# reading of that data Apple cannot manufacture — which is exactly why the
+# absence is usable when the presence is not.
+#
+# ⚠️ **`test_no_open_tracking_anywhere` will fail when this lands, correctly.**
+# It currently forbids any open tracking in `api/`. The rule it should encode is
+# narrower: **we never embed our own tracking pixel.** Consuming an open figure
+# Brevo reports from its own pixel is a different thing. Narrow that test when
+# the drip lands — deliberately, with this note as the reason — rather than
+# deleting it.
+#
+# Add a **"cooled" filter** on the leads list to pull them up later. After ~90
+# days Sean may reach out BY HAND with an actual reason — a new feature, a case
+# study. **That is him writing one email, not a second drip.**
+#
+# ⚠️ This permanent-exclusion property gets a break definition, and it is a
+# DIFFERENT guard from suppression. Suppression is a compliance stop (they said
+# remove me). This is a business stop: still contactable by a person, never by
+# the machine. Two rules that happen to both mean "do not auto-contact" will
+# drift apart the moment one of them is edited, so they get separate guards and
+# separate tests.
+#
+# ## Engagement scoring
+#
+# Per lead, visible in the list and **sortable**:
+#
+# | signal | weight |
+# |---|---|
+# | replied | strongest |
+# | clicked | strong |
+# | opened | **ZERO** |
+#
+# **Opens are recorded and never scored.** Apple Mail Privacy Protection
+# pre-loads pixels, so an open fires whether or not a human looked. Store it,
+# show it greyed as context, never score on it, never trigger anything from it.
+# An open must not create `engaged`, must not stop the drip, must not alert.
+#
+# ## Build order
+#
+# 1. **click tracking** (item 7, in progress)
+# 2. **reply detection** — the guard, before ANY auto-send
+# 3. **bounce handling**
+# 4. **the drip itself**
+# 5. **statuses + manual override**
+# 6. **scoring**
+#
+### B-page-visits — page-visit tracking on counselorai.io (queued 2026-09-08)
 
 FOLLOW-ON TO CLICK TRACKING, not part of it. **The click is what identifies
 him**, so page tracking without it is meaningless - build it after clicks work.
