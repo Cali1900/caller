@@ -133,6 +133,12 @@ form.inline{display:inline}
 .field label{display:block;font-size:12px;color:var(--fog);margin-bottom:4px;
   text-transform:uppercase;letter-spacing:.06em}
 .field input,.field select,.field textarea{width:100%}
+/* Prompt versions: seventeen and growing. Show five, scroll the rest - a list
+   that fills the screen is harder to read, not easier. The browser scrolls a
+   sized listbox to the selected row, so the LIVE version is always in view. */
+.field select.verlist{height:auto;padding:0;overflow-y:auto;line-height:1.5}
+.field select.verlist option{padding:6px 8px;border-bottom:1px solid #f0eee9}
+.field select.verlist option:checked{background:#fdf3d6;color:#7a5a10;font-weight:600}
 .fields-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
 
 /* nothing inside a card may exceed it */

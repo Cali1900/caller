@@ -36,7 +36,11 @@ SUPPRESSION_JOIN = (
 # L2 NEVER DIALS. At L2 we owe them an email and have not sent it; calling
 # would ask a question we are about to answer ourselves. Isolated as a
 # constant so removing it is a single, visible edit.
-STAGE_DIALABLE = "AND l.stage IN ('L1', 'L3')"
+# L1 ONLY. L3's automatic follow-up call was unwired on 2026-09-08: a campaign
+# is already a named configuration with its own prompt and leads, so a
+# follow-up IS another campaign - assign the leads and start it deliberately.
+# A lead that captured a name and email stops at L2 and waits for a person.
+STAGE_DIALABLE = "AND l.stage = 'L1'"
 
 # A REPLY STOPS THE FOLLOW-UP DEAD. Nothing sets replied_at yet - the coming
 # sequencer from demandcounselor.com owns reply detection - but the guard

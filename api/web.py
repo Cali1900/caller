@@ -449,8 +449,8 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
         'per_hour': per_hour, 'remaining': remaining,
         'hours_left': round(remaining / per_hour, 1) if per_hour else 0,
         'windows': campaigns.windows(campaign_id), 'days': DAYS,
-        'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1'),
-                        'L3': prompts_mod.listing(cfg, 'L3')},
+        'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1',
+                                                  camp['agent_l1_version'])},
         'sender_options': _sender_opts[0], 'sender_error': _sender_opts[1],
         'placeholders': drafts_mod.PLACEHOLDERS,
         'preview': drafts_mod.preview(camp, lead=pv_lead),
@@ -471,8 +471,7 @@ def prompts_page(request: Request, msg: str = ''):
         hdr = _header(conn, cfg)
     return templates.TemplateResponse(request, 'prompts.html', {
         'hdr': hdr, 'msg': msg, 'sync_err': sync_err,
-        'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1'),
-                        'L3': prompts_mod.listing(cfg, 'L3')},
+        'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1')},
         'campaigns': campaigns.list_all()})
 
 
@@ -493,15 +492,13 @@ def prompts_sync():
     # The button now forces a FULL re-fetch; the incremental sync already ran
     # on page load. This is for "Retell changed something under a version".
     a = prompts_mod.sync_versions(cfg, 'L1', force=True)
-    b = prompts_mod.sync_versions(cfg, 'L3', force=True)
-    msg = (f"re-fetched {a['fetched']} of {a['versions']} L1 and "
-           f"{b['fetched']} of {b['versions']} L3 versions from Retell")
+    msg = f"re-fetched {a['fetched']} of {a['versions']} versions from Retell"
     return RedirectResponse(f'/prompts?msg={urllib.parse.quote(msg)}', status_code=303)
 
 
 @router.post('/campaign/{campaign_id}/save')
 def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(''),
-                  agent_l1_version: int = Form(...), agent_l3_version: int = Form(...),
+                  agent_l1_version: int = Form(...),
                   sender_email: str = Form(...), sender_name: str = Form(...),
                   sender_company_line: str = Form(...), daily_cap: int = Form(...),
                   max_concurrent: int = Form(...), dial_interval_min: int = Form(...),
@@ -519,7 +516,6 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
     try:
         campaigns.update(campaign_id, name=name, notes=notes,
                          agent_l1_version=agent_l1_version,
-                         agent_l3_version=agent_l3_version,
                          sender_email=sender_email, sender_name=sender_name,
                          sender_company_line=sender_company_line,
                          daily_cap=daily_cap, max_concurrent=max_concurrent,

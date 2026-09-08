@@ -123,36 +123,56 @@ def test_l2_is_never_a_dial_candidate(db, cfg_env, enrolled):
     assert dialer.select_and_claim(cfg_env, limit=10) == []
 
 
-def test_l1_and_l3_are_dial_candidates(db, cfg_env, enrolled):
+def test_only_l1_is_a_dial_candidate(db, cfg_env, enrolled):
+    """
+    L3's automatic follow-up was unwired: a follow-up is its own campaign now.
+    An L3 lead sitting in the queue must NOT be picked up by the L1 campaign -
+    it would be dialed with the wrong prompt and against the wrong cap.
+    """
     l1 = _lead(db, stage='L1', phone_e164='+15552220011')
     l3 = _lead(db, stage='L3', phone_e164='+15552220012',
                dm_name='Sara', dm_email='s@w.com', dm_email_confirmed=True)
     enrolled(l1); enrolled(l3)
     got = {c['stage'] for c in dialer.select_and_claim(cfg_env, limit=10)}
-    assert got == {'L1', 'L3'}
+    assert got == {'L1'}
 
 
 # --------------------------------------------------------------------------
 # "I emailed them": L2 -> L3
 # --------------------------------------------------------------------------
 
-def test_mark_emailed_moves_l2_to_l3_and_queues_the_follow_up(db, cfg_env):
+def test_mark_emailed_records_the_send_and_schedules_nothing(db, cfg_env):
+    """
+    THE SEAM IS KEPT, the automatic follow-up is not.
+
+    Knowing an email went out and WHEN is worth having on its own: the
+    follow-up column reads it, and click tracking computes "47m after send"
+    from this exact timestamp.
+    """
     lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
+    before = datetime.datetime.now(datetime.UTC)
     row = stages.mark_emailed(lid, emailed_by='operator')
     assert row is not None
-    assert row['stage'] == 'L3'
     assert row['emailed_by'] == 'operator'
-    delta = row['next_attempt_at'] - datetime.datetime.now(datetime.UTC)
-    assert datetime.timedelta(days=2, hours=20) < delta < datetime.timedelta(days=3, hours=4)
+    assert row['emailed_at'] is not None and row['emailed_at'] >= before
+    assert row['stage'] == 'L2', 'the lead waits at L2; nothing advances it'
+    assert row['next_attempt_at'] == _get(db, lid)['next_attempt_at'], \
+        'marking a send must not schedule anything'
 
 
-def test_clicking_twice_does_not_reset_the_follow_up(db, cfg_env):
-    """A double click, or a sender racing the button, must be a no-op."""
+def test_clicking_twice_does_not_restamp_the_send_time(db, cfg_env):
+    """
+    A double click, or a sender racing the button, must be a no-op.
+
+    THE FIRST SEND IS THE ONE THE TIMINGS ARE MEASURED FROM. Overwriting
+    emailed_at would silently change every "N minutes after send" already
+    recorded against this lead.
+    """
     lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
     first = stages.mark_emailed(lid, emailed_by='operator')
     second = stages.mark_emailed(lid, emailed_by='operator')
     assert second is None
-    assert _get(db, lid)['next_attempt_at'] == first['next_attempt_at']
+    assert _get(db, lid)['emailed_at'] == first['emailed_at']
 
 
 def test_the_automation_slots_in_through_the_same_function(db, cfg_env):
@@ -162,7 +182,7 @@ def test_the_automation_slots_in_through_the_same_function(db, cfg_env):
     """
     lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
     row = stages.mark_emailed(lid, emailed_by='auto:demandcounselor.com')
-    assert row['stage'] == 'L3'
+    assert row['emailed_at'] is not None
     assert row['emailed_by'] == 'auto:demandcounselor.com'
 
 
@@ -186,7 +206,8 @@ def test_only_l2_can_be_marked_emailed(db, cfg_env):
 # --------------------------------------------------------------------------
 
 def test_a_reply_removes_the_lead_from_the_dialer(db, cfg_env, enrolled):
-    lid = _lead(db, stage='L3', dm_name='Sara', dm_email='s@w.com')
+    # L1: the guard is stage-independent, and L3 is no longer dialable at all.
+    lid = _lead(db, stage='L1', dm_name='Sara', dm_email='s@w.com')
     enrolled(lid)
     assert len(dialer.select_and_claim(cfg_env, limit=10)) == 1
 
@@ -209,7 +230,9 @@ def test_replied_at_alone_stops_the_dialer(db, cfg_env, enrolled):
     reply and stamps replied_at. Whether it also moves status is its business,
     and the dialer must not depend on it doing so.
     """
-    lid = _lead(db, stage='L3', dm_name='Sara', dm_email='s@w.com')
+    # L1: REPLIED_GUARD is stage-independent, and an L3 lead is now excluded by
+    # STAGE_DIALABLE anyway - which would mask the guard exactly as status did.
+    lid = _lead(db, stage='L1', dm_name='Sara', dm_email='s@w.com')
     enrolled(lid)
     assert len(dialer.select_and_claim(cfg_env, limit=10)) == 1
 
@@ -223,7 +246,7 @@ def test_replied_at_alone_stops_the_dialer(db, cfg_env, enrolled):
 
 
 def test_recording_a_reply_twice_is_a_no_op(db, cfg_env):
-    lid = _lead(db, stage='L3')
+    lid = _lead(db, stage='L2')
     assert stages.record_reply(lid) is True
     assert stages.record_reply(lid) is False
 
@@ -279,7 +302,7 @@ def test_the_l3_opener_uses_the_name(db, cfg_env, enrolled, monkeypatch):
     from api.config import load_config
     cfg = load_config()
 
-    lid = _lead(db, stage='L3', company='Whitfield Law', dm_name='Sara',
+    lid = _lead(db, stage='L1', company='Whitfield Law', dm_name='Sara',
                 dm_title='Intake Manager', dm_email='sara@whitfieldlaw.com')
     enrolled(lid)
     claimed = dialer.select_and_claim(cfg, limit=5)
@@ -290,14 +313,16 @@ def test_the_l3_opener_uses_the_name(db, cfg_env, enrolled, monkeypatch):
     assert d['company'] == 'Whitfield Law'
     assert d['dm_email'] == 'sara@whitfieldlaw.com'
     assert d['dm_title_suffix'] == ', Intake Manager'
-    assert captured['lead']['stage'] == 'L3'
+    assert captured['lead']['stage'] == 'L1'
 
 
 # --------------------------------------------------------------------------
 # the whole walk
 # --------------------------------------------------------------------------
 
-def test_a_lead_walks_l1_to_l2_to_l3(db, cfg_env):
+def test_a_lead_walks_l1_to_l2_and_stops(db, cfg_env):
+    """The ladder ENDS at L2. A follow-up is its own campaign now, started by
+    a person - not a third rung that schedules itself."""
     lid = _lead(db)
     assert _get(db, lid)['stage'] == 'L1'
 
@@ -310,12 +335,12 @@ def test_a_lead_walks_l1_to_l2_to_l3(db, cfg_env):
 
     stages.mark_emailed(lid, emailed_by='operator')
     final = _get(db, lid)
-    assert final['stage'] == 'L3'
-    assert final['emailed_at'] is not None
+    assert final['stage'] == 'L2', 'nothing advances past L2'
+    assert final['emailed_at'] is not None, 'but we DO know it was emailed'
 
     with db.cursor() as cur:
         cur.execute("""SELECT summary FROM activity WHERE lead_id=%s
                         ORDER BY created_at""", (lid,))
         trail = [r['summary'] for r in cur.fetchall()]
     assert any('L1 -> L2' in t for t in trail)
-    assert any('L2 -> L3' in t for t in trail)
+    assert any('emailed' in t for t in trail)

@@ -81,25 +81,17 @@
   <div>
     <div class="card">
       <h2>Prompt version</h2>
-      <div class="fields-2">
-        <div class="field">
-          <label for="v1">L1 &mdash; cold call</label>
-          <select id="v1" name="agent_l1_version">
-            {% for r in prompt_rows['L1'] %}
-            <option value="{{ r.agent_version }}" {% if r.agent_version == c.agent_l1_version %}selected{% endif %}>
-              v{{ r.agent_version }} · {{ r.model }} · {{ r.prompt_chars }}ch{% if r.change_note %} · {{ r.change_note|truncate(40) }}{% endif %}
-            </option>{% endfor %}
-          </select>
-        </div>
-        <div class="field">
-          <label for="v3">L3 &mdash; follow-up</label>
-          <select id="v3" name="agent_l3_version">
-            {% for r in prompt_rows['L3'] %}
-            <option value="{{ r.agent_version }}" {% if r.agent_version == c.agent_l3_version %}selected{% endif %}>
-              v{{ r.agent_version }} · {{ r.model }} · {{ r.prompt_chars }}ch{% if r.change_note %} · {{ r.change_note|truncate(40) }}{% endif %}
-            </option>{% endfor %}
-          </select>
-        </div>
+      <div class="field">
+        <label for="v1">Prompt version</label>
+        <select id="v1" name="agent_l1_version" size="5" class="verlist">
+          {% for r in prompt_rows['L1'] %}
+          <option value="{{ r.agent_version }}" {% if r.agent_version == c.agent_l1_version %}selected{% endif %}>
+            v{{ r.agent_version }} · {{ r.model }} · {{ r.prompt_chars }}ch{% if not r.is_published %} · DRAFT{% endif %}{% if r.change_note %} · {{ r.change_note|truncate(40) }}{% endif %}
+          </option>{% endfor %}
+        </select>
+        <p class="dim" style="margin:.4em 0 0">Published versions only, newest
+          first, synced from Retell when you open this page. Which one is live
+          is your choice &mdash; nothing changes it for you.</p>
       </div>
       <p class="dim" style="margin-bottom:0">The version is a <b>property</b> of
          this campaign. Two campaigns can run the same one. Every call records

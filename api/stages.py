@@ -1,25 +1,34 @@
 """
-The stage ladder: L1 -> L2 -> L3.
+The stage ladder: L1 -> L2. It STOPS at L2.
 
   L1  cold call the front desk. Goal: a name and a confirmed email.
-  L2  we have the email and OWE them a send. No calling happens at L2.
-  L3  we emailed them; call back in 3 days, warm, using the name.
+  L2  we have the email. Nothing is dialed from here - the lead waits.
 
-THE SEAM FOR THE COMING AUTOMATION IS mark_emailed().
+L3 IS UNWIRED FROM THE APP (2026-09-08). There is no automatic follow-up call.
+A campaign is already a named configuration with its own prompt and its own
+leads, so a follow-up IS just another campaign: assign the leads you want
+called back, and start it when you choose. That is cleaner than a hardcoded
+ladder and the operator controls when it runs. The L3 agent still exists in
+Retell; only the app's automatic scheduling is gone.
 
-L2 is manual today: a person clicks "I emailed them" on the lead detail. The
-sequenced sender from demandcounselor.com will fire ~15 minutes after a
-confirmed capture and call this SAME function with emailed_by='auto:<domain>'.
-Nothing else needs to change - the button and the sender are two callers of
-one transition, not two implementations of it.
+THE SEAM IS KEPT. mark_emailed() still records emailed_at and emailed_by - it
+just no longer schedules a call. Knowing an email went out, and WHEN, is worth
+having on its own: it is what the follow-up column reads, and click tracking
+computes "47m after send" from that exact timestamp. Every status change after
+a send hangs off it.
 
-That is why the transition is here and not in the web handler.
+A person clicks "I emailed them"; a sequenced sender would call the SAME
+function with emailed_by='auto:<domain>'. Two callers of one transition, not
+two implementations of it - which is why it lives here and not in the web
+handler.
 """
 
 import datetime
 
 from api import db
 
+# L3's automatic follow-up is gone; a follow-up is its own campaign. Kept as
+# a named number because the L3 prompt in Retell still says "a few days ago".
 FOLLOWUP_DAYS = 3
 
 
@@ -51,36 +60,50 @@ def advance_to_l2(cur, lead_id, source: str = 'confirmed email captured'):
 
 def mark_emailed(lead_id, emailed_by: str, when=None):
     """
-    L2 -> L3. The follow-up call is due FOLLOWUP_DAYS later.
+    RECORDS THAT AN EMAIL WENT OUT, AND WHEN. Schedules nothing.
 
-    Called by the "I emailed them" button today and by the sequencer later.
-    emailed_by records which: an operator name, or 'auto:<domain>'.
+    The lead stays at L2. It used to advance to L3 and queue a follow-up call
+    FOLLOWUP_DAYS out; that automatic ladder is gone. A follow-up is its own
+    campaign now - assign the leads and start it when you choose.
 
-    Returns the updated lead, or None if the lead was not at L2 - clicking
-    twice, or a sender racing the button, must not push a lead to L3 twice or
-    reset a follow-up that is already scheduled.
+    The TIMESTAMP is the point of this function, not the stage change:
+      * the follow-up column on the leads list reads it
+      * click tracking computes "47m after send" from it
+      * every status change after a send is anchored to it
+    Losing it would mean not knowing whether a firm had been emailed at all.
+
+    Called by the "I emailed them" button today, and by a sequenced sender
+    later with emailed_by='auto:<domain>'. Two callers of one transition.
+
+    Returns the updated lead, or None if it was not at L2 - clicking twice, or
+    a sender racing the button, must not stamp a second send time over the
+    first. The FIRST send is the one the timings are measured from.
+
+    STATUS IS NOT TOUCHED. The email state of a lead is derived from
+    emailed_at (see _EMAIL_STATE in web.py), so putting it in `status` too
+    would be two sources for one fact - and the second one drifts. The stage
+    does not move either: L2 is where a lead waits.
     """
     when = when or datetime.datetime.now(datetime.UTC)
-    due = when + datetime.timedelta(days=FOLLOWUP_DAYS)
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """UPDATE leads
-                      SET stage = 'L3', status = 'new',
-                          emailed_at = %s, emailed_by = %s,
-                          next_attempt_at = %s,
-                          stage_attempts = 0,
-                          stage_changed_at = now(), updated_at = now()
+                      SET emailed_at = %s, emailed_by = %s,
+                          updated_at = now()
                     WHERE lead_id = %s AND stage = 'L2'
+                      AND emailed_at IS NULL
                     RETURNING *""",
-                (when, emailed_by, due, lead_id))
+                (when, emailed_by, lead_id))
             row = cur.fetchone()
             if row is None:
                 return None
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, stage, summary, detail)
-                   VALUES (%s, 'email_sent', 'L3', 'L2 -> L3: emailed, follow-up queued', %s)""",
-                (lead_id, f'by {emailed_by}; follow-up due {due:%Y-%m-%d %H:%M} UTC'))
+                   VALUES (%s, 'email_sent', 'L2', 'emailed - waiting on them', %s)""",
+                (lead_id, f'by {emailed_by} at {when:%Y-%m-%d %H:%M} UTC; '
+                          f'no follow-up call is scheduled - a follow-up is '
+                          f'its own campaign'))
             return row
 
 

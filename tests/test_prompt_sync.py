@@ -122,3 +122,37 @@ def test_the_stale_check_does_not_hammer_retell(db, cfg_env, monkeypatch):
     prompts.sync_if_stale(cfg_env, 'L1')
     prompts.sync_if_stale(cfg_env, 'L1')
     assert counter['list'] == 1, 'cached within SYNC_MAX_AGE'
+
+
+def test_only_published_versions_are_offered(db, cfg_env, monkeypatch):
+    """
+    A draft in the Retell dashboard is somebody mid-edit, not something you can
+    dial. Offering drafts is how v8 went live by accident: the list implied
+    they were choosable.
+    """
+    counter = {'list': 0, 'detail': 0}
+    _fake_retell(monkeypatch, [
+        _FakeVersion(0, 1757000000000, published=True),
+        _FakeVersion(1, 1757000000001, published=False),   # a draft
+        _FakeVersion(2, 1757000000002, published=True),
+    ], counter)
+    prompts.sync_versions(cfg_env, 'L1')
+    offered = [r['agent_version'] for r in prompts.listing(cfg_env, 'L1')]
+    assert offered == [2, 0], f'the draft must not be offered, got {offered}'
+
+
+def test_a_campaign_pinned_to_a_draft_still_sees_it(db, cfg_env, monkeypatch):
+    """
+    An existing config is never silently dropped off the screen it is edited
+    on. If a campaign already points at an unpublished version, that version
+    stays in the list - flagged - so the operator can see it and move off it.
+    """
+    counter = {'list': 0, 'detail': 0}
+    _fake_retell(monkeypatch, [
+        _FakeVersion(0, 1757000000000, published=True),
+        _FakeVersion(1, 1757000000001, published=False),
+    ], counter)
+    prompts.sync_versions(cfg_env, 'L1')
+    rows = prompts.listing(cfg_env, 'L1', include_version=1)
+    by_ver = {r['agent_version']: r for r in rows}
+    assert 1 in by_ver and by_ver[1]['is_published'] is False

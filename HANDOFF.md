@@ -14,8 +14,8 @@ Last updated 2026-09-08.
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260908_015_drop_settings.sql` |
-| Tests | 270 passed, 1 skipped |
-| Break pass | 34 definitions. Last full run: **`BREAK PASS: OK`, 34/34** red on their own named test |
+| Tests | 272 passed, 1 skipped |
+| Break pass | 36 definitions. 34/34 clean; breaks 35–36 verified individually since |
 | Campaigns | `C1` and `C2`, both **stopped**. Nothing dials while nothing runs |
 | Data | 2 leads (2 queued), 7 calls, 6 scores, 1 draft, 3 suppressed |
 
@@ -24,7 +24,9 @@ stopped. Starting one is a deliberate act on `/campaigns`.
 
 ### ⚠️ Open before this is "done"
 
-1. Items 5 and 7 below are specified and not built.
+1. Item 7 (click tracking) is specified and not built.
+2. A full break pass has not run since breaks 35–36 were added; each was
+   verified individually.
 
 ---
 
@@ -201,16 +203,39 @@ thing.** Worth knowing about, because that shape is not caught by tests passing.
    thing that would actually deadlock the database. **A safety check that fires
    on itself is worse than none: it trains you to bypass it.**
 
+## The ladder ENDS at L2 (2026-09-08)
+
+  L1  cold call the front desk. Goal: a name and a confirmed email.
+  L2  we have the email. Nothing dials from here — the lead waits.
+
+**L3's automatic follow-up call is unwired.** A campaign is already a named
+configuration with its own prompt and its own leads, so a follow-up IS just
+another campaign: assign the leads you want called back and start it when you
+choose. Cleaner than a hardcoded ladder, and the operator controls when it
+runs. The L3 agent still exists in Retell; only the app's scheduling is gone.
+
+**THE SEAM IS KEPT.** `stages.mark_emailed()` still records `emailed_at` and
+`emailed_by` — it just schedules nothing. That timestamp is load-bearing:
+
+* the follow-up column on the leads list reads it
+* click tracking computes "47m after send" from it
+* every status change after a send is anchored to it
+
+Marking twice is a no-op **by design**: the FIRST send is what timings are
+measured from, and overwriting it would silently change every "N minutes after
+send" already recorded. It does not touch `status` either — the email state is
+derived from `emailed_at` in one place (`_EMAIL_STATE`), and a second source
+for one fact is a source that drifts.
+
+**Open design question for a follow-up campaign:** a campaign owns
+`agent_l1_version`, so "a different prompt" today means a different *version of
+the L1 agent*. The L3 agent is a different `agent_id` entirely. To dial a
+follow-up with the L3 prompt, a campaign would need to point at an AGENT, not
+just a version. Not built — flagging it because it is the obvious next question.
+
 ## Next, in order
 
 These are specified and **not built**.
-
-**5 — Unwire L3 from the app.** A campaign already is a named config with its
-own prompt and leads, so a follow-up is just another campaign that Sean assigns
-leads to. Campaign config shows ONE prompt version, not L1 and L3. Leads that
-capture name + email stop and wait. **Keep the L3 agent in Retell**, just
-unwire it. `stages.mark_emailed()` should stop scheduling an L3 dial, and
-`STAGE_DIALABLE` should drop `'L3'`.
 
 **7 — Click tracking.** Sean sends by hand; the app tracks what happens after.
 Draft's sample link is rewritten to `https://caller-dev.counselorai.io/c/{token}`;

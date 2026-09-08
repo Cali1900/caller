@@ -155,7 +155,18 @@ def sync_if_stale(cfg, stage: str = 'L1', max_age: float = SYNC_MAX_AGE):
     return ent['error']
 
 
-def listing(cfg, stage: str = 'L1'):
+def listing(cfg, stage: str = 'L1', include_version=None):
+    """
+    PUBLISHED versions only, newest first.
+
+    A draft in the Retell dashboard is not a thing you can dial - it is
+    somebody mid-edit. Offering drafts in the picker is how v8 went live by
+    accident in the first place: the list implied they were choosable.
+
+    `include_version` keeps a campaign's CURRENT version in the list even if it
+    is unpublished, so a config that already exists is never silently dropped
+    off the screen it is edited on. It is returned flagged, not hidden.
+    """
     agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
     with db.get_conn() as conn:
         with conn.cursor() as cur:
@@ -166,5 +177,7 @@ def listing(cfg, stage: str = 'L1'):
                             WHERE c.agent_version = pv.agent_version) AS calls_run
                      FROM prompt_versions pv
                     WHERE agent_id = %s AND agent_version IS NOT NULL
-                    ORDER BY agent_version DESC""", (agent_id,))
+                      AND (is_published OR agent_version = %s)
+                    ORDER BY agent_version DESC""",
+                (agent_id, include_version))
             return cur.fetchall()
