@@ -323,6 +323,19 @@ Once Bob clicks a tracked link and lands on counselorai.io, set a cookie and
 record what else he looks at: pages, time on page, return visits, all
 attributed to him.
 
+**On the lead timeline, alongside the calls:**
+
+    clicked the sample link
+    viewed Demand letter      3m 20s
+    viewed Valuation          1m 45s
+    [3 days later] came back, viewed Adjuster prep
+
+⚠️ **THE RETURN VISIT IS THE SIGNAL.** Someone coming back days later is
+thinking about it — that is the one worth surfacing loudest, and it is the
+only one that cannot be explained by idle curiosity in the first minute.
+Time-on-page needs a heartbeat or an unload beacon; a single pageview event
+gives a start with no end, and "3m 20s" would be a guess.
+
 Sean: *"read the sample for four minutes, came back Thursday, looked at
 pricing"* tells him to call. That is a real buying signal in a way opens never
 were - because a human chose each of those actions.
