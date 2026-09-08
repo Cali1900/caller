@@ -152,13 +152,143 @@ if detection is unavailable — fail closed, like `assert_dialable`.
 ## Statuses
 
 Add: `emailed` (email 1 sent, drip running), `engaged` (clicked or replied —
-HOT), `demo_booked`, `won`, `lost` (explicit no, or drip finished with nothing).
+HOT), `demo_booked`, `won`, `lost` (**explicit no**), and `lost_no_response`
+(**the drip finished with nothing**).
+
+⚠️ **REFINED 2026-09-08: `lost` and `lost_no_response` are separate.** The
+first spec folded "drip finished with nothing" into `lost`. They are not the
+same event and must not share a status: an explicit no is a decision someone
+made, and silence is an absence of one. Only one of those is worth revisiting
+in ninety days, and a single `lost` bucket cannot tell them apart afterwards.
 
 **EVERY STATUS IS MANUALLY CHANGEABLE.** A dropdown on lead detail sets any of
 them at any time; the change goes to the timeline with WHO and WHEN. The system
 sets statuses automatically and Sean overrules it.
 
 **The qualified line is ENGAGED.** That is where he acts.
+
+## A bounce — `bad_email`, which is RECOVERABLE
+
+    bad_email   email 1 bounced, drip stopped, needs a person
+
+**Not `lost`.** A bounce means we probably have the right firm and the wrong
+address. That is recoverable; an explicit no is not.
+
+When it fires:
+
+* the drip stops immediately (already in the stop list)
+* the lead goes to `bad_email` and appears in **"needs you"**
+* **the bounced address is recorded** so it is visible what was tried
+
+### The restart is a BUTTON, never a side effect
+
+    1. bounce -> status bad_email, drip stops, shows in "need you"
+    2. Sean opens the lead, sees the bounced address and why
+    3. Sean corrects the email
+    4. Sean clicks RESTART DRIP  <- an explicit button
+
+⚠️ **CORRECTED 2026-09-08.** This section previously read "correcting the
+address restarts the drip", which is edit-triggered — **editing a field would
+have caused an email to send.** That is the same failure as adding leads
+starting a dial, and it was written without noticing. Sean caught it.
+
+**Step 4 must NOT be triggered by the status change or by saving the email.
+Changing a dropdown must never cause an email to send.**
+
+The button:
+
+* appears ONLY on a `bad_email` lead whose address has actually been corrected
+* fires the audited `emailed_at` reset (see the collision note below)
+* re-drafts email 1 and returns the lead to the NORMAL flow — manual or auto
+  per the campaign switch, not a special path that bypasses it
+* **starts the drip from zero, not email 2** — it never got a first touch
+* writes to the timeline: who, when, old address, new address
+
+**If the corrected address also fails validation, REFUSE and say why** rather
+than restarting into a second bounce. The restart runs the same
+`email_validation.check()` the auto-send exclusions use — one implementation,
+so a rule can never hold on one path and pass on the other.
+
+⚠️ **This collides with the write-once `emailed_at` rule, and the collision is
+the interesting part.** `mark_emailed()` is a deliberate no-op when
+`emailed_at` is already set, because restamping would silently change every
+"N minutes after send" already recorded against that lead.
+
+On a bounce that reasoning does not apply: **nothing was delivered, so there
+are no click timings to invalidate.** So the restart CLEARS `emailed_at` as an
+explicit, audited reset — a named operation that writes to the timeline — and
+`mark_emailed()` keeps its write-once guard untouched. Loosening the guard to
+allow the restart would trade a rare recoverable case against the property that
+protects every normal one.
+
+### A hard bounce goes on the DO-NOT-SEND list, not suppression
+
+**Three separate exclusion lists now, and they must stay separate:**
+
+| list | keyed on | why | who can lift it |
+|---|---|---|---|
+| suppression | phone / firm | **compliance**, damages behind it | nobody |
+| cooled (`lost_no_response`) | lead | business rule | Sean, by hand |
+| do-not-send | **the EMAIL ADDRESS** | the mailbox is dead | a new address just works |
+
+The do-not-send list is keyed on the ADDRESS, not the lead and not the firm. A
+dead mailbox is just dead: **if a good address for the same firm turns up
+later, it must still send.** Equally, if the same dead address appears on
+another lead, that must not send either.
+
+Sean: *"Suppression is compliance. A dead mailbox is just dead."*
+
+## After email 4 with no response — COOLED, not deleted
+
+`status = lost_no_response`, the drip stops, and **nothing automated ever
+contacts them again** — not the dialer, not a second drip, not a future
+sequencer.
+
+**Do not delete them.** We hold the name, a verified email, the firm and its
+demand volume. That is worth keeping even when the attempt failed — and it is
+exactly the data a cold re-approach would otherwise have to re-earn by calling
+the front desk again.
+
+### ⚠️ Zero opens AND zero bounces → flag "possibly bad address"
+
+A lead reaching `lost_no_response` having never bounced and never registered a
+single open is **different from one that was opened and ignored**. The first
+might not exist; the second is a real person who is not interested. Flag it as
+*possibly bad address* rather than filing it as plain silence.
+
+Brevo reports opens on emails 2-4 for free. **Weak, not conclusive** - but for
+the case where nothing else tells us anything, it is the only signal available.
+
+⚠️ **This LOOKS like it contradicts "never trigger anything from an open", and
+whoever builds it will hit that head-on. It does not, and the distinction is
+the whole point:**
+
+* an open **never** creates `engaged`, never scores, never stops the drip,
+  never alerts — a pre-loaded pixel must not be able to mean interest
+* the ABSENCE of every open across four sends, combined with zero bounces, is
+  a diagnostic label applied ONCE at a terminal state
+
+Apple pre-loading inflates opens; it never invents zero. So a zero is the one
+reading of that data Apple cannot manufacture — which is exactly why the
+absence is usable when the presence is not.
+
+⚠️ **`test_no_open_tracking_anywhere` will fail when this lands, correctly.**
+It currently forbids any open tracking in `api/`. The rule it should encode is
+narrower: **we never embed our own tracking pixel.** Consuming an open figure
+Brevo reports from its own pixel is a different thing. Narrow that test when
+the drip lands — deliberately, with this note as the reason — rather than
+deleting it.
+
+Add a **"cooled" filter** on the leads list to pull them up later. After ~90
+days Sean may reach out BY HAND with an actual reason — a new feature, a case
+study. **That is him writing one email, not a second drip.**
+
+⚠️ This permanent-exclusion property gets a break definition, and it is a
+DIFFERENT guard from suppression. Suppression is a compliance stop (they said
+remove me). This is a business stop: still contactable by a person, never by
+the machine. Two rules that happen to both mean "do not auto-contact" will
+drift apart the moment one of them is edited, so they get separate guards and
+separate tests.
 
 ## Engagement scoring
 
@@ -317,8 +447,89 @@ my attention goes where it's actually worth something."*
 Everything in the drip spec still stands: stops on any reply, bounce, DNC or
 demo booked.
 
-⚠️ **THIS IS THE FIRST THING THAT SENDS MAIL WITHOUT A HUMAN.** It needs the
-verified sender, and it needs reply detection working first - the drip's hard
-gate applies here too. Each exclusion above gets its own break definition: an
-exclusion that silently stops excluding is how a system emails the wrong
-person, and it will not show up as a failing test on its own.
+⚠️ **THIS IS THE FIRST THING THAT SENDS MAIL WITHOUT A HUMAN.**
+
+**FAIL CLOSED, like `assert_dialable`: if the exclusion check cannot run, do
+not send.** Not "log and continue" - refuse.
+
+**EVERY exclusion gets its own break definition.** A silently-stopped exclusion
+is an email to the wrong person, not a red test. The full set:
+
+| # | exclusion | break |
+|---|---|---|
+| 1 | `dm_email_confirmed` is false | required |
+| 2 | no contact name captured | required |
+| 3 | domain neither matches the site nor is known free-mail | required |
+| 4 | `needs_human` flagged | required |
+| 5 | `replied_at` already set (a prior campaign) | required |
+
+Plus the drip stops, each of which also gets one: any reply, bounce, DNC,
+demo booked.
+
+⚠️ **Exclusion 5 is mine, not Sean's list** - a lead can carry `replied_at`
+from earlier work, and "they already answered us once" is exactly the case
+auto-send must not walk into.
+
+**Reply detection and email 1:** the drip's hard gate is about emails 2-4,
+where a reply must stop the sequence. Email 1 is first contact - there is
+nothing yet to reply TO - so auto-sending it does not strictly require
+detection to be live. It does require exclusion 5. **Emails 2-4 remain blocked
+on working reply detection**, no exceptions.
+
+It also needs the verified sender, which is now in place (both addresses
+verified in Brevo).
+
+## B-email-validation — validate before sending (queued 2026-09-08)
+
+Depends on **B-csv-website** (the website field) and gates
+**B-auto-send-email-1**.
+
+### Free checks, on every capture
+
+* format
+* domain resolves and has **MX records**
+* **domain matches the firm's website** ← the one that matters
+* not disposable, not a role address (`info@`, `admin@`, `office@`, ...)
+
+Any failure → **manual review, never auto-send**, with THE REASON shown on the
+lead. Store the result so it is visible why something was held.
+
+Sean: *"An agent confirming bob@gmial.com because the receptionist said yes is
+exactly what I can't catch by reading fast."* A one-character typo in a
+plausible domain is invisible at reading speed and obvious to an MX lookup.
+
+### ✅ SETTLED 2026-09-08 — the domain check has THREE outcomes
+
+| outcome | what happens |
+|---|---|
+| matches the firm's website | **auto-send** |
+| known free-mail provider | **auto-send**, flagged quietly on the lead |
+| neither | **HOLD for review, loud** |
+
+A strict match is wrong: plenty of small PI firms genuinely use gmail, and
+holding all of them would put most of the queue in review, which defeats
+auto-send. `bob@gmial.com` fails the MX check outright as well, so the
+gmial.com shape is caught twice.
+
+### Paid verification - if cheap to wire in
+
+ZeroBounce or NeverBounce, ~$0.005/email, ~$5/month at this volume. SMTP-probes
+the mailbox without sending.
+
+⚠️ **It is a filter, not a guarantee.** Many corporate servers accept-all and
+bounce later. **Bounce handling in the drip is required either way** and must
+not be treated as optional because verification is in place - a "valid" verdict
+on an accept-all domain means nothing.
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# BUILD ORDER — settled 2026-09-08
+# ═══════════════════════════════════════════════════════════════════════
+
+1. **auto-send switch + email validation** (one piece of work — the validation
+   IS the exclusion set)
+2. **full lead editing + CSV website column**
+3. **funnel**
+4. **pipeline forecast**
+
+**NOTHING AUTO-SENDS UNTIL THE BREAKS ARE GREEN.**

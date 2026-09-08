@@ -188,6 +188,27 @@ obvious to live.
 Archived: `/root/caller-archive/settings.py.deleted-20260908`,
 `/root/caller-archive/settings_table_20260908.sql`.
 
+## ⚠️ THREE EXCLUSION LISTS — they must never merge
+
+Two of these already exist. They all currently mean "do not auto-contact",
+which is precisely how they would merge the first time someone edited one.
+
+| list | keyed on | why | who can lift it |
+|---|---|---|---|
+| **suppression** | phone / firm | **compliance** — statutory damages behind it | nobody |
+| **cooled** (`lost_no_response`) | lead | business rule, revisitable | Sean, by hand |
+| **do-not-send** (planned) | **the email ADDRESS** | the mailbox is dead | a new address just works |
+
+Sean: *"Suppression is compliance with damages behind it; cooled is a business
+rule I might change my mind about."*
+
+Keying do-not-send on the ADDRESS rather than the lead or the firm is what
+makes a bounce recoverable: a good address for the same firm still sends, and
+the same dead address on a different lead still does not.
+
+Each gets its OWN guard and its OWN break definition. A single shared
+"should_contact()" would be the merge.
+
 ## Three defects found in the SAFETY TOOLING itself
 
 All three shared one shape: **the tool reported success without doing the
