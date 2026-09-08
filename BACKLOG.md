@@ -533,3 +533,61 @@ on an accept-all domain means nothing.
 4. **pipeline forecast**
 
 **NOTHING AUTO-SENDS UNTIL THE BREAKS ARE GREEN.**
+
+# ═══════════════════════════════════════════════════════════════════════
+# B-ingest — SIGNALS ARRIVING WHERE THE APP CANNOT SEE THEM
+# (written by the website coder, 2026-09-08)
+# ═══════════════════════════════════════════════════════════════════════
+
+Both items are ONE problem: a recipient acts, a third-party system records it,
+and the app's view of that person goes silently stale. Same fix shape — an
+ingest path back into the app — so scope them together.
+
+## 1. List-Unsubscribe unsubscribes are invisible
+
+A recipient clicks Unsubscribe in Gmail. Gmail calls the List-Unsubscribe
+endpoint, which is **Brevo's**. Brevo records it. The app is never told, so it
+still believes that person is contactable.
+
+Two consequences: we keep mailing someone who opted out through the mechanism
+their own mail client offers, and repeatedly mailing unsubscribers is exactly
+what costs sending reputation — quietly.
+
+**Fix:** consume Brevo's unsubscribe webhook, or reconcile against its list on
+a schedule, and write to the app's own suppression state.
+
+⚠️ **THE APP'S LIST MUST BE WHAT THE SENDER CHECKS, not Brevo's.** Otherwise
+the gap returns the next time the ESP changes.
+
+## 2. Replies are invisible
+
+A reply lands in the mailbox. The app does not read it. That is both the
+strongest positive signal the channel produces, and the place a prose opt-out
+arrives — *"take me off your list"* carries the same obligation as the button.
+
+**Fix:** ingest the reply mailbox (IMAP poll, or ESP inbound parse), attach to
+the lead, halt sends pending review. **Safe default is halt on ANY reply** and
+let a person decide.
+
+## How this joins up with what already exists
+
+* `stages.record_reply()` is ALREADY the writer, deliberately built as a seam
+  and deliberately unwired. This is the missing *caller*, not a new concept —
+  and `test_reply_detection_is_not_wired_up_yet` fails the day it lands, which
+  is the signal to update the "replied is inert" copy.
+* Reply detection is the **hard gate on the drip** (see the drip spec): emails
+  2–4 stay blocked until it works. Auto-send of email 1 does not depend on it,
+  because there is nothing yet to reply to — but exclusion 5 (`replied_at`
+  already set) does.
+* The **do-not-send list is keyed on the EMAIL ADDRESS** and is separate from
+  phone suppression by design — see the three-list table in `HANDOFF.md`.
+  A List-Unsubscribe opt-out belongs on the email list, not the phone one:
+  they gave up email contact, not the right to be phoned about a case they
+  asked about. Keeping them separate is the whole point.
+* A **prose opt-out in a reply is different again** — "take me off your list"
+  in an email body is a request to stop contacting them, and the safe reading
+  is BOTH lists plus a person looking at it.
+
+Confirmed on this box: suppression already exists app-side and survived the
+wipe (3 rows, md5 020b7227a88e77476da537cdb9f7f447). So this is an ingest into
+an existing concept.
