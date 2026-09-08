@@ -17,6 +17,12 @@
       {% for s in statuses %}<option value="{{ s }}" {% if s == status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
     <select name="stage"><option value="">any stage</option>
       {% for s in stages %}<option value="{{ s }}" {% if s == stage %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <select name="campaign_id"><option value="">any campaign</option>
+      <option value="none" {% if campaign_id == 'none' %}selected{% endif %}>&mdash; no campaign (pool)</option>
+      {% for cc in campaigns %}
+      <option value="{{ cc.campaign_id }}" {% if campaign_id == cc.campaign_id|string %}selected{% endif %}>{{ cc.name }}</option>
+      {% endfor %}
+    </select>
     <select name="email_state"><option value="">any email state</option>
       {% for v, lbl in [('draft_ready','draft ready'), ('sent','sent'),
                         ('clicked','clicked'), ('replied','replied'),
@@ -70,7 +76,7 @@
 <tr>
   <th style="width:28px" title="Selects only the rows on THIS page">
     <input type="checkbox" id="selall"></th>
-  <th>Firm</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
+  <th>Firm</th><th>Campaign</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
   <th>Contact</th><th>Email</th><th>Follow-up</th><th class="right">Calls</th>
   <th class="right">Agent</th><th class="right">Outcome</th><th>Last said</th><th>Last call</th></tr>
 {% for l in leads %}
@@ -78,6 +84,10 @@
   <td><input type="checkbox" name="lead_id" value="{{ l.lead_id }}"></td>
   <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a>
       {% if l.tz_needs_review %}<span class="pill human_review" title="timezone derived from a split state">tz?</span>{% endif %}</td>
+  <td>{% if l.campaign_name %}<a class="camptag{% if l.campaign_running %} running{% endif %}"
+        href="/campaign/{{ l.campaign_id }}"
+        title="{% if l.campaign_running %}running{% else %}stopped{% endif %}">{{ l.campaign_name }}</a>
+      {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
   <td>{% if l.pool_status == 'active' %}<span class="pill completed">queued</span>
       {% elif l.pool_status == 'done' %}<span class="pill">done</span>
       {% else %}<span class="pill">pool</span>{% endif %}</td>
@@ -102,7 +112,7 @@
   <td class="dim">{{ l.last_called_at.strftime('%b %d %H:%M') if l.last_called_at else '' }}</td>
 </tr>
 {% else %}
-<tr><td colspan="14" class="dim">No leads match.
+<tr><td colspan="15" class="dim">No leads match.
   {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV above to fill the pool.{% endif %}</td></tr>
 {% endfor %}
 </table>

@@ -198,6 +198,13 @@ td .quote-cell{display:block;max-width:220px}
 /* A click is a real buying signal - loud, like replied. Opens are NOT tracked
    at all: Apple pre-loads pixels, so the number would be noise. */
 .es.clicked{background:#e8f0f7;color:#1f4a6b;border:1px solid #a8c6dd;font-weight:600}
+/* Which campaign a lead belongs to. Quiet by default; the RUNNING one is
+   marked, because that is the only campaign that can dial right now. */
+a.camptag{display:inline-block;font:11px/1.5 Sora,sans-serif;padding:2px 8px;
+  border-radius:10px;white-space:nowrap;text-decoration:none;
+  background:#f2f0ec;color:#5b5750;border:1px solid #e2e0dc}
+a.camptag:hover{border-color:var(--sand)}
+a.camptag.running{background:#fdf8ea;color:#7a5a10;border-color:#e8d08a;font-weight:600}
 .tl-item.click{border-left:3px solid #1f4a6b}
 pre.transcript{white-space:pre-wrap;background:var(--fog-bg);border:1px solid var(--border);
   border-radius:8px;padding:14px;margin:8px 0;max-height:360px;overflow:auto;

@@ -108,7 +108,8 @@ _EMAIL_STATE = """
 EMAIL_STATES = ('draft_ready', 'sent', 'clicked', 'replied', 'none')
 
 
-def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
+def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
+                campaign_id=''):
     where, params = ["1=1"], []
     if q:
         where.append("(l.company ILIKE %s OR l.phone_e164 ILIKE %s "
@@ -123,6 +124,10 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
         where.append(_NEEDS_YOU_PREDICATE)
     if email_state in EMAIL_STATES:
         where.append(f'({_EMAIL_STATE.strip()}) = %s'); params.append(email_state)
+    if campaign_id == 'none':
+        where.append('l.campaign_id IS NULL')      # in the pool, on no campaign
+    elif campaign_id:
+        where.append('l.campaign_id = %s'); params.append(campaign_id)
     sql = f"""
         SELECT l.*,
                ({_EMAIL_STATE.strip()}) AS email_state,
@@ -130,8 +135,10 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
                sc.agent_score  AS last_agent,
                sc.outcome_score AS last_outcome_score,
                sc.their_words,
-               ck.clicks, ck.first_minutes
+               ck.clicks, ck.first_minutes,
+               cc.name AS campaign_name, cc.is_running AS campaign_running
           FROM leads l
+          LEFT JOIN campaign_configs cc ON cc.campaign_id = l.campaign_id
           LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
           LEFT JOIN LATERAL (
               SELECT count(*) AS clicks, min(minutes_since_sent) AS first_minutes
@@ -149,8 +156,8 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
 
 @router.get('/', response_class=HTMLResponse)
 def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
-               needs_you: str = '', email_state: str = '', page: int = 1,
-               per: int = PAGE, msg: str = ''):
+               needs_you: str = '', email_state: str = '', campaign_id: str = '',
+               page: int = 1, per: int = PAGE, msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
@@ -158,7 +165,8 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
         sql, params, where, cparams = _lead_query(
-            q, status, stage, needs_you, per, (page - 1) * per, email_state)
+            q, status, stage, needs_you, per, (page - 1) * per, email_state,
+            campaign_id)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
@@ -168,6 +176,8 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
             cur.execute(
                 f"""SELECT count(*) AS n FROM leads l
                      LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+                     LEFT JOIN campaign_configs cc
+                            ON cc.campaign_id = l.campaign_id
                      LEFT JOIN LATERAL (
                          SELECT count(*) AS clicks
                            FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck
@@ -182,12 +192,14 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         {k: v for k, v in
          (('q', q), ('status', status), ('stage', stage),
           ('needs_you', needs_you), ('email_state', email_state),
+          ('campaign_id', campaign_id),
           ('per', per if per != PAGE else ''))
          if v})
     return templates.TemplateResponse(request, 'leads.html', {
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
         'email_state': email_state, 'per': per, 'page_sizes': PAGE_SIZES,
+        'campaign_id': campaign_id,
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + per - 1) // per)})
