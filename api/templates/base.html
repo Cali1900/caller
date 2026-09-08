@@ -178,6 +178,10 @@ td .quote-cell{display:block;max-width:220px}
 .es.ready{background:#fdf3d6;color:#7a5a10;border:1px solid #e8d08a;font-weight:600}
 .es.replied{background:#e7f2ea;color:#1f5c37;border:1px solid #9fc9ae;font-weight:600}
 .es.sent{background:transparent;color:#8b8b8b;border:1px solid #e2e0dc}
+/* A click is a real buying signal - loud, like replied. Opens are NOT tracked
+   at all: Apple pre-loads pixels, so the number would be noise. */
+.es.clicked{background:#e8f0f7;color:#1f4a6b;border:1px solid #a8c6dd;font-weight:600}
+.tl-item.click{border-left:3px solid #1f4a6b}
 pre.transcript{white-space:pre-wrap;background:var(--fog-bg);border:1px solid var(--border);
   border-radius:8px;padding:14px;margin:8px 0;max-height:360px;overflow:auto;
   font:13px/1.65 ui-monospace,Menlo,monospace;color:var(--body)}

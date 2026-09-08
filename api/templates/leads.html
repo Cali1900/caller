@@ -19,7 +19,8 @@
       {% for s in stages %}<option value="{{ s }}" {% if s == stage %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
     <select name="email_state"><option value="">any email state</option>
       {% for v, lbl in [('draft_ready','draft ready'), ('sent','sent'),
-                        ('replied','replied'), ('none','no draft')] %}
+                        ('clicked','clicked'), ('replied','replied'),
+                        ('none','no draft')] %}
       <option value="{{ v }}" {% if v == email_state %}selected{% endif %}>{{ lbl }}</option>{% endfor %}</select>
     <label class="dim"><input type="checkbox" name="needs_you" value="1" {% if needs_you %}checked{% endif %}> needs you</label>
     <button type="submit">Search</button>
@@ -67,6 +68,9 @@
         {% if l.dm_email_confirmed %}<span class="pill completed">confirmed</span>
         {% else %}<span class="pill human_review">unconfirmed</span>{% endif %}{% endif %}</td>
   <td>{% if l.email_state == 'replied' %}<span class="es replied">replied</span>
+      {% elif l.email_state == 'clicked' %}<span class="es clicked">clicked{% if l.first_minutes is not none %}
+        · {{ l.first_minutes }}m after send{% endif %}</span>{% if l.clicks > 1 %}
+        <span class="dim">×{{ l.clicks }}</span>{% endif %}
       {% elif l.email_state == 'sent' %}<span class="es sent">sent {{ l.emailed_at.strftime('%b %-d') if l.emailed_at else '' }}</span>
       {% elif l.email_state == 'draft_ready' %}<span class="es ready">draft ready</span>
       {% else %}<span class="dim">&mdash;</span>{% endif %}</td>

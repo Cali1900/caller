@@ -26,7 +26,8 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from api import (campaigns, db, digest as digest_mod, drafts as drafts_mod,
+from api import (campaigns, clicks as clicks_mod, db,
+                 digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
                  prompts as prompts_mod, stages,
                  upload as upload_mod)
@@ -95,12 +96,13 @@ _NEEDS_YOU_COUNT = f"SELECT count(*) AS n FROM leads l WHERE {_NEEDS_YOU_PREDICA
 # so the state is visible the day detection lands, not a claim that it works.
 _EMAIL_STATE = """
     CASE WHEN l.replied_at IS NOT NULL           THEN 'replied'
+         WHEN ck.clicks > 0                      THEN 'clicked'
          WHEN l.emailed_at IS NOT NULL           THEN 'sent'
          WHEN d.lead_id IS NOT NULL              THEN 'draft_ready'
          ELSE 'none' END
 """
 
-EMAIL_STATES = ('draft_ready', 'sent', 'replied', 'none')
+EMAIL_STATES = ('draft_ready', 'sent', 'clicked', 'replied', 'none')
 
 
 def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
@@ -124,9 +126,13 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
                (SELECT count(*) FROM calls c WHERE c.lead_id = l.lead_id) AS call_count,
                sc.agent_score  AS last_agent,
                sc.outcome_score AS last_outcome_score,
-               sc.their_words
+               sc.their_words,
+               ck.clicks, ck.first_minutes
           FROM leads l
           LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+          LEFT JOIN LATERAL (
+              SELECT count(*) AS clicks, min(minutes_since_sent) AS first_minutes
+                FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck ON true
           LEFT JOIN LATERAL (
               SELECT s.agent_score, s.outcome_score, s.their_words
                 FROM call_scores s JOIN calls c ON c.call_id = s.call_id
@@ -158,6 +164,10 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
             cur.execute(
                 f"""SELECT count(*) AS n FROM leads l
                      LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+                     LEFT JOIN LATERAL (
+                         SELECT count(*) AS clicks
+                           FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck
+                       ON true
                     WHERE {' AND '.join(where)}""",
                 cparams)
             total = cur.fetchone()['n']
@@ -293,7 +303,8 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
     return templates.TemplateResponse(request, 'lead.html', {
         'hdr': hdr, 'lead': lead, 'timeline': timeline,
         'suppressed': suppressed, 'local_time': local, 'saved': saved,
-        'draft': draft, 'campaign': camp})
+        'draft': draft, 'campaign': camp,
+        'clicks': clicks_mod.summary(lead['lead_id'])})
 
 
 @router.post('/leads/{lead_id}/edit')

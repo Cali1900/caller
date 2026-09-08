@@ -57,6 +57,7 @@ class Config:
     DIGEST_FROM: str
     DIGEST_FROM_NAME: str
     SENDER_DOMAIN: str
+    PUBLIC_BASE_URL: str
     SPACES_KEY: str
     SPACES_SECRET: str
     SPACES_ENDPOINT: str
@@ -103,6 +104,12 @@ def load_config() -> Config:
         # counselorai.io now, demandcounselor.com once it is warm: an env
         # change and a restart, nothing more.
         SENDER_DOMAIN=_required('SENDER_DOMAIN'),
+        # Where a recipient's browser reaches the click endpoint - the same
+        # vhost as the Retell webhook. OPTIONAL, and empty means links are NOT
+        # rewritten: an unset base URL must produce a plain working link, never
+        # a tracked one pointing nowhere. Failing to track is recoverable;
+        # sending a dead link to a lawyer is not.
+        PUBLIC_BASE_URL=os.environ.get('PUBLIC_BASE_URL', '').strip(),
         SPACES_KEY=_required('SPACES_KEY'),
         SPACES_SECRET=_required('SPACES_SECRET'),
         SPACES_ENDPOINT=_required('SPACES_ENDPOINT'),

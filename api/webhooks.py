@@ -1,5 +1,6 @@
 """
-The ONE public route this service exposes.
+The PUBLIC routes this service exposes: the Retell webhook, and the click
+redirect a recipient's browser hits.
 
 It verifies the signature, does ONE insert, and returns 200. That is all.
 
@@ -18,7 +19,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
-from api import db, retell
+from api import clicks, db, retell
 from api.config import load_config
 
 router = APIRouter()
@@ -73,3 +74,36 @@ async def retell_webhook(request: Request):
     await run_in_threadpool(insert_webhook_event, call_id, event, body)
 
     return Response(content='{"ok":true}', media_type='application/json')
+
+
+# ---------------------------------------------------------------------------
+# THE CLICK REDIRECT
+#
+# Public because a recipient's browser has to reach it. It must expose NOTHING
+# but a redirect - no body, no lead data, and no signal about whether the token
+# was real.
+#
+# An unknown token REDIRECTS ANYWAY. A 404 would tell a scanner it guessed
+# wrong, and a real recipient whose link got mangled by a mail client should
+# still land on the page rather than see an error from us. Tracking is our
+# problem; their click is not.
+# ---------------------------------------------------------------------------
+
+@router.get('/c/{token}')
+async def click(token: str, request: Request):
+    from fastapi.responses import RedirectResponse
+
+    ua = request.headers.get('user-agent', '')
+    # X-Forwarded-For first: nginx proxies this, so request.client is the proxy.
+    fwd = (request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
+    ip = fwd or (request.client.host if request.client else None)
+
+    dest = None
+    try:
+        dest = await run_in_threadpool(clicks.record, token, ua, ip)
+    except Exception as exc:                      # never let logging break the redirect
+        print(f'[click] could not record {token[:6]}...: {exc}', flush=True)
+
+    # 302, not 301: a permanent redirect would be cached by the browser and the
+    # SECOND click would never reach us. He may well click twice.
+    return RedirectResponse(dest or clicks.DESTINATION, status_code=302)

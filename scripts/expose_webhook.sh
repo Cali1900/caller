@@ -57,6 +57,14 @@ server {
         client_max_body_size 2m;
     }
 
+    # The click redirect. Public because a RECIPIENT'S BROWSER hits it.
+    # It returns a 302 and nothing else - see api/webhooks.py.
+    location ^~ /c/ {
+        proxy_pass http://127.0.0.1:4100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
     location / { return 404; }
 }
 NGINX

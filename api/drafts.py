@@ -127,6 +127,17 @@ def generate_for(lead_id, force: bool = False):
                 return None      # a person has edited this - leave it alone
 
             d = build(dict(lead))
+            # Rewrite the sample link to a tracked one. Done HERE, on the
+            # stored draft, because this is the text that gets copied into a
+            # mail client - the preview shows the same thing for the same
+            # reason. An unset PUBLIC_BASE_URL leaves the plain link alone.
+            from api import clicks as _clicks
+            from api.config import load_config as _load
+            try:
+                d['body'] = _clicks.rewrite(d['body'], _load().PUBLIC_BASE_URL,
+                                            lead_id)
+            except Exception as exc:
+                print(f'[drafts] click rewrite skipped: {exc}', flush=True)
             cur.execute(
                 """INSERT INTO email_drafts (lead_id, to_email, subject, body, variant)
                    VALUES (%s,%s,%s,%s,%s)
@@ -295,4 +306,17 @@ def preview(campaign, lead=None, overrides=None):
 
     with_name = dict(lead, gatekeeper_name=lead.get('gatekeeper_name') or 'Denise')
     without = dict(lead, gatekeeper_name='')
-    return {'with_name': build(with_name, camp), 'without_name': build(without, camp)}
+    out = {'with_name': build(with_name, camp),
+           'without_name': build(without, camp)}
+    # Same rewrite as the stored draft: the preview must show what will
+    # actually be sent, tracked link included.
+    from api import clicks as _clicks
+    from api.config import load_config as _load
+    try:
+        base = _load().PUBLIC_BASE_URL
+        if base and lead.get('lead_id'):
+            for v in out.values():
+                v['body'] = _clicks.rewrite(v['body'], base, lead['lead_id'])
+    except Exception:
+        pass
+    return out

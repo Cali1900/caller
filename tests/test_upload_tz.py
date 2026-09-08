@@ -136,10 +136,17 @@ def test_subject_and_body_agree_on_the_time_of_day(db):
 
 
 def test_the_sample_is_linked_never_attached(db):
-    """Law-firm mail security strips attachments; a click is a signal."""
+    """
+    Law-firm mail security strips attachments; a click is a signal.
+
+    The link may be REWRITTEN to a tracked URL, so this asserts on the property
+    that matters - there is a link and nothing is attached - not on a literal
+    URL. Pinning the literal is what made the click rewrite silently no-op in
+    the first place.
+    """
     lid = _lead(db)
     d = drafts.generate_for(lid)
-    assert 'https://counselorai.io/#letter' in d['body']
+    assert 'http' in d['body'], 'the sample must be reachable by a link'
     assert 'attach' not in d['body'].lower()
 
 

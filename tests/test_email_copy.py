@@ -222,9 +222,16 @@ def _state_of(lid):
     from api import db as dbm, web
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
+            # The SAME joins the list query uses - the expression references
+            # both, and a helper that joins differently would test a state the
+            # screen never shows.
             cur.execute(f"""SELECT ({web._EMAIL_STATE.strip()}) AS s
                               FROM leads l
                               LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+                              LEFT JOIN LATERAL (
+                                  SELECT count(*) AS clicks
+                                    FROM email_clicks ec
+                                   WHERE ec.lead_id = l.lead_id) ck ON true
                              WHERE l.lead_id = %s""", (lid,))
             return cur.fetchone()['s']
 

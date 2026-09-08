@@ -183,3 +183,142 @@ An open must not create `engaged`, must not stop the drip, must not alert.
 4. **the drip itself**
 5. **statuses + manual override**
 6. **scoring**
+
+## B-page-visits — page-visit tracking on counselorai.io (queued 2026-09-08)
+
+FOLLOW-ON TO CLICK TRACKING, not part of it. **The click is what identifies
+him**, so page tracking without it is meaningless - build it after clicks work.
+
+Once Bob clicks a tracked link and lands on counselorai.io, set a cookie and
+record what else he looks at: pages, time on page, return visits, all
+attributed to him.
+
+Sean: *"read the sample for four minutes, came back Thursday, looked at
+pricing"* tells him to call. That is a real buying signal in a way opens never
+were - because a human chose each of those actions.
+
+Someone who types counselorai.io directly **stays anonymous**, and that is
+fine. Only a click from an email we sent identifies anyone.
+
+### ⚠️ This is NOT contained in this repo
+
+The redirect can carry a visitor token (`.../#letter?v=<token>`), but the
+COOKIE MUST BE SET BY counselorai.io ITSELF and the page events beaconed back.
+That means a change to the marketing site, not just to caller. A third-party
+cookie set by this app on that domain is blocked by Safari ITP and by Chrome's
+third-party cookie restrictions; a FIRST-PARTY cookie set by counselorai.io
+works everywhere. Scope the marketing-site work before estimating this.
+
+### ⚠️ Legal, and it is a real requirement
+
+We would be tracking NAMED INDIVIDUALS across pages, not anonymous traffic.
+
+* **A privacy policy line is required** and must be live BEFORE the first
+  tracked visit, not after.
+* **CCPA/CPRA applies to any California resident** among them - and these are
+  California PI firms, so assume most of them. That brings notice-at-collection,
+  the right to know, the right to delete, and an opt-out path.
+* Deletion has to actually work: a "delete my data" request must reach
+  `email_clicks`, the visit log, and the cookie - so build the deletion path
+  WITH the feature, not after someone asks.
+
+Sean raised the privacy-policy requirement himself; this records it so it
+cannot be forgotten between now and the build.
+
+## B-funnel — funnel view (queued 2026-09-08)
+
+The numbers exist across Today and the leads list; the SHAPE does not.
+
+    in queue         1,000
+    dialed             340   34%
+    reached a human     85   25% of dialed
+    gave a name         42   49% of reached
+    gave an email       28   67% of names
+    emailed             28
+    clicked              6   21% of emailed
+    replied              3   11% of emailed
+    demo booked          1
+
+Count, percentage, and THE DROP at each step. **Highlight the worst step** -
+that is where the problem is.
+
+Two views: all time, and a date range (compare weeks). Filterable by campaign,
+and by prompt version if cheap - the question being "did a script change move a
+specific step". Today page or its own tab.
+
+Sean: *"the funnel is how I'll know whether the problem is the list, the script,
+or the email."* **Wanted BEFORE scaling past 50 real calls.**
+
+## B-pipeline-forecast — weighted pipeline (queued 2026-09-08)
+
+Uses `demands_per_month` (B-demands-volume).
+
+    monthly value  = demands_per_month x price_per_demand
+    weighted value = monthly value x P(stage)
+
+Stage probabilities configurable per campaign; starting guesses:
+`demo_booked` 40%, `engaged` 15%, `emailed` 3%, everything else 0%.
+
+Show total unweighted, total weighted, both broken down by stage, and the lead
+count at each stage. On the leads list: **monthly value as a sortable column**,
+so the big firms can be worked first.
+
+* `price_per_demand` is a CAMPAIGN setting, default **$150**
+* **`demands_per_month` is a receptionist's ESTIMATE - label it as such on
+  every screen it appears.** Directional, not a contract. A forecast built on
+  it must never be presented as a number anyone can bank.
+
+After the funnel, same reason: wanted before scaling past 50 calls.
+
+## B-lead-edit-all — edit any lead field by hand (queued 2026-09-08)
+
+Editable on lead detail: company, phone, timezone, city, state, segment,
+contact name, title, email, confirmed, `demands_per_month`, **status
+(dropdown, any value - the operator overrules the system)**, stage,
+`next_attempt_at` (reschedule a call by hand), callback person, and
+`emailed_at` (for mail sent outside the app).
+
+**Every edit writes to the timeline: what changed, from what to what, and that
+a PERSON did it, not the system.** A hand correction must stay distinguishable
+from an agent capture - that is already the rule for the email; keep it for
+everything.
+
+Validation STAYS. Phone must be E.164, timezone must pass the trigger, status
+must be a real value. **Refuse bad input rather than accepting it quietly.**
+
+⚠️ **NOTHING ON THE `calls` TABLE IS EDITABLE.** Transcripts, scores and
+timestamps are the record of what happened. Sean: *"If I could edit those I
+couldn't trust them."* This deserves a break definition, not just a habit.
+
+## B-csv-website — website column on CSV upload (queued 2026-09-08)
+
+Optional column `website` on the upload. Small on its own - but it is what
+B-auto-send-email-1 needs to compare an email domain against the firm's site,
+so build it first or that check cannot exist.
+
+## B-auto-send-email-1 — manual/auto switch for email 1 (queued 2026-09-08)
+
+Per campaign, **same pattern as the dial switch: defaults to the safe side and
+is flipped deliberately.**
+
+* **MANUAL (default)** - draft generated, waits for Sean
+* **AUTO** - sends N minutes after the call, N configurable, default **15**
+
+⚠️ **EVEN WITH AUTO ON, these go to manual review instead of sending:**
+
+* `dm_email_confirmed` is false
+* no contact name captured
+* **the email domain does not match the firm's website** (needs B-csv-website)
+* anything flagged `needs_human`
+
+Sean: *"auto handles the clean ones and I only look at the questionable ones -
+my attention goes where it's actually worth something."*
+
+Everything in the drip spec still stands: stops on any reply, bounce, DNC or
+demo booked.
+
+⚠️ **THIS IS THE FIRST THING THAT SENDS MAIL WITHOUT A HUMAN.** It needs the
+verified sender, and it needs reply detection working first - the drip's hard
+gate applies here too. Each exclusion above gets its own break definition: an
+exclusion that silently stops excluding is how a system emails the wrong
+person, and it will not show up as a failing test on its own.
