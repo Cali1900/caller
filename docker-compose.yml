@@ -75,6 +75,7 @@ services:
       DIGEST_FROM_NAME: ${DIGEST_FROM_NAME:?DIGEST_FROM_NAME not set}
       SENDER_DOMAIN: ${SENDER_DOMAIN:?SENDER_DOMAIN not set}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL-}
+      CLICK_BASE_URL: ${CLICK_BASE_URL-}
       # The email half of the dial guard. Absent -> allowlist, empty list
       # sends nothing. Prod flips it deliberately, once.
       EMAIL_MODE: ${EMAIL_MODE-}
@@ -129,6 +130,7 @@ services:
       DIGEST_FROM_NAME: ${DIGEST_FROM_NAME:?DIGEST_FROM_NAME not set}
       SENDER_DOMAIN: ${SENDER_DOMAIN:?SENDER_DOMAIN not set}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL-}
+      CLICK_BASE_URL: ${CLICK_BASE_URL-}
       # The email half of the dial guard. Absent -> allowlist, empty list
       # sends nothing. Prod flips it deliberately, once.
       EMAIL_MODE: ${EMAIL_MODE-}

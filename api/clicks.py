@@ -85,7 +85,7 @@ def rewrite(body: str, base_url: str, lead_id) -> str:
     pointed so the redirect lands exactly there.
 
     Returns the body UNCHANGED when there is no base URL or no link to rewrite.
-    An unset PUBLIC_BASE_URL must produce a plain working link, never a tracked
+    An unset CLICK_BASE_URL must produce a plain working link, never a tracked
     one pointing nowhere: failing to track is recoverable, sending a dead link
     to a lawyer is not.
     """

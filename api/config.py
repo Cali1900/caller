@@ -63,6 +63,7 @@ class Config:
     DIGEST_FROM_NAME: str
     SENDER_DOMAIN: str
     PUBLIC_BASE_URL: str
+    CLICK_BASE_URL: str
     SPACES_KEY: str
     SPACES_SECRET: str
     SPACES_ENDPOINT: str
@@ -133,6 +134,13 @@ def load_config() -> Config:
         # a tracked one pointing nowhere. Failing to track is recoverable;
         # sending a dead link to a lawyer is not.
         PUBLIC_BASE_URL=os.environ.get('PUBLIC_BASE_URL', '').strip(),
+        # WHERE TRACKED LINKS POINT, which is not the same as where this app
+        # is reachable. The marketing box proxies counselorai.io/c/ through to
+        # caller-dev, so the recipient sees the brand domain and never a
+        # hostname with "caller-dev" in it. Falls back to PUBLIC_BASE_URL so an
+        # unset value keeps working rather than producing a dead link.
+        CLICK_BASE_URL=(os.environ.get('CLICK_BASE_URL', '').strip()
+                        or os.environ.get('PUBLIC_BASE_URL', '').strip()),
         SPACES_KEY=_required('SPACES_KEY'),
         SPACES_SECRET=_required('SPACES_SECRET'),
         SPACES_ENDPOINT=_required('SPACES_ENDPOINT'),

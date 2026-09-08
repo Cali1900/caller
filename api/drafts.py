@@ -130,11 +130,11 @@ def generate_for(lead_id, force: bool = False):
             # Rewrite the sample link to a tracked one. Done HERE, on the
             # stored draft, because this is the text that gets copied into a
             # mail client - the preview shows the same thing for the same
-            # reason. An unset PUBLIC_BASE_URL leaves the plain link alone.
+            # reason. An unset CLICK_BASE_URL leaves the plain link alone.
             from api import clicks as _clicks
             from api.config import load_config as _load
             try:
-                d['body'] = _clicks.rewrite(d['body'], _load().PUBLIC_BASE_URL,
+                d['body'] = _clicks.rewrite(d['body'], _load().CLICK_BASE_URL,
                                             lead_id)
             except Exception as exc:
                 print(f'[drafts] click rewrite skipped: {exc}', flush=True)
@@ -313,7 +313,7 @@ def preview(campaign, lead=None, overrides=None):
     from api import clicks as _clicks
     from api.config import load_config as _load
     try:
-        base = _load().PUBLIC_BASE_URL
+        base = _load().CLICK_BASE_URL
         if base and lead.get('lead_id'):
             for v in out.values():
                 v['body'] = _clicks.rewrite(v['body'], base, lead['lead_id'])
