@@ -459,3 +459,69 @@ def test_the_sweep_skips_unconfirmed_emails(db):
             lid = cur.fetchone()['lead_id']
     d.generate_pending()
     assert d.get(lid) is None
+
+
+# ---------------------------------------------------------------------------
+# ONLY THE SAMPLE LINK IS TRACKED
+# ---------------------------------------------------------------------------
+
+def test_a_signature_link_is_left_alone(db):
+    """
+    THE BUG THIS FIXES. The old rewrite swept EVERY counselorai.io URL in the
+    body. With one link that was invisible; the moment a signature carries
+    https://counselorai.io - a normal thing to want, so people can find the
+    site - that becomes a tracked link too, and a click on "find us here"
+    reads as interest in the sample.
+    """
+    from api import drafts as d
+    lid = _lead_with_draft(db, 'sig@firm.example')
+    from api import campaigns as cc, db as dbm
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT campaign_id FROM leads WHERE lead_id=%s', (lid,))
+            cid = cur.fetchone()['campaign_id']
+    # BOTH variants - this lead has a gatekeeper name, so it renders the
+    # with_name one, and setting only body_without tested nothing.
+    copy = ('Sample: {{sample_link}}\n\n'
+        'Sean\n'
+        'CounselorAI · https://counselorai.io\n'
+        'Careers: https://counselorai.io/jobs\n')
+    cc.update(cid, body_without=copy, body_with_name=copy)
+    d.generate_for(lid, force=True)
+    body = d.get(lid)['body']
+
+    assert '/c/' in body, 'the sample link must still be tracked'
+    assert 'CounselorAI · https://counselorai.io\n' in body, \
+        'the signature link must be untouched'
+    assert 'https://counselorai.io/jobs' in body, \
+        'every other link must be untouched'
+    assert body.count('/c/') == 1, 'exactly ONE tracked link'
+
+
+def test_the_placeholder_survives_reordering(db):
+    """Explicit beats positional: the sample can move anywhere in the copy."""
+    from api import campaigns as cc, db as dbm, drafts as d
+    lid = _lead_with_draft(db, 'reorder@firm.example')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT campaign_id FROM leads WHERE lead_id=%s', (lid,))
+            cid = cur.fetchone()['campaign_id']
+    copy = ('See https://counselorai.io first.\n'
+            'Then the sample: {{sample_link}}\n')
+    cc.update(cid, body_without=copy, body_with_name=copy)
+    d.generate_for(lid, force=True)
+    body = d.get(lid)['body']
+    assert body.startswith('See https://counselorai.io first.')
+    assert body.count('/c/') == 1
+
+
+def test_no_tracking_configured_still_gives_a_working_link(db, monkeypatch):
+    """A dead link to a lawyer is worse than an untracked one."""
+    from api import clicks, drafts as d
+    monkeypatch.setenv('CLICK_BASE_URL', '')
+    monkeypatch.setenv('PUBLIC_BASE_URL', '')
+    lid = _lead_with_draft(db, 'nobase@firm.example')
+    d.generate_for(lid, force=True)
+    body = d.get(lid)['body']
+    assert clicks.DESTINATION in body
+    assert '/c/' not in body

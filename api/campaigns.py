@@ -54,7 +54,7 @@ one; this takes about thirty minutes.
 First one's free on a real file, no card. If it's not better than what
 you'd have sent, you've lost fifteen minutes.
 
-Sample demand, redacted: https://counselorai.io/#letter
+Sample demand, redacted: {{sample_link}}
 
 Worth a look?
 
@@ -77,7 +77,7 @@ one; this takes about thirty minutes.
 First one's free on a real file, no card. If it's not better than what
 you'd have sent, you've lost fifteen minutes.
 
-Sample demand, redacted: https://counselorai.io/#letter
+Sample demand, redacted: {{sample_link}}
 
 Worth a look?
 

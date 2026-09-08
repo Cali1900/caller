@@ -22,7 +22,7 @@ import datetime
 from api import campaigns as campaigns_mod, db
 
 PLACEHOLDERS = ('first_name', 'gatekeeper_name', 'company', 'time_of_day',
-                'sender_name', 'footer')
+                'sender_name', 'footer', 'sample_link')
 
 
 def first_name(full: str) -> str:
@@ -62,6 +62,26 @@ def render(template: str, values: dict) -> str:
     return out
 
 
+def _sample_link(lead) -> str:
+    """
+    The tracked sample URL for this lead, or the plain sample page when
+    tracking is off.
+
+    Falls back to the real URL rather than an empty string or a dead one: a
+    lead with no id (the preview's sample data) still needs a link that works
+    if someone copies it.
+    """
+    from api import clicks as _clicks
+    from api.config import load_config as _load
+    try:
+        base = _load().CLICK_BASE_URL
+        if base and lead.get('lead_id'):
+            return _clicks.tracked_url(base, lead['lead_id']) or _clicks.DESTINATION
+    except Exception as exc:
+        print(f'[drafts] sample link fell back to untracked: {exc}', flush=True)
+    return _clicks.DESTINATION
+
+
 def values_for(lead, campaign) -> dict:
     campaign = campaign or {}
     return {
@@ -72,6 +92,15 @@ def values_for(lead, campaign) -> dict:
                                     lead.get('timezone') or 'UTC'),
         'sender_name': campaign.get('sender_name') or 'Sean',
         'footer': campaign.get('sender_company_line') or 'CounselorAI LLC',
+        # THE ONLY TRACKED LINK, and it is tracked because the copy SAYS SO -
+        # not because a regex found a counselorai.io URL and assumed.
+        #
+        # The old rewrite swept every counselorai.io link in the body, which
+        # would have turned a signature URL into a tracked one the moment one
+        # was added. Explicit beats positional: the copy can be reordered, can
+        # carry any number of other links, and only this placeholder is
+        # rewritten.
+        'sample_link': _sample_link(lead),
     }
 
 
@@ -127,17 +156,6 @@ def generate_for(lead_id, force: bool = False):
                 return None      # a person has edited this - leave it alone
 
             d = build(dict(lead))
-            # Rewrite the sample link to a tracked one. Done HERE, on the
-            # stored draft, because this is the text that gets copied into a
-            # mail client - the preview shows the same thing for the same
-            # reason. An unset CLICK_BASE_URL leaves the plain link alone.
-            from api import clicks as _clicks
-            from api.config import load_config as _load
-            try:
-                d['body'] = _clicks.rewrite(d['body'], _load().CLICK_BASE_URL,
-                                            lead_id)
-            except Exception as exc:
-                print(f'[drafts] click rewrite skipped: {exc}', flush=True)
             cur.execute(
                 """INSERT INTO email_drafts (lead_id, to_email, subject, body, variant)
                    VALUES (%s,%s,%s,%s,%s)
@@ -306,17 +324,8 @@ def preview(campaign, lead=None, overrides=None):
 
     with_name = dict(lead, gatekeeper_name=lead.get('gatekeeper_name') or 'Denise')
     without = dict(lead, gatekeeper_name='')
-    out = {'with_name': build(with_name, camp),
-           'without_name': build(without, camp)}
-    # Same rewrite as the stored draft: the preview must show what will
-    # actually be sent, tracked link included.
-    from api import clicks as _clicks
-    from api.config import load_config as _load
-    try:
-        base = _load().CLICK_BASE_URL
-        if base and lead.get('lead_id'):
-            for v in out.values():
-                v['body'] = _clicks.rewrite(v['body'], base, lead['lead_id'])
-    except Exception:
-        pass
-    return out
+    # The tracked link now comes from the {{sample_link}} placeholder inside
+    # build(), so the preview shows exactly what will be sent with no second
+    # code path to drift.
+    return {'with_name': build(with_name, camp),
+            'without_name': build(without, camp)}
