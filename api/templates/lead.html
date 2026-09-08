@@ -66,6 +66,24 @@
       <b>unconfirmed</b> &mdash; confirm it above and the ladder advances.{% endif %}</p>
     {% endif %}
 
+    <h2>Status</h2>
+    <form method="post" action="/leads/{{ lead.lead_id }}/status" class="toolbar"
+          style="margin-bottom:12px">
+      <select name="status">
+        {% for st in manual_statuses %}
+        <option value="{{ st }}" {% if st == lead.status %}selected{% endif %}>{{ st }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="ghost">Set by hand</button>
+      <span class="dim">Your choice overrules the system, and lands on the
+        timeline as a hand change.</span>
+    </form>
+    {% if lead.status == 'human_review' %}
+      <p class="dim"><b>Flagged human_review.</b> Clear it once you have dealt
+         with what flagged it &mdash; nothing else will, so it holds forever
+         otherwise.</p>
+    {% endif %}
+
     <h2>Stop calling</h2>
     {% if suppressed %}
       <p class="dim">On the suppression list ({{ suppressed.reason }}) since {{ suppressed.created_at.strftime('%Y-%m-%d') }}.

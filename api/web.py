@@ -321,6 +321,7 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         'hdr': hdr, 'lead': lead, 'timeline': timeline,
         'suppressed': suppressed, 'local_time': local, 'saved': saved,
         'draft': draft, 'campaign': camp,
+        'manual_statuses': MANUAL_STATUSES,
         'clicks': clicks_mod.summary(lead['lead_id'])})
 
 
@@ -405,6 +406,65 @@ def lead_emailed(lead_id: str, emailed_by: str = Form('operator')):
         msg = 'Not at L2 - nothing changed. (Already emailed, or no confirmed email yet.)'
     else:
         msg = f"Marked emailed. Follow-up call queued for {row['next_attempt_at']:%Y-%m-%d}."
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                            status_code=303)
+
+
+# Statuses an operator may set by hand.
+#
+# EXCLUDED, deliberately, and each for its own reason:
+#   dnc      - must go through /dnc, which writes the SUPPRESSION row in the
+#              same transaction. Setting the status alone would leave a lead
+#              that LOOKS suppressed and is still dialable. Suppression is the
+#              highest-liability object here; it does not get a shortcut.
+#   dialing  - a transient claim state owned by the dialer. Set by hand it
+#              strands the lead: claimed forever, never selected again.
+# Both are easy to add back if Sean wants them; a stranded lead and an
+# unsuppressed DNC are not as easy to undo.
+MANUAL_STATUSES = ('new', 'queued', 'completed', 'callback', 'no_answer',
+                   'email_path', 'demo_pending', 'max_attempts', 'failed',
+                   'human_review', 'paused')
+
+
+@router.post('/leads/{lead_id}/status')
+def lead_status(lead_id: str, status: str = Form(...),
+                changed_by: str = Form('operator')):
+    """
+    THE OPERATOR OVERRULES THE SYSTEM.
+
+    A lead the scorer flagged human_review used to be stuck there: nothing but
+    the scorer could set it, so a flag Sean had already dealt with held the
+    lead forever.
+
+    Every change lands on the timeline saying it was done BY HAND. That
+    distinction is the point - a hand correction must never be mistakable for
+    an agent capture, and this system has no login, so "who" can only mean
+    "a person at the CRM" rather than "the system".
+    """
+    if status not in MANUAL_STATUSES:
+        msg = (f'REJECTED: {status!r} cannot be set by hand. '
+               f'Use the DNC button for dnc; "dialing" is the dialer\'s.')
+        return RedirectResponse(
+            f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT status FROM leads WHERE lead_id = %s', (lead_id,))
+            row = cur.fetchone()
+            if row is None:
+                return RedirectResponse('/?msg=no+such+lead', status_code=303)
+            was = row['status']
+            if was == status:
+                return RedirectResponse(
+                    f'/leads/{lead_id}?saved={urllib.parse.quote("Already " + status)}',
+                    status_code=303)
+            cur.execute("""UPDATE leads SET status = %s, updated_at = now()
+                            WHERE lead_id = %s""", (status, lead_id))
+            cur.execute(
+                """INSERT INTO activity (lead_id, kind, summary, detail)
+                   VALUES (%s,'status','status changed BY HAND',%s)""",
+                (lead_id, f'{was} -> {status}  (by {changed_by or "operator"})'))
+    msg = f'Status set to {status} by hand (was {was}).'
     return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
                             status_code=303)
 
