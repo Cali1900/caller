@@ -80,7 +80,22 @@ SELECT_DUE = """
      -- already started - callbacks, L3 follow-ups, retries - goes ahead of
      -- new leads. Nothing is ever dropped: what is not reached stays queued
      -- and comes up again tomorrow.
-     ORDER BY (l.first_dialed_at IS NULL), l.next_attempt_at
+     ORDER BY (l.first_dialed_at IS NULL),        -- carry-overs first
+              l.next_attempt_at,                  -- then who is most overdue
+              -- FRESH LEADS IN STABLE RANDOM ORDER, not insert order.
+              --
+              -- An uploaded list is usually sorted - alphabetically by firm,
+              -- which clusters by region and by firm type. Taking it in order
+              -- means the first hundred calls are not a sample of the list,
+              -- and the script gets tuned against a biased slice without
+              -- anyone knowing.
+              --
+              -- md5(lead_id) is STABLE: the same lead sorts to the same place
+              -- every tick, so a lead cannot be starved by reshuffling, and a
+              -- selection that is interrupted resumes where it was. It is not
+              -- cryptographic randomness and does not need to be - it needs to
+              -- be uncorrelated with the upload order, and a uuid's digest is.
+              md5(l.lead_id::text)
        FOR UPDATE OF l SKIP LOCKED
      LIMIT %(limit)s
 """

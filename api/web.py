@@ -242,10 +242,93 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
         'email_state': email_state, 'per': per, 'page_sizes': PAGE_SIZES,
+        # The count and the words for the bulk-add confirm. `total` is the
+        # matching set, which is what that button acts on - not the page.
+        'filter_desc': _filter_description(q, status, stage, needs_you,
+                                           email_state, campaign_id,
+                                           {str(c['campaign_id']): c['name']
+                                            for c in campaigns.list_all()}),
         'campaign_id': campaign_id, 'sort': sort,
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + per - 1) // per)})
+
+
+def _filter_description(q, status, stage, needs_you, email_state, campaign_id,
+                        campaigns_by_id=None):
+    """
+    The active filter, in words. Shown in the confirm so a set nobody meant
+    cannot be added by accident - "1,100 matching" is not enough on its own.
+    """
+    bits = []
+    if q:
+        bits.append(f'search = {q!r}')
+    if status:
+        bits.append(f'status = {status}')
+    if stage:
+        bits.append(f'stage = {stage}')
+    if email_state:
+        bits.append(f'email state = {email_state}')
+    if needs_you:
+        bits.append('needs you')
+    if campaign_id == 'none':
+        bits.append('no campaign')
+    elif campaign_id:
+        name = (campaigns_by_id or {}).get(str(campaign_id))
+        bits.append(f'campaign = {name or campaign_id}')
+    return ', '.join(bits) or 'NO FILTER - every lead'
+
+
+@router.post('/leads/queue-all')
+async def leads_queue_all(request: Request):
+    """
+    Add EVERY lead matching the current filter, not just this page.
+
+    Separate from the page-scoped control on purpose. Select-all stays
+    page-scoped so Sean cannot queue leads he has not looked at; this is the
+    deliberate opposite, and it says out loud how many and on what filter.
+
+    It re-runs the SAME filter server-side rather than trusting a count posted
+    from the page - the list could have changed since it rendered, and a
+    hidden field saying "1100" is a number the browser was told, not a number
+    the database agrees with.
+    """
+    form = await request.form()
+    campaign_id_target = form.get('campaign_id') or None
+    if not campaign_id_target:
+        return RedirectResponse('/?msg=pick+a+campaign+first', status_code=303)
+    camp = campaigns.get(campaign_id_target)
+    if camp is None:
+        return RedirectResponse('/?msg=no+such+campaign', status_code=303)
+
+    f = {k: form.get(k, '') for k in
+         ('q', 'status', 'stage', 'needs_you', 'email_state', 'campaign_id_filter')}
+    _, _, where, cparams = _lead_query(
+        f['q'], f['status'], f['stage'], f['needs_you'], 1, 0,
+        f['email_state'], f['campaign_id_filter'])
+
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE leads l
+                       SET campaign_id = %s, pool_status = 'active',
+                           updated_at = now()
+                     WHERE l.lead_id IN (
+                         SELECT l.lead_id FROM leads l
+                         LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+                         LEFT JOIN campaign_configs cc
+                                ON cc.campaign_id = l.campaign_id
+                         LEFT JOIN LATERAL (
+                             SELECT count(*) AS clicks
+                               FROM email_clicks ec
+                              WHERE ec.lead_id = l.lead_id) ck ON true
+                         WHERE {' AND '.join(where)})
+                       AND l.pool_status <> 'done'""",
+                [campaign_id_target] + cparams)
+            n = cur.rowcount
+    msg = (f"{n} lead(s) added to {camp['name']} and queued. "
+           f"Nothing dials until the campaign is running.")
+    return RedirectResponse(f'/?msg={urllib.parse.quote(msg)}', status_code=303)
 
 
 @router.post('/leads/queue')

@@ -300,3 +300,68 @@ def test_a_switch_mid_flight_does_not_dial_the_lead_under_the_new_campaign(db, q
         cur.execute("SELECT count(*) AS n FROM dial_audit "
                     "WHERE outcome='refused_paused'")
         assert cur.fetchone()['n'] == 1
+
+
+def test_fresh_leads_are_not_selected_in_upload_order(db, queued, no_real_calls):
+    """
+    An uploaded list is usually sorted - alphabetically by firm, which clusters
+    by region and by firm type. Taking it in insert order means the first
+    hundred calls are not a SAMPLE of the list, and the script gets tuned
+    against a biased slice without anyone knowing.
+
+    Stable random: the same lead sorts to the same place every tick, so nothing
+    is starved and an interrupted selection resumes where it was.
+    """
+    ids = _pool_leads(db, 40, prefix='+1555310')
+    queued(ids)
+    got = [str(r['lead_id']) for r in dialer.select_and_claim(_cfg(), limit=40)]
+    inserted = [str(i) for i in ids]
+    assert len(got) == 40
+    assert set(got) == set(inserted), 'every lead is still selected'
+
+    # Not merely "different from insert order" - UNCORRELATED with it. A weak
+    # assertion here passes on any incidental reordering, which is how the
+    # first version of this test let a broken guard through.
+    pos = {lid: i for i, lid in enumerate(inserted)}
+    seen = [pos[l] for l in got]
+    inversions = sum(1 for i in range(len(seen)) for j in range(i + 1, len(seen))
+                     if seen[i] > seen[j])
+    total_pairs = len(seen) * (len(seen) - 1) // 2
+    assert 0.3 < inversions / total_pairs < 0.7, (
+        f'selection order correlates with upload order: '
+        f'{inversions}/{total_pairs} inversions (a shuffle sits near 0.5, '
+        f'upload order at 0.0, exact reverse at 1.0)')
+
+
+def test_the_random_order_is_stable_across_ticks(db, queued):
+    """Not reshuffled every tick - a lead cannot be starved, and a selection
+    interrupted halfway resumes where it was."""
+    from api import db as dbm
+    ids = _pool_leads(db, 25, prefix='+1555311')
+    queued(ids)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            order = []
+            for _ in range(2):
+                cur.execute("""SELECT lead_id FROM leads
+                                WHERE phone_e164 LIKE '+1555311%'
+                                ORDER BY md5(lead_id::text)""")
+                order.append([str(r['lead_id']) for r in cur.fetchall()])
+    assert order[0] == order[1], 'the same order every time'
+
+
+def test_carryovers_still_come_before_fresh_leads(db, queued, no_real_calls):
+    """The randomisation is ONLY about which fresh lead is next. A promise
+    already made still goes first."""
+    import datetime
+    fresh = _pool_leads(db, 10, prefix='+1555312')
+    carry = _pool_leads(db, 1, prefix='+1555313')
+    now = datetime.datetime.now(datetime.UTC)
+    with db.cursor() as cur:
+        cur.execute("""UPDATE leads SET status='callback', first_dialed_at=%s,
+                              next_attempt_at=now() - interval '1 hour'
+                        WHERE lead_id=%s""", (now, carry[0]))
+    db.commit()
+    queued(fresh + carry)
+    first = dialer.select_and_claim(_cfg(), limit=1)
+    assert str(first[0]['lead_id']) == str(carry[0]), 'carry-over first'

@@ -61,6 +61,13 @@
 </div>
 
 <form method="post" action="/leads/queue">
+  {# The bulk button re-runs this filter SERVER-SIDE; these carry it. #}
+  <input type="hidden" name="q" value="{{ q or '' }}">
+  <input type="hidden" name="status" value="{{ status or '' }}">
+  <input type="hidden" name="stage" value="{{ stage or '' }}">
+  <input type="hidden" name="needs_you" value="{{ needs_you or '' }}">
+  <input type="hidden" name="email_state" value="{{ email_state or '' }}">
+  <input type="hidden" name="campaign_id_filter" value="{{ campaign_id or '' }}">
 <div class="card toolbar">
   <b>With selected:</b>
   <select name="campaign_id">
@@ -69,9 +76,18 @@
       <option value="{{ c.campaign_id }}" {% if c.is_running %}selected{% endif %}>{{ c.name }}{% if c.is_running %} (running){% endif %}</option>
     {% endfor %}
   </select>
-  <button type="submit" name="action" value="add" class="gold">Add to campaign</button>
+  <button type="submit" name="action" value="add" class="gold">Add selected to campaign</button>
     <span class="dim" id="selnote"></span>
-  <button type="submit" name="action" value="remove" class="ghost">Remove from queue</button>
+    <button type="submit" name="action" value="remove" class="ghost">Remove from queue</button>
+    <span class="spacer" style="flex:1"></span>
+    {# A SEPARATE control, worded so it cannot be confused with the one above.
+       Select-all stays page-scoped so leads nobody has looked at cannot be
+       queued; this is the deliberate opposite and says how many, on what
+       filter. #}
+    <button type="submit" formaction="/leads/queue-all" class="danger"
+      onclick="return confirm('Add {{ total }} lead{{ '' if total == 1 else 's' }} to the campaign selected on the left?\n\nMatching: {{ filter_desc }}\n\nThis is EVERY matching lead, not just this page. Nothing dials until the campaign is running.')">
+      Add all {{ '{:,}'.format(total) }} matching
+    </button>
   <span class="dim">Adding assigns and queues them &mdash; it never dials.
     {% if running %}<b>{{ running.name }}</b> is running.{% else %}<b>No campaign is running.</b>{% endif %}</span>
 </div>
