@@ -151,7 +151,6 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                (SELECT count(*) FROM calls c WHERE c.lead_id = l.lead_id) AS call_count,
                sc.agent_score  AS last_agent,
                sc.outcome_score AS last_outcome_score,
-               sc.their_words,
                ck.clicks, ck.first_minutes,
                em.email_count, em.last_email_at,
                cc.name AS campaign_name, cc.is_running AS campaign_running
@@ -170,7 +169,7 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                WHERE ea.lead_id = l.lead_id
                  AND ea.outcome IN ('sent', 'sent_manual')) em ON true
           LEFT JOIN LATERAL (
-              SELECT s.agent_score, s.outcome_score, s.their_words
+              SELECT s.agent_score, s.outcome_score
                 FROM call_scores s JOIN calls c ON c.call_id = s.call_id
                WHERE c.lead_id = l.lead_id
                ORDER BY c.created_at DESC LIMIT 1) sc ON true

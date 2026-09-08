@@ -169,10 +169,16 @@
     </p>
   {% else %}
     {% if lead.dm_email and lead.dm_email_confirmed %}
-      <p class="dim">No draft yet, but this lead has a <b>confirmed</b> email
-         &mdash; one can be written now.</p>
+      <p class="dim"><b>A draft is on its way.</b> Drafts are written by the
+         worker sweep, not inside the webhook &mdash; at the moment a capture
+         is written its row is not committed yet, so generating there would
+         read stale data. That leaves a gap of up to one tick between a
+         confirmed capture and the draft appearing. <b>Reload in a few
+         seconds.</b></p>
+      <p class="dim">If it still is not here, something failed &mdash; this
+         writes one now:</p>
       <form method="post" action="/leads/{{ lead.lead_id }}/draft/regenerate">
-        <button type="submit" class="gold">Generate draft</button>
+        <button type="submit" class="ghost">Generate draft now</button>
       </form>
     {% elif lead.dm_email %}
       <p class="dim">No draft. <b>{{ lead.dm_email }}</b> is <b>not confirmed</b>,

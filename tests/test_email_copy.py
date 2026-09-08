@@ -403,10 +403,59 @@ def test_the_page_offers_a_way_forward_from_every_no_draft_state(db, client):
     body = client.get(f'/leads/{lid}').text
     assert 'not confirmed' in body and 'tick' in body
 
-    # confirmed but no draft: an actual button
+    # confirmed but no draft: the sweep is coming, and the page SAYS so
+    # rather than inviting a click. Drafts are written by the worker, not
+    # inline in the webhook, so there is a gap of up to one tick - a page that
+    # reads "one can be written now" makes that gap look like a failure.
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE leads SET dm_email_confirmed = true
                             WHERE lead_id = %s""", (lid,))
     body = client.get(f'/leads/{lid}').text
-    assert 'Generate draft' in body
+    assert 'on its way' in body, 'the page must say a draft is coming'
+    assert 'Generate draft now' in body, 'and still offer recovery'
+
+
+def test_the_worker_sweep_generates_drafts_for_confirmed_captures(db):
+    """
+    THE NORMAL PATH, and it is not the button.
+
+    A confirmed capture from a call advances the stage in the drain and leaves
+    the draft to drafts.generate_pending(), which the worker runs each tick.
+    The button is a RECOVERY path for a hand-confirmed email, not how a clean
+    capture gets its draft.
+    """
+    from api import campaigns as cc, db as dbm, drafts as d
+    cid = cc.create('SWEEP')['campaign_id']
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
+                               dm_email, dm_email_confirmed, timezone,
+                               campaign_id, stage)
+                           VALUES ('+14245554321','W','Sara',
+                                   'sara@firm.example',true,
+                                   'America/Los_Angeles',%s,'L2')
+                           RETURNING lead_id""", (cid,))
+            lid = cur.fetchone()['lead_id']
+    assert d.get(lid) is None
+    out = d.generate_pending()
+    assert out['drafted'] >= 1, out
+    assert d.get(lid) is not None, 'the sweep must write it, with no button'
+
+
+def test_the_sweep_skips_unconfirmed_emails(db):
+    """The sweep is not a way round the confirmation guard."""
+    from api import campaigns as cc, db as dbm, drafts as d
+    cid = cc.create('SWEEP-UC')['campaign_id']
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
+                               dm_email, dm_email_confirmed, timezone,
+                               campaign_id, stage)
+                           VALUES ('+14245554322','W','Sara',
+                                   'sara@firm.example',false,
+                                   'America/Los_Angeles',%s,'L2')
+                           RETURNING lead_id""", (cid,))
+            lid = cur.fetchone()['lead_id']
+    d.generate_pending()
+    assert d.get(lid) is None
