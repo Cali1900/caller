@@ -96,3 +96,90 @@ the point is to work the L2 email queue by firm volume.
 
 Same absence rule as the other extraction fields: a call where no conversation
 happened has the field ABSENT, not null-with-meaning.
+
+# ═══════════════════════════════════════════════════════════════════════
+# EMAIL DRIP  (specified 2026-09-08)
+# ═══════════════════════════════════════════════════════════════════════
+
+**L3 CALLING IS DESCOPED ENTIRELY. A follow-up is email, not a call.**
+
+This resolves the open question from the L3 unwiring: a campaign does NOT need
+to point at a Retell agent, because there is no follow-up call. `agent_l3_version`
+and `AGENT_L3` can come out of the app once the drip lands.
+
+## The shape
+
+Every call campaign has ONE email campaign attached, **1:1**. C1's email
+campaign is C1's — its own copy, its own intervals.
+
+Sending email 1 by hand puts the lead into the drip; it runs automatically
+from there.
+
+| | | |
+|---|---|---|
+| email 1 | **MANUAL** — Sean writes, reviews, sends | sets `emailed_at` |
+| email 2 | auto | +4 days |
+| email 3 | auto | +10 days |
+| email 4 | auto | +21 days |
+| | then stop | |
+
+**Intervals are measured FROM EMAIL 1, never from the previous email**, so the
+schedule cannot drift. 4 / 10 / 21 are the starting values and are adjustable
+per campaign. Each email has its own editable copy, in the same editor as
+email 1 (subject + body, both gatekeeper variants, live preview).
+
+`emailed_at` is therefore load-bearing twice over: it anchors the click timings
+AND the entire drip schedule. It is already write-once by design — marking
+twice is a no-op — and that must not change.
+
+## What stops the drip
+
+* **ANY reply** — including "not interested" and an out-of-office
+* **bounce** — dead address: stop and flag
+* **DNC / unsubscribe**
+* **demo booked**
+* **max emails reached**
+* **Sean stops it by hand**
+
+Every stop ALERTS and records WHY.
+
+⚠️ **REPLY DETECTION IS A HARD GATE. Nothing auto-sends until it works.**
+Four emails to someone who already answered is the worst thing this system can
+do, and it is the most common way these systems fail. This is the dial-guard of
+the email side: it gets a break definition, and the auto-sender refuses to run
+if detection is unavailable — fail closed, like `assert_dialable`.
+
+## Statuses
+
+Add: `emailed` (email 1 sent, drip running), `engaged` (clicked or replied —
+HOT), `demo_booked`, `won`, `lost` (explicit no, or drip finished with nothing).
+
+**EVERY STATUS IS MANUALLY CHANGEABLE.** A dropdown on lead detail sets any of
+them at any time; the change goes to the timeline with WHO and WHEN. The system
+sets statuses automatically and Sean overrules it.
+
+**The qualified line is ENGAGED.** That is where he acts.
+
+## Engagement scoring
+
+Per lead, visible in the list and **sortable**:
+
+| signal | weight |
+|---|---|
+| replied | strongest |
+| clicked | strong |
+| opened | **ZERO** |
+
+**Opens are recorded and never scored.** Apple Mail Privacy Protection
+pre-loads pixels, so an open fires whether or not a human looked. Store it,
+show it greyed as context, never score on it, never trigger anything from it.
+An open must not create `engaged`, must not stop the drip, must not alert.
+
+## Build order
+
+1. **click tracking** (item 7, in progress)
+2. **reply detection** — the guard, before ANY auto-send
+3. **bounce handling**
+4. **the drip itself**
+5. **statuses + manual override**
+6. **scoring**

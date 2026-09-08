@@ -221,7 +221,13 @@ for k in ('LABEL', 'TARGET', 'EXPECT'):
   # thing that makes targeted mode sound.
   if [[ $FULL -eq 0 ]]; then
     if ! ./scripts/test.sh -q -k "$EXPECT" > /tmp/bp_pre 2>&1; then
-      if grep -qE "no tests ran|ERROR: not found" /tmp/bp_pre; then
+      pre_rc=$?
+      # pytest exits 5 when it collected NOTHING, and prints "N deselected"
+      # rather than "no tests ran" - which is how a break naming a RENAMED test
+      # slipped past this check and was reported as "already red" instead of
+      # "that test does not exist".
+      if [[ $pre_rc -eq 5 ]] || grep -qE "no tests ran|ERROR: not found" /tmp/bp_pre \
+         || ! grep -qE "[0-9]+ (passed|failed)" /tmp/bp_pre; then
         echo "  BASELINE: no test named '$EXPECT' exists <-- not coverage"
       else
         echo "  BASELINE: '$EXPECT' is ALREADY RED with the guard in place"
