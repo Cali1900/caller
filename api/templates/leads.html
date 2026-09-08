@@ -33,6 +33,11 @@
     <a class="dim" href="/">reset</a>
     <span class="spacer" style="flex:1"></span>
     <a href="/export.csv?{{ qs }}">Export CSV</a>
+    <span class="dim">sort</span>
+    <select name="sort" onchange="this.form.submit()">
+      <option value="recent" {% if sort != 'volume' %}selected{% endif %}>most recent call</option>
+      <option value="volume" {% if sort == 'volume' %}selected{% endif %}>demands/month</option>
+    </select>
     <span class="dim">per page</span>
     <select name="per" onchange="this.form.submit()">
       {% for n in page_sizes %}
@@ -79,6 +84,7 @@
   <th>Firm</th><th>Campaign</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
   <th>Contact</th><th>Email</th><th>Follow-up</th><th class="right">Calls</th>
   <th class="right">Emails</th><th>Last email</th>
+  <th class="right" title="A receptionist's estimate - directional, not a contract">Demands/mo</th>
   <th class="right">Agent</th><th class="right">Outcome</th><th>Last call</th></tr>
 {% for l in leads %}
 <tr>
@@ -109,12 +115,15 @@
   <td class="right dim">{{ l.call_count or 0 }}</td>
   <td class="right dim">{{ l.email_count or 0 }}</td>
   <td class="dim">{{ l.last_email_at.strftime('%b %d %H:%M') if l.last_email_at else '' }}</td>
+  <td class="right">{% if l.demands_per_month is not none %}<b title="{{ l.demands_per_month_raw }}">{{ l.demands_per_month }}</b>
+      {% elif l.demands_per_month_raw %}<span class="dim" title="{{ l.demands_per_month_raw }}">said?</span>
+      {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
   <td class="right"><span class="score {{ l.agent_class }}">{{ l.last_agent if l.last_agent is not none else '' }}</span></td>
   <td class="right"><span class="score {{ l.outcome_class }}">{{ l.last_outcome_score if l.last_outcome_score is not none else '' }}</span></td>
   <td class="dim">{{ l.last_called_at.strftime('%b %d %H:%M') if l.last_called_at else '' }}</td>
 </tr>
 {% else %}
-<tr><td colspan="16" class="dim">No leads match.
+<tr><td colspan="17" class="dim">No leads match.
   {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV above to fill the pool.{% endif %}</td></tr>
 {% endfor %}
 </table>

@@ -26,7 +26,8 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from api import (campaigns, clicks as clicks_mod, db, funnel as funnel_mod,
+from api import (campaigns, clicks as clicks_mod, db,
+                 forecast as forecast_mod, funnel as funnel_mod,
                  digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
                  prompts as prompts_mod, stages,
@@ -125,8 +126,16 @@ _EMAIL_STATE = """
 EMAIL_STATES = ('draft_ready', 'sent', 'clicked', 'replied', 'none')
 
 
+SORTS = {
+    'recent': '(l.last_called_at IS NULL), l.last_called_at DESC, l.created_at DESC',
+    # NULLS LAST on purpose: a firm that declined to answer is not a firm that
+    # sends no demands, and sorting it alongside the zeros would say it is.
+    'volume': 'l.demands_per_month DESC NULLS LAST, l.company',
+}
+
+
 def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
-                campaign_id=''):
+                campaign_id='', sort='recent'):
     where, params = ["1=1"], []
     if q:
         where.append("(l.company ILIKE %s OR l.phone_e164 ILIKE %s "
@@ -153,6 +162,10 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                sc.outcome_score AS last_outcome_score,
                ck.clicks, ck.first_minutes,
                em.email_count, em.last_email_at,
+               -- A RECEPTIONIST'S ESTIMATE. Sortable so the big firms can be
+               -- worked first; NULLS LAST because "did not answer" is not
+               -- "sends none" and must never sort as zero.
+               l.demands_per_month, l.demands_per_month_raw,
                cc.name AS campaign_name, cc.is_running AS campaign_running
           FROM leads l
           LEFT JOIN campaign_configs cc ON cc.campaign_id = l.campaign_id
@@ -174,15 +187,17 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                WHERE c.lead_id = l.lead_id
                ORDER BY c.created_at DESC LIMIT 1) sc ON true
          WHERE {' AND '.join(where)}
-         ORDER BY (l.last_called_at IS NULL), l.last_called_at DESC, l.created_at DESC
+         ORDER BY {{order}}
          LIMIT %s OFFSET %s"""
+    sql = sql.replace('{order}', SORTS.get(sort, SORTS['recent']))
     return sql, params + [limit, offset], where, params
 
 
 @router.get('/', response_class=HTMLResponse)
 def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
                needs_you: str = '', email_state: str = '', campaign_id: str = '',
-               page: int = 1, per: int = PAGE, msg: str = ''):
+               sort: str = 'recent', page: int = 1, per: int = PAGE,
+               msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
@@ -191,7 +206,7 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         hdr = _header(conn, cfg)
         sql, params, where, cparams = _lead_query(
             q, status, stage, needs_you, per, (page - 1) * per, email_state,
-            campaign_id)
+            campaign_id, sort)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
@@ -218,13 +233,14 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
          (('q', q), ('status', status), ('stage', stage),
           ('needs_you', needs_you), ('email_state', email_state),
           ('campaign_id', campaign_id),
+          ('sort', sort if sort != 'recent' else ''),
           ('per', per if per != PAGE else ''))
          if v})
     return templates.TemplateResponse(request, 'leads.html', {
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
         'email_state': email_state, 'per': per, 'page_sizes': PAGE_SIZES,
-        'campaign_id': campaign_id,
+        'campaign_id': campaign_id, 'sort': sort,
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + per - 1) // per)})
@@ -352,10 +368,22 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         'clicks': clicks_mod.summary(lead['lead_id'])})
 
 
+def _int_or_none(v):
+    """Blank means NOT ANSWERED, which is null - never zero."""
+    v = (v or '').strip()
+    if not v:
+        return None
+    try:
+        n = int(v)
+    except ValueError:
+        return None
+    return n if 0 <= n <= 10000 else None
+
+
 @router.post('/leads/{lead_id}/edit')
 def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
               dm_email: str = Form(''), dm_email_confirmed: str = Form(''),
-              notes: str = Form('')):
+              demands_per_month: str = Form(''), notes: str = Form('')):
     """Fix a wrong email. Every edit lands on the timeline."""
     confirmed = {'true': True, 'false': False}.get(dm_email_confirmed, None)
     with db.get_conn() as conn:
@@ -365,10 +393,12 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
             cur.execute(
                 """UPDATE leads SET dm_name = NULLIF(%s,''), dm_title = NULLIF(%s,''),
                           dm_email = NULLIF(%s,''), dm_email_confirmed = %s,
+                          demands_per_month = %s,
                           notes = NULLIF(%s,''), updated_at = now()
                     WHERE lead_id = %s""",
                 (dm_name.strip(), dm_title.strip(), dm_email.strip(),
-                 confirmed, notes.strip(), lead_id))
+                 confirmed, _int_or_none(demands_per_month),
+                 notes.strip(), lead_id))
             old = (prev or {}).get('dm_email')
             changed = old != (dm_email.strip() or None)
             if changed:
@@ -628,13 +658,14 @@ def funnel_page(request: Request, campaign_id: str = '', agent_version: str = ''
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
     data = funnel_mod.build(campaign_id, agent_version, date_from, date_to)
+    fc = forecast_mod.build(campaign_id)
     return templates.TemplateResponse(request, 'funnel.html', {
         'hdr': hdr, 'rows': data['rows'], 'counts': data['counts'],
         'thin': data['thin'],
         'campaigns': campaigns.list_all(),
         'versions': funnel_mod.versions_seen(campaign_id),
         'campaign_id': campaign_id, 'agent_version': agent_version,
-        'date_from': date_from, 'date_to': date_to})
+        'date_from': date_from, 'date_to': date_to, 'fc': fc})
 
 
 @router.get('/prompts', response_class=HTMLResponse)

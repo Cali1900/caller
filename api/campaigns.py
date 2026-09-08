@@ -33,7 +33,12 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version', 'agent_l3_version',
                  'dial_interval_max',
                  # Email 1: manual or auto, and how long after the call.
                  # DEFAULTS TO MANUAL - see api/autosend.py.
-                 'email_1_mode', 'email_1_delay_minutes') + TEMPLATE_FIELDS
+                 'email_1_mode', 'email_1_delay_minutes',
+                 # Pipeline forecast. The probabilities are GUESSES and are
+                 # per campaign, because two campaigns aimed at different
+                 # segments will not convert alike.
+                 'price_per_demand', 'p_demo_booked', 'p_engaged',
+                 'p_emailed') + TEMPLATE_FIELDS
 
 # The copy a NEW campaign starts with. Held here rather than as a column
 # DEFAULT so there is exactly one place in the running app that says what the

@@ -55,6 +55,37 @@
 {% endfor %}
 </table>
 
+<h2 style="margin-top:1.6em">Pipeline forecast</h2>
+<p class="dim">monthly value = <b>demands/month &times; ${{ '%.0f'|format(fc.price or 150) }}</b>,
+   weighted by how far the lead has got.</p>
+<div class="banner warn">
+  <b>Every number here rests on a receptionist's estimate.</b> She answered from
+  memory, in passing, to a stranger. Directional, not a contract &mdash; and not
+  a figure to repeat as if it were one.
+  {% if fc.no_volume %}<br>{{ fc.no_volume }} lead(s) gave no number and
+  contribute <b>nothing</b>: she did not answer, which is not zero.{% endif %}
+</div>
+
+<table>
+<tr><th>Stage</th><th class="right">Leads</th><th class="right">with a number</th>
+    <th class="right">weight</th><th class="right">monthly</th>
+    <th class="right">weighted</th></tr>
+{% for r in fc.rows %}
+<tr>
+  <td>{{ r.label }}</td>
+  <td class="right">{{ r.leads }}</td>
+  <td class="right dim">{{ r.with_volume }}{% if r.no_volume %} <span class="dim">(+{{ r.no_volume }} unknown)</span>{% endif %}</td>
+  <td class="right dim">{% if r.stage == 'unweighted' %}&mdash;{% else %}{{ (r.weight * 100)|round|int }}%{% endif %}</td>
+  <td class="right">${{ '{:,.0f}'.format(r.monthly) }}</td>
+  <td class="right"><b>${{ '{:,.0f}'.format(r.weighted) }}</b></td>
+</tr>
+{% endfor %}
+<tr><td><b>Total</b></td><td class="right"></td><td class="right dim">{{ fc.with_volume }}</td>
+    <td class="right"></td>
+    <td class="right"><b>${{ '{:,.0f}'.format(fc.total_monthly) }}</b></td>
+    <td class="right"><b>${{ '{:,.0f}'.format(fc.total_weighted) }}</b></td></tr>
+</table>
+
 <p class="dim" style="margin-top:1em">
   <b>replied</b> and <b>demo booked</b> are measured against <b>emailed</b>,
   not against each other &mdash; they are outcomes of the same step rather

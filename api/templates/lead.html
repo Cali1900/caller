@@ -15,6 +15,13 @@
         <div>timezone</div><div class="dim">{{ lead.timezone }} &mdash; local {{ local_time }}</div>
         <div>name</div><div><input name="dm_name" value="{{ lead.dm_name or '' }}" size="24"></div>
         <div>title</div><div><input name="dm_title" value="{{ lead.dm_title or '' }}" size="24"></div>
+        <div>demands/mo</div><div>
+          <input name="demands_per_month" type="number" min="0" max="10000"
+                 value="{{ lead.demands_per_month if lead.demands_per_month is not none else '' }}" size="6">
+          <span class="dim">a <b>receptionist's estimate</b> &mdash; directional,
+            not a contract. <b>Blank means she did not answer</b>, which is not
+            zero.{% if lead.demands_per_month_raw %}<br>She said:
+            &ldquo;{{ lead.demands_per_month_raw }}&rdquo;{% endif %}</span></div>
         <div>email</div><div><input name="dm_email" value="{{ lead.dm_email or '' }}" size="30"></div>
         <div>confirmed</div><div>
           <select name="dm_email_confirmed">

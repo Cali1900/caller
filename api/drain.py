@@ -302,6 +302,29 @@ def _handle_call_analyzed(conn, call: dict) -> None:
                 'UPDATE leads SET gatekeeper_name = COALESCE(%s, gatekeeper_name),'
                 ' updated_at = now() WHERE lead_id = %s', (gatekeeper, lead_id))
 
+    # HOW MANY DEMANDS A MONTH. Asked only after a name AND an email, and
+    # dropped immediately if she does not know - so an absent field is the
+    # normal case, not a failure.
+    #
+    # The VERBATIM is stored whatever happens; the number is parsed only where
+    # one is clearly stated. NULL means she did not answer and must never be
+    # read as zero - a firm that declined is not a firm that sends none.
+    volume_raw = _field(analysis, 'demands_per_month')
+    if volume_raw:
+        from api import volume as volume_mod
+        n, note = volume_mod.parse(volume_raw)
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE leads
+                      SET demands_per_month_raw = %s,
+                          demands_per_month = COALESCE(%s, demands_per_month),
+                          updated_at = now()
+                    WHERE lead_id = %s""", (volume_raw, n, lead_id))
+        _activity(conn, lead_id, call_id,
+                  'demand volume captured'
+                  + ('' if n is not None else ' (no number - %s)' % note),
+                  f'"{volume_raw}"' + (f' -> {n}/month' if n is not None else ''))
+
     saw_email = _bool_field(analysis, 'decision_maker_saw_email')
     next_step = _field(analysis, 'best_next_step')
 
