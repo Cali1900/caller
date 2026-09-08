@@ -549,9 +549,23 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
                          daily_cap=daily_cap, max_concurrent=max_concurrent,
                          dial_interval_min=dial_interval_min,
                          dial_interval_max=dial_interval_max)
-        msg = 'saved'
+        msg = f'saved - prompt v{agent_l1_version} is now live'
     except Exception as exc:
-        msg = f'REJECTED: {str(exc)[:150]}'
+        # A raw constraint violation is a wall of Postgres. Say what the
+        # operator did wrong, in the terms they used.
+        text = str(exc)
+        if 'agent_l1_version_check' in text:
+            msg = (f'REJECTED: v{agent_l1_version} is not a valid version '
+                   f'number. Nothing changed.')
+        elif 'daily_cap_check' in text:
+            msg = f'REJECTED: daily cap must be 1-5000. Nothing changed.'
+        elif 'max_concurrent_check' in text:
+            msg = f'REJECTED: calls in flight must be 1-10. Nothing changed.'
+        elif 'dial_interval' in text:
+            msg = ('REJECTED: the gap must be 15-3600s (min) and 15-7200s '
+                   '(max). Nothing changed.')
+        else:
+            msg = f'REJECTED: {text[:150]}'
     return RedirectResponse(f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}',
                             status_code=303)
 

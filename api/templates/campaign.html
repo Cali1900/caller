@@ -5,7 +5,7 @@
   {% else %}<span class="pill">stopped</span>{% endif %}</h1>
 <p class="sub"><a href="/campaigns">&larr; all campaigns</a>
    {% if c.notes %}&middot; {{ c.notes }}{% endif %}</p>
-{% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
+{% if msg %}<div class="banner{% if 'REJECTED' in msg %} warn{% endif %}">{{ msg }}</div>{% endif %}
 
 <div class="card">
   <div class="toolbar" style="justify-content:space-between">
@@ -90,7 +90,7 @@
         <div class="verscroll">
         <table class="vertable">
           {% for r in prompt_rows['L1'] %}
-          <tr class="{% if r.agent_version == c.agent_l1_version %}islive{% endif %}">
+          <tr data-v="{{ r.agent_version }}" class="{% if r.agent_version == c.agent_l1_version %}islive{% endif %}">
             <td class="verpick">
               <input type="radio" id="v{{ r.agent_version }}"
                      name="agent_l1_version" value="{{ r.agent_version }}"
@@ -105,6 +105,10 @@
           </tr>{% endfor %}
         </table>
         </div>
+        <p class="verbar">
+          <button type="submit" class="gold">Save prompt version</button>
+          <span id="vernote" class="dim"></span>
+        </p>
       </div>
       <p class="dim" style="margin-bottom:0">The version is a <b>property</b> of
          this campaign. Two campaigns can run the same one. Every call records
@@ -260,4 +264,38 @@
 })();
 </script>
 
+
+<script>
+// THE LIVE ROW MUST BE THE ONE YOU SEE.
+//
+// The list scrolls, and v15 sitting at the top with v9 (live) hidden at the
+// bottom made the panel read as "v15 is live" when it was not - which is the
+// exact confusion the radios were meant to remove. So: scroll the live row
+// into view on load, and say out loud when the selection differs from it.
+(function () {
+  var box = document.querySelector('.verscroll');
+  if (!box) return;
+  var live = box.querySelector('tr.islive');
+  if (live) live.scrollIntoView({block: 'center'});
+
+  var note = document.getElementById('vernote');
+  var liveVersion = live ? live.getAttribute('data-v') : null;
+  function refresh() {
+    var picked = box.querySelector('input[name=agent_l1_version]:checked');
+    if (!note || !picked) return;
+    if (picked.value === liveVersion) {
+      note.textContent = 'v' + liveVersion + ' is live.';
+      note.classList.remove('warn');
+    } else {
+      note.textContent = 'v' + picked.value + ' selected \u2014 v' +
+                         liveVersion + ' is still live. Save to switch.';
+      note.classList.add('warn');
+    }
+  }
+  box.querySelectorAll('input[name=agent_l1_version]').forEach(function (r) {
+    r.addEventListener('change', refresh);
+  });
+  refresh();
+})();
+</script>
 {% endblock %}
