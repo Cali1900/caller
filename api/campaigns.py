@@ -30,7 +30,10 @@ TEMPLATE_FIELDS = ('subject_with_name', 'subject_without',
 CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version', 'agent_l3_version',
                  'sender_email', 'sender_name', 'sender_company_line',
                  'daily_cap', 'max_concurrent', 'dial_interval_min',
-                 'dial_interval_max') + TEMPLATE_FIELDS
+                 'dial_interval_max',
+                 # Email 1: manual or auto, and how long after the call.
+                 # DEFAULTS TO MANUAL - see api/autosend.py.
+                 'email_1_mode', 'email_1_delay_minutes') + TEMPLATE_FIELDS
 
 # The copy a NEW campaign starts with. Held here rather than as a column
 # DEFAULT so there is exactly one place in the running app that says what the
@@ -217,7 +220,22 @@ def set_windows(campaign_id, rows):
 
 
 def update(campaign_id, **fields):
-    clean = {k: v for k, v in fields.items() if k in CONFIG_FIELDS}
+    """
+    REFUSES an unknown field instead of ignoring it.
+
+    This used to filter silently to CONFIG_FIELDS. Adding email_1_mode as a
+    column and forgetting to list it here meant update() accepted the call,
+    returned a row, and changed nothing - the switch would have read as ON in
+    the UI while the gate saw 'manual'. Same family as the dead settings keys:
+    a write that goes nowhere and says nothing.
+    """
+    unknown = sorted(set(fields) - set(CONFIG_FIELDS))
+    if unknown:
+        raise ValueError(
+            f'not campaign config fields: {", ".join(unknown)}. '
+            f'Add the column to CONFIG_FIELDS or stop writing it - silently '
+            f'dropping it is how a setting appears to save and does nothing.')
+    clean = dict(fields)
     if not clean:
         return get(campaign_id)
     sets = ', '.join(f'{k} = %s' for k in clean)

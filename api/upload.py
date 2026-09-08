@@ -22,7 +22,10 @@ from api import db, timezones
 # timezone column still WINS - it is the authoritative override.
 REQUIRED = ('company', 'phone')
 NEEDS_ONE_OF = ('timezone', 'state')
-OPTIONAL = ('city', 'state', 'segment', 'external_ref')
+# `website` is optional but load-bearing: the auto-send domain check compares
+# the captured email against it, and without it that check cannot run - so a
+# lead with no website can only auto-send on a known free-mail address.
+OPTIONAL = ('city', 'state', 'segment', 'external_ref', 'website')
 
 _ZONES = available_timezones()
 
