@@ -8,7 +8,7 @@ removing the start button removed what stopped "add 500 leads" becoming
 
 import pytest
 
-from api import dialer, settings as settings_mod, upload
+from api import campaigns, dialer, settings as settings_mod, upload
 
 LA = 'America/Los_Angeles'
 
@@ -104,10 +104,10 @@ def test_pausing_stops_selection_immediately(db, queued, no_real_calls):
     """
     ids = _pool_leads(db, 3, prefix='+1555220')
     queued(ids)
-    settings_mod.set_many({'dialing_enabled': 'false'})
+    campaigns.stop(queued.campaign_id)
     assert dialer.select_and_claim(_cfg(), limit=10) == []
 
-    settings_mod.set_many({'dialing_enabled': 'true'})
+    campaigns.start(queued.campaign_id)
     assert len(dialer.select_and_claim(_cfg(), limit=10)) > 0
 
 
@@ -124,7 +124,7 @@ def test_pausing_blocks_a_lead_that_was_already_claimed(db, queued, no_real_call
     claimed = dialer.select_and_claim(_cfg(), limit=5)
     assert len(claimed) == 1
 
-    settings_mod.set_many({'dialing_enabled': 'false'})
+    campaigns.stop(queued.campaign_id)
     assert dialer.dial_one(_cfg(), claimed[0]) is None
     assert no_real_calls == []
     with db.cursor() as cur:
@@ -134,8 +134,29 @@ def test_pausing_blocks_a_lead_that_was_already_claimed(db, queued, no_real_call
 
 
 def test_a_lead_not_in_the_queue_is_never_a_candidate(db, queued):
+    """
+    ISOLATES queue membership.
+
+    The leads must be ASSIGNED to the running campaign, or CAMPAIGN_MEMBERSHIP
+    excludes them first and removing the queue filter changes nothing - which
+    is exactly how this passed while testing nothing. Assigned but left in the
+    pool, so `pool_status = 'active'` is the only filter that can exclude them.
+    """
     ids = _pool_leads(db, 2, prefix='+1555230')
-    queued([])                        # switch on, but queue nothing
+    queued([])                        # start the campaign, queue nothing
+    campaigns.assign([str(i) for i in ids], queued.campaign_id)
+    with db.cursor() as cur:
+        cur.execute("UPDATE leads SET pool_status='pool' "
+                    "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
+    db.commit()
+
+    with db.cursor() as cur:      # the premise: they would pass every other filter
+        cur.execute("""SELECT count(*) AS n FROM leads
+                        WHERE campaign_id=%s AND pool_status='pool'
+                          AND stage IN ('L1','L3') AND replied_at IS NULL""",
+                    (queued.campaign_id,))
+        assert cur.fetchone()['n'] == 2
+
     assert dialer.select_and_claim(_cfg(), limit=10) == []
 
 
@@ -144,7 +165,7 @@ def test_a_lead_not_in_the_queue_is_never_a_candidate(db, queued):
 # --------------------------------------------------------------------------
 
 def test_the_cap_counts_new_leads(db, queued, no_real_calls):
-    settings_mod.set_many({'daily_cap': 2, 'max_concurrent': 1})
+    campaigns.update(queued.campaign_id, daily_cap=2, max_concurrent=1)
     queued(_pool_leads(db, 5, prefix='+1555240'))
     for _ in range(5):
         dialer.run_once(_cfg())
@@ -162,7 +183,7 @@ def test_a_carryover_is_exempt_from_the_cap(db, queued, no_real_calls):
     exemption can let it through.
     """
     import datetime
-    settings_mod.set_many({'daily_cap': 1, 'max_concurrent': 1})
+    campaigns.update(queued.campaign_id, daily_cap=1, max_concurrent=1)
     spent = _pool_leads(db, 1, prefix='+1555251')
     carry = _pool_leads(db, 1, prefix='+1555252')
     now = datetime.datetime.now(datetime.UTC)
@@ -184,7 +205,7 @@ def test_a_carryover_is_exempt_from_the_cap(db, queued, no_real_calls):
 
 def test_carryovers_are_dialed_before_new_leads(db, queued, no_real_calls):
     import datetime
-    settings_mod.set_many({'daily_cap': 100, 'max_concurrent': 1})
+    campaigns.update(queued.campaign_id, daily_cap=100, max_concurrent=1)
     new_ids = _pool_leads(db, 2, prefix='+1555260')
     old_ids = _pool_leads(db, 2, prefix='+1555270')
     with db.cursor() as cur:
@@ -231,7 +252,7 @@ def test_upload_lands_in_the_pool_not_the_queue(db):
 
 def test_nothing_is_lost_when_the_day_ends(db, queued, no_real_calls):
     """Anything not reached stays queued - there is no rollover step to miss."""
-    settings_mod.set_many({'daily_cap': 1, 'max_concurrent': 1})
+    campaigns.update(queued.campaign_id, daily_cap=1, max_concurrent=1)
     ids = _pool_leads(db, 4, prefix='+1555290')
     queued(ids)
     for _ in range(4):
@@ -240,3 +261,33 @@ def test_nothing_is_lost_when_the_day_ends(db, queued, no_real_calls):
         cur.execute("""SELECT count(*) AS n FROM leads
                         WHERE pool_status='active' AND first_dialed_at IS NULL""")
         assert cur.fetchone()['n'] == 3, 'the undialed leads stay in the queue'
+
+
+def test_a_switch_mid_flight_does_not_dial_the_lead_under_the_new_campaign(db, queued,
+                                                                          no_real_calls):
+    """
+    ISOLATES the re-read.
+
+    dial_one used the campaign row captured on the lead at SELECTION time, so
+    a pause during an in-flight batch was invisible to the guard that exists
+    for exactly that case. Worse: stopping A and starting B let A's claimed
+    lead dial under B's cap, spacing and prompt version.
+
+    Claimed under A, switched to B before dialing. B is running, so a guard
+    that only asks "is anything running" passes.
+    """
+    ids = _pool_leads(db, 1, prefix='+1555226')
+    queued(ids)
+    claimed = dialer.select_and_claim(_cfg(), limit=5)
+    assert len(claimed) == 1
+
+    other = campaigns.create('OTHER')
+    campaigns.start(other['campaign_id'], stop_running=True)
+    assert campaigns.running()['campaign_id'] == other['campaign_id']
+
+    assert dialer.dial_one(_cfg(), claimed[0]) is None
+    assert no_real_calls == []
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM dial_audit "
+                    "WHERE outcome='refused_paused'")
+        assert cur.fetchone()['n'] == 1

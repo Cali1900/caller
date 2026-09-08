@@ -40,7 +40,7 @@ def _queue_the_lead(db, request):
         return
     from api import settings as settings_mod
     settings_mod._cache.update(at=0.0, values=None)
-    settings_mod.set_many({'dialing_enabled': 'true'}, updated_by='test')
+    # `lead` attaches the lead to a RUNNING campaign; that is the switch now.
     lead = request.getfixturevalue('lead')
     with db.cursor() as cur:
         cur.execute("UPDATE leads SET pool_status='active' WHERE lead_id=%s",

@@ -1,8 +1,10 @@
-{% extends "base.html" %}{% block title %}Campaign · Caller{% endblock %}
+{% extends "base.html" %}{% block title %}{{ c.name }} · Caller{% endblock %}
 {% block body %}
-<h1>Campaign</h1>
-<p class="sub">One standing queue. Add leads whenever; it dials up to the daily
-   cap of new leads inside your window, then picks up tomorrow.</p>
+<h1>{{ c.name }}
+  {% if c.is_running %}<span class="pill completed">RUNNING</span>
+  {% else %}<span class="pill">stopped</span>{% endif %}</h1>
+<p class="sub"><a href="/campaigns">&larr; all campaigns</a>
+   {% if c.notes %}&middot; {{ c.notes }}{% endif %}</p>
 {% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
 
 <div class="card">
@@ -11,176 +13,226 @@
       <div class="m"><b>{{ queue.queued or 0 }}</b><span>in queue</span></div>
       <div class="m"><b>{{ queue.queued_carry or 0 }}</b><span>carry-overs first</span></div>
       <div class="m"><b>{{ queue.queued_new or 0 }}</b><span>new waiting</span></div>
-      <div class="m"><b>{{ queue.new_today or 0 }}/{{ settings.daily_cap }}</b><span>new today</span></div>
+      <div class="m"><b>{{ queue.new_today or 0 }}/{{ c.daily_cap }}</b><span>new today</span></div>
       <div class="m"><b>{{ remaining }}</b><span>left today (~{{ hours_left }}h)</span></div>
-      <div class="m"><b>{{ queue.pool or 0 }}</b><span>in pool, not queued</span></div>
+      <div class="m"><b>{{ queue.pool or 0 }}</b><span>assigned, not queued</span></div>
     </div>
     <div style="text-align:right">
       <div style="margin-bottom:8px">
-        <span class="livedot {{ 'on' if settings.dialing_enabled else 'off' }}"></span>
-        <b style="font-family:Sora">{{ 'DIALING' if settings.dialing_enabled else 'PAUSED' }}</b>
+        <span class="livedot {{ 'on' if c.is_running else 'off' }}"></span>
+        <b style="font-family:Sora">{{ 'RUNNING' if c.is_running else 'STOPPED' }}</b>
       </div>
-      <form class="inline" method="post" action="/campaign/dialing">
-        {% if settings.dialing_enabled %}
-          <input type="hidden" name="on" value="false">
-          <button type="submit" class="danger">Pause dialing</button>
-        {% else %}
-          <input type="hidden" name="on" value="true">
-          <button type="submit" class="gold"
-            onclick="return confirm('Start dialing? It will keep going until you pause it.')">Start dialing</button>
-        {% endif %}
-      </form>
+      {% if c.is_running %}
+        <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/stop">
+          <button type="submit" class="danger">Stop {{ c.name }}</button></form>
+      {% else %}
+        <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/start">
+          <button type="submit" class="gold">Start {{ c.name }}</button></form>
+      {% endif %}
     </div>
   </div>
-  <p class="dim" style="margin-bottom:0">This switch is the only thing that
-     dials. Adding leads to the queue never does &mdash; it defaults to paused
-     and stays where you leave it.</p>
+  <p class="dim" style="margin-bottom:0">
+    {% if running and not c.is_running %}
+      <b>{{ running.name }} is running.</b> Starting {{ c.name }} will ask you to
+      stop it first &mdash; the system never swaps silently.
+    {% else %}
+      Only a running campaign dials. Adding leads never starts it.
+    {% endif %}</p>
 </div>
 
+<form method="post" action="/campaign/{{ c.campaign_id }}/save">
 <div class="config-split">
   <div>
     <div class="card">
+      <h2>Identity</h2>
+      <div class="field"><label for="nm">Name</label>
+        <input id="nm" name="name" value="{{ c.name }}" required></div>
+      <div class="field"><label for="nt">Notes</label>
+        <input id="nt" name="notes" value="{{ c.notes or '' }}"></div>
+    </div>
+
+    <div class="card">
       <h2>Daily cap</h2>
-      <form method="post" action="/campaign/cap">
-        <div class="field">
-          <label for="cap">New leads per day</label>
-          <input id="cap" name="daily_cap" type="number" min="1" max="5000"
-                 value="{{ settings.daily_cap }}">
-        </div>
-        <button type="submit" class="ghost">Save cap</button>
-        <p class="dim" style="margin-bottom:0">Callbacks, L3 follow-ups and
-           retries go ahead of new leads and do <b>not</b> use this.</p>
-      </form>
+      <div class="field"><label for="cap">New leads per day</label>
+        <input id="cap" name="daily_cap" type="number" min="1" max="5000"
+               value="{{ c.daily_cap }}"></div>
+      <p class="dim" style="margin-bottom:0">Callbacks, L3 follow-ups and retries
+         go ahead of new leads and do <b>not</b> use this.</p>
     </div>
 
     <div class="card">
       <h2>Spacing</h2>
-      <form method="post" action="/campaign/spacing">
-        <div class="field">
-          <label for="mc">Calls at a time</label>
-          <input id="mc" name="max_concurrent" type="number" min="1" max="10"
-                 value="{{ settings.max_concurrent }}">
-        </div>
-        <div class="fields-2">
-          <div class="field">
-            <label for="gmin">Gap min (s)</label>
-            <input id="gmin" name="dial_interval_min" type="number" min="15" max="3600"
-                   value="{{ settings.dial_interval_min }}">
-          </div>
-          <div class="field">
-            <label for="gmax">Gap max (s)</label>
-            <input id="gmax" name="dial_interval_max" type="number" min="15" max="7200"
-                   value="{{ settings.dial_interval_max }}">
-          </div>
-        </div>
-        <button type="submit" class="ghost">Save spacing</button>
-        <p class="dim" style="margin-bottom:0">Random within the range each tick.
-          About <b>{{ per_hour }}</b> calls/hour.</p>
-      </form>
-    </div>
-
-    <div class="card">
-      <h2>Upload</h2>
-      <form method="post" action="/upload-form" enctype="multipart/form-data">
-        <div class="field">
-          <label for="csv">CSV file</label>
-          <input id="csv" type="file" name="file" accept=".csv,text/csv" required>
-        </div>
-        <button type="submit" class="ghost">Upload to pool</button>
-      </form>
-      <p class="dim" style="margin-bottom:0">Columns: <code>company, phone</code>
-        and either <code>state</code> or an explicit <code>timezone</code>.
-        Lands in the <b>pool</b> &mdash; select on Leads to queue.</p>
+      <div class="field"><label for="mc">Calls at a time</label>
+        <input id="mc" name="max_concurrent" type="number" min="1" max="10"
+               value="{{ c.max_concurrent }}"></div>
+      <div class="fields-2">
+        <div class="field"><label for="gmin">Gap min (s)</label>
+          <input id="gmin" name="dial_interval_min" type="number" min="15" max="3600"
+                 value="{{ c.dial_interval_min }}"></div>
+        <div class="field"><label for="gmax">Gap max (s)</label>
+          <input id="gmax" name="dial_interval_max" type="number" min="15" max="7200"
+                 value="{{ c.dial_interval_max }}"></div>
+      </div>
+      <p class="dim" style="margin-bottom:0">Random within the range each tick.
+         About <b>{{ per_hour }}</b> calls/hour.</p>
     </div>
   </div>
 
   <div>
     <div class="card">
-      <h2>Sender</h2>
-      <div class="fields-wide">
-        <form method="post" action="/campaign/sender">
-          <div class="field">
-            <label for="se">From address</label>
-            <input id="se" type="email" name="sender_email"
-                   value="{{ settings.sender_email }}">
-          </div>
-          <div class="fields-2">
-            <div class="field">
-              <label for="sn">From name</label>
-              <input id="sn" type="text" name="sender_name"
-                     value="{{ settings.sender_name }}">
-            </div>
-            <div class="field">
-              <label for="sc">Footer line</label>
-              <input id="sc" type="text" name="sender_company_line"
-                     value="{{ settings.sender_company_line }}">
-            </div>
-          </div>
-          <button type="submit" class="ghost">Save sender</button>
-          <p class="dim" style="margin-bottom:0">Used in draft emails. Switch the
-             domain here when it is warm &mdash; no restart.</p>
-        </form>
+      <h2>Prompt version</h2>
+      <div class="fields-2">
+        <div class="field">
+          <label for="v1">L1 &mdash; cold call</label>
+          <select id="v1" name="agent_l1_version">
+            {% for r in prompt_rows['L1'] %}
+            <option value="{{ r.agent_version }}" {% if r.agent_version == c.agent_l1_version %}selected{% endif %}>
+              v{{ r.agent_version }} · {{ r.model }} · {{ r.prompt_chars }}ch{% if r.change_note %} · {{ r.change_note|truncate(40) }}{% endif %}
+            </option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="v3">L3 &mdash; follow-up</label>
+          <select id="v3" name="agent_l3_version">
+            {% for r in prompt_rows['L3'] %}
+            <option value="{{ r.agent_version }}" {% if r.agent_version == c.agent_l3_version %}selected{% endif %}>
+              v{{ r.agent_version }} · {{ r.model }} · {{ r.prompt_chars }}ch{% if r.change_note %} · {{ r.change_note|truncate(40) }}{% endif %}
+            </option>{% endfor %}
+          </select>
+        </div>
       </div>
+      <p class="dim" style="margin-bottom:0">The version is a <b>property</b> of
+         this campaign. Two campaigns can run the same one. Every call records
+         which version it ran. Notes are edited on
+         <a href="/prompts">the prompt list</a>.</p>
     </div>
 
     <div class="card">
-      <h2>Calling window</h2>
-      <p class="dim">In the <b>called party's</b> local time. These can only ever
-         narrow the legal 08:00&ndash;20:30 window, never widen it.</p>
-      <form method="post" action="/campaign/windows">
-        <table style="box-shadow:none">
-        <tr><th style="width:30%">Day</th><th style="width:10%">On</th>
-            <th style="width:30%">From</th><th style="width:30%">To</th></tr>
-        {% for w in windows %}
-        <tr><td>{{ days[w.dow] }}</td>
-          <td><input type="checkbox" name="enabled_{{ w.dow }}" {% if w.enabled %}checked{% endif %}></td>
-          <td><input type="time" name="start_{{ w.dow }}" value="{{ w.start_time.strftime('%H:%M') }}"></td>
-          <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td></tr>
-        {% endfor %}
-        </table>
-        <p><button type="submit" class="ghost">Save window</button></p>
-      </form>
+      <h2>Sender</h2>
+      <div class="field"><label for="se">From address</label>
+        <input id="se" type="email" name="sender_email" value="{{ c.sender_email }}"></div>
+      <div class="fields-2">
+        <div class="field"><label for="sn">From name</label>
+          <input id="sn" type="text" name="sender_name" value="{{ c.sender_name }}"></div>
+        <div class="field"><label for="sc">Footer line</label>
+          <input id="sc" type="text" name="sender_company_line"
+                 value="{{ c.sender_company_line }}"></div>
+      </div>
+      <p class="dim" style="margin-bottom:0">Used in this campaign's draft emails.</p>
     </div>
   </div>
 </div>
+<p><button type="submit" class="gold">Save campaign</button>
+   <span class="dim">Config only &mdash; saving never starts or stops anything.</span></p>
+</form>
 
-<h2 id="prompts" style="margin-top:28px">Prompt versions</h2>
-<p class="sub">The live version is chosen here. Editing a draft in the Retell
-   dashboard does <b>not</b> change what dials &mdash; v8 once went live as a
-   side effect of exactly that. Every call records the version it ran.</p>
-<p><form class="inline" method="post" action="/campaign/prompt/sync">
-   <button type="submit" class="ghost">Re-sync from Retell</button></form></p>
+<div class="card">
+  <h2>Calling window</h2>
+  <p class="dim">In the <b>called party's</b> local time, and specific to this
+     campaign. Can only ever narrow the legal 08:00&ndash;20:30 window.</p>
+  <form method="post" action="/campaign/{{ c.campaign_id }}/windows">
+    <table style="box-shadow:none;max-width:720px">
+    <tr><th style="width:30%">Day</th><th style="width:10%">On</th>
+        <th style="width:30%">From</th><th style="width:30%">To</th></tr>
+    {% for w in windows %}
+    <tr><td>{{ days[w.dow] }}</td>
+      <td><input type="checkbox" name="enabled_{{ w.dow }}" {% if w.enabled %}checked{% endif %}></td>
+      <td><input type="time" name="start_{{ w.dow }}" value="{{ w.start_time.strftime('%H:%M') }}"></td>
+      <td><input type="time" name="end_{{ w.dow }}" value="{{ w.end_time.strftime('%H:%M') }}"></td></tr>
+    {% endfor %}
+    </table>
+    <p><button type="submit" class="ghost">Save window</button></p>
+  </form>
+</div>
 
-{% for stage, rows in prompt_rows.items() %}
-  {% if rows %}
-  {% set livever = settings['agent_l1_version'] if stage == 'L1' else settings['agent_l3_version'] %}
-  <h2>{{ stage }} &mdash; live: v{{ livever }}</h2>
-  <table style="margin-bottom:18px">
-  <tr><th></th><th>Version</th><th>Date</th><th>Model</th><th class="right">Chars</th>
-      <th class="right">Calls run</th><th>Note</th><th></th></tr>
-  {% for r in rows %}
-    <tr>
-      <td>{% if r.agent_version == livever %}<span class="pill completed">LIVE</span>{% endif %}</td>
-      <td><b>v{{ r.agent_version }}</b>{% if not r.is_published %} <span class="pill">draft</span>{% endif %}</td>
-      <td class="dim">{{ r.retell_updated_at.strftime('%b %d %H:%M') if r.retell_updated_at else '' }}</td>
-      <td class="dim">{{ r.model or '' }}</td>
-      <td class="right dim">{{ r.prompt_chars }}</td>
-      <td class="right">{{ r.calls_run }}</td>
-      <td><form class="inline" method="post" action="/campaign/prompt/note">
-          <input type="hidden" name="stage" value="{{ stage }}">
-          <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
-          <input name="note" style="width:280px" value="{{ r.change_note or '' }}"
-                 placeholder="what changed">
-          <button type="submit" class="ghost">Save</button></form></td>
-      <td>{% if r.agent_version != livever %}
-        <form class="inline" method="post" action="/campaign/prompt"
-              onsubmit="return confirm('Make {{ stage }} v{{ r.agent_version }} live for new calls?')">
-          <input type="hidden" name="stage" value="{{ stage }}">
-          <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
-          <button type="submit" class="ghost">Make live</button></form>{% endif %}</td>
-    </tr>
-  {% endfor %}
-  </table>
-  {% endif %}
-{% endfor %}
+<div class="card" id="copy">
+  <h2>Follow-up email copy</h2>
+  <p class="dim">The copy belongs to <b>this campaign</b>. Two campaigns can run
+     different copy. Drafts are generated on capture and <b>never sent</b> &mdash;
+     editing this changes what future drafts say, not anything already written.</p>
+
+  <p class="ph-list">Placeholders:
+    {% for ph in placeholders %}<code class="ph">&#123;&#123;{{ ph }}&#125;&#125;</code>{% endfor %}
+    <span class="dim">&mdash; an unknown placeholder is left visible rather than
+      blanked, so a typo shows up here instead of shipping a hole in a sentence.</span></p>
+
+  <form method="post" action="/campaign/{{ c.campaign_id }}/email" id="copyform">
+  <div class="copy-split">
+    <div>
+      <div class="variant">
+        <h3>With a gatekeeper name</h3>
+        <p class="dim">Used when the receptionist gave her name.</p>
+        <div class="field"><label>Subject</label>
+          <input name="subject_with_name" value="{{ c.subject_with_name }}"></div>
+        <div class="field"><label>Body</label>
+          <textarea name="body_with_name" rows="16">{{ c.body_with_name }}</textarea></div>
+      </div>
+      <div class="variant">
+        <h3>Without a gatekeeper name</h3>
+        <p class="dim">Used when we never got one.</p>
+        <div class="field"><label>Subject</label>
+          <input name="subject_without" value="{{ c.subject_without }}"></div>
+        <div class="field"><label>Body</label>
+          <textarea name="body_without" rows="16">{{ c.body_without }}</textarea></div>
+      </div>
+      <p><button type="submit" class="gold">Save copy</button>
+         <span class="dim">Saving copy changes nothing else on this page.</span></p>
+    </div>
+
+    <div>
+      <div class="preview-head">
+        <h3>Live preview</h3>
+        <p class="dim" id="pvlead">
+          {% if preview_real %}Rendered against <b>{{ preview_lead.dm_name or 'a real lead' }}</b>
+            at {{ preview_lead.company }} &mdash; a real lead on this campaign.
+          {% else %}<b>Sample data</b> &mdash; this campaign has no leads yet, so the
+            preview uses an invented firm.{% endif %}
+        </p>
+      </div>
+      {% for key, label in [('with_name', 'With gatekeeper name'),
+                            ('without_name', 'Without gatekeeper name')] %}
+      <div class="pv" id="pv-{{ key }}">
+        <div class="pv-label">{{ label }}</div>
+        <div class="pv-subject" data-f="subject">{{ preview[key].subject }}</div>
+        <pre class="pv-body" data-f="body">{{ preview[key].body }}</pre>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  </form>
+</div>
+
+<script>
+(function () {
+  var form = document.getElementById('copyform');
+  if (!form) return;
+  var timer = null, inflight = null;
+
+  function paint(data) {
+    ['with_name', 'without_name'].forEach(function (k) {
+      var box = document.getElementById('pv-' + k);
+      box.querySelector('[data-f=subject]').textContent = data[k].subject;
+      box.querySelector('[data-f=body]').textContent = data[k].body;
+    });
+  }
+
+  function refresh() {
+    if (inflight) inflight.abort();
+    inflight = new AbortController();
+    // Rendered by the SERVER, through the same code that builds real drafts.
+    // A second copy of the substitution rule in JS could drift from it.
+    fetch(form.action + '/preview',
+          {method: 'POST', body: new FormData(form), signal: inflight.signal})
+      .then(function (r) { return r.json(); })
+      .then(paint)
+      .catch(function () {});
+  }
+
+  form.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(refresh, 250);
+  });
+})();
+</script>
+
 {% endblock %}

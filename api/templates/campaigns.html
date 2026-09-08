@@ -1,0 +1,71 @@
+{% extends "base.html" %}{% block title %}Campaigns · Caller{% endblock %}
+{% block body %}
+<h1>Campaigns</h1>
+<p class="sub">A campaign is a named configuration &mdash; prompt version,
+   sender, cap, spacing and calling windows. <b>One runs at a time.</b></p>
+{% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
+
+{% if pending %}
+<div class="banner warn">
+  <b>{{ running.name }} is currently running.</b>
+  Stop {{ running.name }} and start {{ pending.name }}?
+  <form class="inline" method="post" action="/campaign/{{ pending.campaign_id }}/start"
+        style="margin-left:10px">
+    <input type="hidden" name="stop_running" value="yes">
+    <button type="submit" class="gold">Stop {{ running.name }} and start {{ pending.name }}</button>
+  </form>
+  <a href="/campaigns" style="margin-left:10px">Cancel</a>
+</div>
+{% endif %}
+
+<table>
+<tr><th></th><th>Campaign</th><th>Prompt</th><th>Sender</th>
+    <th class="right">Cap</th><th>Spacing</th>
+    <th class="right">Leads</th><th class="right">Queued</th><th>Notes</th><th></th></tr>
+{% for c in campaigns %}
+<tr>
+  <td>{% if c.is_running %}<span class="pill completed">RUNNING</span>{% endif %}</td>
+  <td><a href="/campaign/{{ c.campaign_id }}"><b>{{ c.name }}</b></a></td>
+  <td class="dim">L1 v{{ c.agent_l1_version }} · L3 v{{ c.agent_l3_version }}</td>
+  <td class="dim">{{ c.sender_email }}</td>
+  <td class="right">{{ c.daily_cap }}</td>
+  <td class="dim">{{ c.max_concurrent }} @ {{ c.dial_interval_min }}&ndash;{{ c.dial_interval_max }}s</td>
+  <td class="right">{{ c.leads_total }}</td>
+  <td class="right">{{ c.leads_queued }}</td>
+  <td class="dim">{{ (c.notes or '')|truncate(50) }}</td>
+  <td>
+    {% if c.is_running %}
+      <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/stop">
+        <button type="submit" class="danger">Stop</button></form>
+    {% else %}
+      <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/start">
+        <button type="submit" class="ghost">Start</button></form>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %}
+</table>
+
+<div class="card" style="margin-top:16px;max-width:640px">
+  <h2>New campaign</h2>
+  <form method="post" action="/campaigns/new">
+    <div class="field">
+      <label for="nm">Name</label>
+      <input id="nm" name="name" required placeholder="C2">
+    </div>
+    <div class="field">
+      <label for="tf">Copy settings from</label>
+      <select id="tf" name="template_from">
+        <option value="">defaults (Mon&ndash;Fri 09:00&ndash;17:00)</option>
+        {% for c in campaigns %}<option value="{{ c.campaign_id }}">{{ c.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="nt">Notes</label>
+      <input id="nt" name="notes" placeholder="what this campaign is for">
+    </div>
+    <button type="submit" class="gold">Create</button>
+    <span class="dim">Created <b>stopped</b>. Starting is always deliberate.</span>
+  </form>
+</div>
+{% endblock %}

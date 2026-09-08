@@ -7,3 +7,5 @@ __pycache__/
 .venv/
 *.bak
 *.bak.*
+.break_pass_state/
+.break_pass_state.lock

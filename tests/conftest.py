@@ -122,18 +122,12 @@ def db(test_db, monkeypatch):
         cur.execute("""
             TRUNCATE activity, dial_audit, webhook_events, call_scores,
                      score_attempts, alerts, digests, prompt_versions,
-                     calls, campaign_leads, campaigns, leads, suppression
+                     calls, leads, suppression, campaign_configs
             RESTART IDENTITY CASCADE
         """)
-        # dialing_windows and settings are CONFIG, not data - tests mutate them
-        # (disabling weekdays, changing spacing) and nothing reset them, so a
-        # test could pass or fail depending on which ran before it. Restore
-        # both to their seeded state every test.
-        cur.execute("""
-            UPDATE dialing_windows
-               SET enabled = (dow BETWEEN 1 AND 5),
-                   start_time = '09:00', end_time = '17:00'
-        """)
+        # Windows are per-campaign now and campaign_windows cascades off
+        # campaign_configs above, so a test's window edits die with its
+        # campaign. Settings are still global config that tests mutate.
         cur.execute('TRUNCATE settings')
     conn.commit()
     yield conn
@@ -142,16 +136,37 @@ def db(test_db, monkeypatch):
     _apidb._pool = None
 
 
+def running_campaign_id():
+    """
+    The campaign a test lead belongs to.
+
+    In the named-campaign model a lead with no campaign is BY DEFINITION not
+    dialable - the selection joins on campaign_id. So a fixture lead described
+    as "ready to be dialed" has to belong to a running campaign, and every test
+    helper that inserts one attaches it here rather than each file inventing
+    its own.
+    """
+    from api import campaigns as c
+    run = c.running()
+    if run:
+        return run['campaign_id']
+    existing = [r for r in c.list_all() if r['name'] == 'TEST']
+    row = existing[0] if existing else c.create('TEST', notes='fixture')
+    c.update(row['campaign_id'], daily_cap=1000, max_concurrent=1)
+    return c.start(row['campaign_id'])['campaign_id']
+
+
 @pytest.fixture
 def lead(db):
     """One active lead, ready to be dialed."""
     with db.cursor() as cur:
         cur.execute("""
-            INSERT INTO leads (company, phone_e164, timezone, pool_status, status)
+            INSERT INTO leads (company, phone_e164, timezone, pool_status, status,
+                               campaign_id)
             VALUES ('Test Firm LLP', '+15551234567', 'America/Los_Angeles',
-                    'active', 'new')
+                    'active', 'new', %s)
             RETURNING lead_id, phone_e164
-        """)
+        """, (running_campaign_id(),))
         row = cur.fetchone()
     db.commit()
     return row
@@ -182,24 +197,34 @@ def cfg_dialable(db, monkeypatch):
 
 
 @pytest.fixture
-def queued(db):
+def campaign(db):
     """
-    Put leads in the STANDING QUEUE and switch dialing ON.
+    A saved campaign, RUNNING, with a wide-open cap.
 
-    Replaces the old enrol+start fixtures. Note the switch must be turned on
-    explicitly here too - it defaults to OFF, and that is the property the
-    whole queue model rests on.
+    Campaigns are named configurations and exactly one runs at a time, so
+    every test that expects a dial needs one started. Created stopped and
+    started explicitly here, the same way the UI does it.
     """
-    from api import settings as settings_mod
-    settings_mod._cache.update(at=0.0, values=None)
-    settings_mod.set_many({'dialing_enabled': 'true'}, updated_by='test')
+    from api import campaigns as c
+    for row in c.list_all():
+        c.stop(row['campaign_id'])
+    return c.get(running_campaign_id())
+
+
+@pytest.fixture
+def queued(db, campaign):
+    """Assign leads to the running campaign and queue them."""
+    from api import campaigns as c
 
     def _queue(ids):
         if not isinstance(ids, (list, tuple)):
             ids = [ids]
+        ids = [str(i) for i in ids]
+        if ids:
+            c.assign(ids, campaign['campaign_id'])
         with db.cursor() as cur:
             cur.execute("UPDATE leads SET pool_status='active' "
-                        "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
+                        "WHERE lead_id = ANY(%s::uuid[])", (ids,))
         db.commit()
-        settings_mod._cache.update(at=0.0, values=None)
+    _queue.campaign_id = campaign['campaign_id']
     return _queue

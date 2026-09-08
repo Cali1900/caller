@@ -95,10 +95,16 @@ def assert_not_suppressed(conn, phone_e164: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def assert_dialing_enabled(settings) -> None:
-    """Raises DialRefused unless dialing has been explicitly switched on."""
-    if not settings.get('dialing_enabled'):
-        raise DialRefused('dialing is switched OFF - refusing')
+def assert_campaign_running(campaign) -> None:
+    """
+    Raises DialRefused unless a campaign is actually running.
+
+    A campaign is started deliberately and exactly one may run at a time -
+    enforced by a unique partial index, not by this check. This is the
+    per-dial half, for a lead claimed just before someone hit stop.
+    """
+    if not campaign or not campaign.get('is_running'):
+        raise DialRefused('no campaign is running - refusing')
 
 
 # ---------------------------------------------------------------------------
@@ -111,19 +117,25 @@ def assert_dialing_enabled(settings) -> None:
 # ---------------------------------------------------------------------------
 
 
-def assert_under_daily_cap(conn, lead, settings, operator_tz: str) -> None:
-    """Raises DialRefused when a NEW lead would exceed today's cap."""
+def assert_under_daily_cap(conn, lead, campaign, operator_tz: str) -> None:
+    """
+    Raises DialRefused when a NEW lead would exceed the CAMPAIGN's cap.
+
+    The cap is per campaign and counts only leads belonging to it, so two
+    campaigns cannot spend each other's budget.
+    """
     if lead.get('first_dialed_at') is not None:
         return                      # already-started lead: not new, never capped
 
-    cap = settings.get('daily_cap')
+    cap = campaign['daily_cap']
     with conn.cursor() as cur:
         cur.execute(
             """SELECT count(*) AS n FROM leads
-                WHERE first_dialed_at IS NOT NULL
+                WHERE campaign_id = %s
+                  AND first_dialed_at IS NOT NULL
                   AND (first_dialed_at AT TIME ZONE %s)::date
                       = (now() AT TIME ZONE %s)::date""",
-            (operator_tz, operator_tz))
+            (campaign['campaign_id'], operator_tz, operator_tz))
         used = cur.fetchone()['n']
     if used >= cap:
         raise DialRefused(f'daily cap reached ({used}/{cap} new leads today)')

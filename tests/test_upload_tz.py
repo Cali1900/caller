@@ -173,9 +173,13 @@ def test_nothing_in_the_repo_sends_a_draft():
         assert token not in src.lower(), f'{token} must not appear in drafts.py'
 
 
-def test_sender_identity_comes_from_settings_not_env(db):
-    from api import settings as s
-    s.set_many({'sender_name': 'Testy', 'sender_email': 't@example.com'})
+def test_sender_identity_comes_from_the_campaign_not_env(db):
+    """Sender moved from global settings to the campaign with the named-campaign
+    model - a second campaign can send as somebody else."""
+    from api import campaigns as c
+    row = c.create('SENDER', sender_name='Testy', sender_email='t@example.com')
     d = drafts.build({'company': 'X', 'dm_name': 'Bob', 'dm_email': 'b@x.com',
-                      'timezone': 'UTC', 'last_called_at': None})
+                      'timezone': 'UTC', 'last_called_at': None,
+                      'campaign_id': row['campaign_id']})
     assert 'Testy' in d['body']
+    assert 'CounselorAI LLC' in d['body']      # footer, also from the campaign

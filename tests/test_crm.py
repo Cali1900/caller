@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 
 from api import campaigns
 
+from conftest import running_campaign_id
+
 LA = 'America/Los_Angeles'
 
 
@@ -28,7 +30,8 @@ def client(db, cfg_env):
 
 def _lead(db, company='Whitfield Law', phone='+15551110001', **kw):
     cols = {'company': company, 'phone_e164': phone, 'timezone': LA,
-            'pool_status': 'active', 'status': 'new'}
+            'pool_status': 'active', 'status': 'new',
+            'campaign_id': running_campaign_id()}
     cols.update(kw)
     keys = ', '.join(cols)
     ph = ', '.join(['%s'] * len(cols))
@@ -181,11 +184,11 @@ def test_a_dnc_lead_is_no_longer_a_dial_candidate(client, db, cfg_env, monkeypat
     monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
     from api import dialer
     lid = _lead(db, phone='+15551118888')
-    date = campaigns.campaign_date(cfg_env)
-    campaigns.ensure(cfg_env, date); campaigns.start(cfg_env, date)
+    # Standing queue on a named campaign - there is no per-day campaign row
+    # and no campaign_leads enrolment any more.
+    campaigns.assign([str(lid)], running_campaign_id())
     with db.cursor() as cur:
-        cur.execute("""INSERT INTO campaign_leads (campaign_date, lead_id, source)
-                       VALUES (%s,%s,'fresh')""", (date, lid))
+        cur.execute("UPDATE leads SET pool_status='active' WHERE lead_id=%s", (lid,))
     db.commit()
     assert len(dialer.select_and_claim(cfg_env, limit=10)) == 1
 

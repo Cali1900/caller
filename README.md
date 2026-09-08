@@ -101,8 +101,85 @@ reason is worse than no test: it reports coverage that does not exist.
 | 4 | the switch (pre-dial) | the selection-level check already refused. Only observable on a lead **claimed while on, paused after**. |
 | 5 | the switch (selection) | **the test itself** claimed the leads on a first call, leaving them `status='dialing'`, so the second selection returned nothing either way. Only observable on **unclaimed** leads. |
 | 6 | carry-over cap exemption | the cap counts `first_dialed_at::date = today`, and the test's carry-overs carried **yesterday's** date, so they never counted. Only observable with a carry-over first dialed **today** against a spent cap. |
+| 7 | the in-transaction campaign re-check | `dial_one` trusted the campaign row captured on the lead at **selection** time, so a pause mid-batch — the one case that re-check exists for — was invisible. Worse, stopping A and starting B let A's claimed lead dial under **B's** cap, spacing and prompt version. Only observable on a lead **claimed under A and dialed after the switch**. |
+
+| 8 | `QUEUE_MEMBERSHIP` (`pool_status='active'`) | the named-campaign change added `CAMPAIGN_MEMBERSHIP`, and the test's leads were never assigned to a campaign — so they were excluded before queue membership was consulted. Only observable on a lead **assigned to the running campaign but left in the pool**. |
+| 9 | carry-over cap exemption, again | the test set `settings['daily_cap'] = 1`, which nothing has read since the cap moved onto the campaign. The real cap stayed at the default 100, so it never bound and the exemption was never exercised. Only observable with the cap set **where the dialer reads it**. |
 
 Note #5: the *test* was wrong, not the code. That is the usual shape.
+
+### A second failure shape: a BREAK that cannot fail
+
+Two break definitions were self-neutralising — the guard was fine, and so was
+the test, but the *break* restored no bug:
+
+* **24** substituted `campaign_id = NULL` into the selection. That matches no
+  rows on its own, so removing the early return still returned `[]`. Rewritten
+  to the realistic bug — select for *some* saved campaign rather than *the
+  running* one.
+* **27** replaced only the line that computes `cid`; the very next line
+  (`campaign = campaigns.get(cid) if cid else None`) overwrote the stale
+  campaign it had just injected with `None`, which refuses. Rewritten to
+  replace the whole re-read.
+
+Both reported GREEN, i.e. "the guard is not covered" — the safe direction. But
+a break that cannot fail is not a break, and it hides a guard that may or may
+not be tested. **When a break reports GREEN, check the break before the test.**
+
+### A near miss worth naming
+
+Break **19** (`max_concurrent`) passed, but its test set the value through
+`settings`, which production stopped reading. The assertion held only because
+the campaign default happens to be the same number. The guard *was* covered;
+the test simply did not control the value it appeared to control, and would
+have broken confusingly the first time that default changed. Fixed by setting
+it on the campaign and asserting on a number that is **not** the default.
+
+### ⚠️ Running the break pass
+
+**Never run it under a timeout that can kill it, and never stage or commit
+while it is running.** It mutates real source files and restores them at the
+end; a killed run leaves a break LIVE in `api/`. This has now happened twice —
+once leaving `raise` inside the scorer's `except`, once deleting the allowlist
+check in `guards.py`.
+
+Two rules that follow:
+
+1. **Audit anchors with an explicit loop**, never a compressed one-liner. A
+   clever `lambda`/`exec` one-liner reported "all 29 anchors intact" while a
+   break was live in `api/scorer.py`, and the next full suite run was read as a
+   code regression for twenty minutes.
+2. **Restore by inverting the exact edit**, not by `git checkout` and not by a
+   naive `replace(NEW, OLD)`. `NEW` is often a bare `return`, which matches
+   somewhere else in the file first — that is how `guards.py` ended up with an
+   `if` whose body was dedented.
+
+### ⚠️ STANDING CHECK — a test may not configure what production ignores
+
+`tests/test_no_dead_config.py` fails when a test writes a settings key no
+production code reads, or a table production never touches. Nine of the eleven
+masked guards traced back to exactly that: the test configured one place, the
+dialer read another, and the seeds matched so the assertion was green.
+
+It is source-aware on purpose. A plain string search calls `daily_cap` alive
+because `campaign_configs` has a column of that name — which is the very
+confusion that let the dead key survive. Adding to its allowlist is a review
+decision, not a convenience; the only legitimate entries are tests exercising
+`set_many` itself.
+
+After any interrupted run:
+
+```bash
+python3 - <<'EOF'
+import glob
+for f in sorted(glob.glob('scripts/breaks/*.py')):
+    d = {}
+    exec(open(f).read(), d)
+    src = open(d['TARGET']).read()
+    if src.count(d['OLD']) != 1:
+        print('LIVE BREAK or stale anchor:', f, '->', d['TARGET'])
+EOF
+```
 
 `scripts/break_pass.sh` enforces the second half — it requires the **named
 expected test** to fail, not merely that something did. Every one of the six

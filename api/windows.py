@@ -34,10 +34,14 @@ LEGAL_WINDOW = """
 # time - so "9 to 5" means 9-5 where the phone is ringing, not where we are.
 # Sunday is disabled by default: legal, but pointless for a law-firm front
 # desk.
+#
+# The week belongs to the lead's CAMPAIGN, so two campaigns can call different
+# hours. A lead with no campaign matches no window and therefore never dials.
 PREFERENCE_WINDOW = """
     AND EXISTS (
-        SELECT 1 FROM dialing_windows w
-         WHERE w.dow = EXTRACT(dow FROM now() AT TIME ZONE l.timezone)::int
+        SELECT 1 FROM campaign_windows w
+         WHERE w.campaign_id = l.campaign_id
+           AND w.dow = EXTRACT(dow FROM now() AT TIME ZONE l.timezone)::int
            AND w.enabled
            AND (now() AT TIME ZONE l.timezone)::time
                BETWEEN w.start_time AND w.end_time
@@ -58,8 +62,9 @@ def window_debug_sql() -> str:
                ((now() AT TIME ZONE l.timezone)::time
                     BETWEEN TIME '08:00' AND TIME '20:30')  AS in_legal_window,
                EXISTS (
-                   SELECT 1 FROM dialing_windows w
-                    WHERE w.dow = EXTRACT(dow FROM now() AT TIME ZONE l.timezone)::int
+                   SELECT 1 FROM campaign_windows w
+                    WHERE w.campaign_id = l.campaign_id
+                      AND w.dow = EXTRACT(dow FROM now() AT TIME ZONE l.timezone)::int
                       AND w.enabled
                       AND (now() AT TIME ZONE l.timezone)::time
                           BETWEEN w.start_time AND w.end_time

@@ -23,7 +23,7 @@ import urllib.parse
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from api import (campaigns, db, digest as digest_mod, drafts as drafts_mod,
@@ -141,35 +141,53 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
-        'dialing_on': settings_mod.get('dialing_enabled'),
+        'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + PAGE - 1) // PAGE)})
 
 
 @router.post('/leads/queue')
 async def leads_queue(request: Request):
     """
-    "Add to campaign" - puts the selected leads in the STANDING QUEUE.
+    "Add to campaign" - ASSIGNS the leads to a campaign and queues them.
 
-    This does NOT start dialing. Dialing is one explicit switch that defaults
-    to off; queueing a thousand leads with the switch off places zero calls.
+    Assignment and queued-ness are separate concerns but this is the one
+    action an operator thinks of as a single step. It still never dials:
+    leads on a campaign that is not running sit idle.
     """
     form = await request.form()
     ids = form.getlist('lead_id')
     action = form.get('action', 'add')
+    campaign_id = form.get('campaign_id') or None
     if not ids:
         return RedirectResponse('/?msg=nothing+selected', status_code=303)
-    target = 'active' if action == 'add' else 'pool'
+
+    if action == 'remove':
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE leads SET pool_status='pool', updated_at=now()
+                                WHERE lead_id = ANY(%s::uuid[])
+                                  AND pool_status <> 'done'""", (ids,))
+                n = cur.rowcount
+        return RedirectResponse(
+            f'/?msg={urllib.parse.quote(f"{n} lead(s) removed from the queue")}',
+            status_code=303)
+
+    if not campaign_id:
+        return RedirectResponse('/?msg=pick+a+campaign+first', status_code=303)
+    camp = campaigns.get(campaign_id)
+    if camp is None:
+        return RedirectResponse('/?msg=no+such+campaign', status_code=303)
+
+    campaigns.assign(ids, campaign_id)
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE leads SET pool_status = %s, updated_at = now()
-                    WHERE lead_id = ANY(%s::uuid[]) AND pool_status <> 'done'""",
-                (target, ids))
+            cur.execute("""UPDATE leads SET pool_status='active', updated_at=now()
+                            WHERE lead_id = ANY(%s::uuid[])
+                              AND pool_status <> 'done'""", (ids,))
             n = cur.rowcount
-    verb = 'added to' if action == 'add' else 'removed from'
-    on = settings_mod.get('dialing_enabled')
-    msg = (f'{n} lead(s) {verb} the queue.'
-           + ('' if on else ' Dialing is OFF - nothing will be called until you turn it on.'))
+    tail = ('' if camp['is_running']
+            else f' {camp["name"]} is NOT running, so they will not dial yet.')
+    msg = f'{n} lead(s) added to {camp["name"]}.{tail}'
     return RedirectResponse(f'/?msg={urllib.parse.quote(msg)}', status_code=303)
 
 
@@ -324,189 +342,211 @@ def lead_dnc(lead_id: str):
                             status_code=303)
 
 
-@router.get('/campaign', response_class=HTMLResponse)
-def campaign_page(request: Request, msg: str = ''):
+@router.get('/campaigns', response_class=HTMLResponse)
+def campaigns_list(request: Request, msg: str = '', confirm: str = ''):
+    """Saved campaigns, which one is running, and create new."""
     cfg = _cfg()
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT
-                     count(*) FILTER (WHERE pool_status='pool')            AS pool,
-                     count(*) FILTER (WHERE pool_status='active')          AS queued,
-                     count(*) FILTER (WHERE pool_status='active'
-                                        AND first_dialed_at IS NULL)       AS queued_new,
-                     count(*) FILTER (WHERE pool_status='active'
-                                        AND first_dialed_at IS NOT NULL
-                                        AND status IN ('callback','no_answer','new','queued'))
-                                                                           AS queued_carry,
-                     count(*) FILTER (WHERE first_dialed_at IS NOT NULL
-                                        AND (first_dialed_at AT TIME ZONE %s)::date
-                                            = (now() AT TIME ZONE %s)::date) AS new_today,
-                     (SELECT count(*) FROM suppression)                    AS suppressed
-                   FROM leads""", (cfg.OPERATOR_TIMEZONE, cfg.OPERATOR_TIMEZONE))
-            queue = cur.fetchone()
-            cur.execute('SELECT * FROM dialing_windows ORDER BY dow')
-            windows = cur.fetchall()
-    prompt_rows = {'L1': prompts_mod.listing(cfg, 'L1'),
-                   'L3': prompts_mod.listing(cfg, 'L3')}
-    st = settings_mod.all_settings(force=True)
-    avg = (st['dial_interval_min'] + st['dial_interval_max']) / 2.0
-    per_hour = round(3600.0 / avg * st['max_concurrent'], 1) if avg else 0
-    remaining = max(0, st['daily_cap'] - (queue['new_today'] or 0))
-    hours_left = round(remaining / per_hour, 1) if per_hour else 0
+    rows = campaigns.list_all()
+    pending = campaigns.get(confirm) if confirm else None
+    return templates.TemplateResponse(request, 'campaigns.html', {
+        'hdr': hdr, 'campaigns': rows, 'msg': msg,
+        'running': campaigns.running(), 'pending': pending})
+
+
+@router.post('/campaigns/new')
+def campaigns_new(name: str = Form(...), template_from: str = Form(''),
+                  notes: str = Form('')):
+    try:
+        row = campaigns.create(name, template_from=template_from or None,
+                               notes=notes)
+    except Exception as exc:
+        return RedirectResponse(
+            f'/campaigns?msg={urllib.parse.quote("could not create: " + str(exc)[:150])}',
+            status_code=303)
+    return RedirectResponse(f'/campaign/{row["campaign_id"]}'
+                            f'?msg={urllib.parse.quote(row["name"] + " created (stopped)")}',
+                            status_code=303)
+
+
+@router.get('/campaign', response_class=HTMLResponse)
+def campaign_redirect():
+    """/campaign means 'the one that is running', else the list."""
+    run = campaigns.running()
+    if run:
+        return RedirectResponse(f'/campaign/{run["campaign_id"]}', status_code=303)
+    return RedirectResponse('/campaigns', status_code=303)
+
+
+@router.get('/campaign/{campaign_id}', response_class=HTMLResponse)
+def campaign_page(request: Request, campaign_id: str, msg: str = ''):
+    cfg = _cfg()
+    camp = campaigns.get(campaign_id)
+    if camp is None:
+        return HTMLResponse('<p>no such campaign</p>', status_code=404)
+    with db.get_conn() as conn:
+        hdr = _header(conn, cfg)
+    q = campaigns.queue_stats(cfg, campaign_id)
+    avg = (camp['dial_interval_min'] + camp['dial_interval_max']) / 2.0
+    per_hour = round(3600.0 / avg * camp['max_concurrent'], 1) if avg else 0
+    remaining = max(0, camp['daily_cap'] - (q['new_today'] or 0))
+    pv_lead, pv_real = drafts_mod.preview_lead(campaign_id)
     return templates.TemplateResponse(request, 'campaign.html', {
-        'hdr': hdr, 'queue': queue, 'msg': msg, 'settings': st,
-        'per_hour': per_hour, 'remaining': remaining, 'hours_left': hours_left,
-        'windows': windows, 'days': DAYS, 'prompt_rows': prompt_rows})
+        'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg,
+        'per_hour': per_hour, 'remaining': remaining,
+        'hours_left': round(remaining / per_hour, 1) if per_hour else 0,
+        'windows': campaigns.windows(campaign_id), 'days': DAYS,
+        'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1'),
+                        'L3': prompts_mod.listing(cfg, 'L3')},
+        'placeholders': drafts_mod.PLACEHOLDERS,
+        'preview': drafts_mod.preview(camp, lead=pv_lead),
+        'preview_lead': pv_lead, 'preview_real': pv_real,
+        'running': campaigns.running()})
 
 
-@router.post('/campaign/dialing')
-def campaign_dialing(on: str = Form(...)):
-    """
-    THE SWITCH. Replaces the old start button, and defaults to off.
-
-    One place, deliberately: adding leads must never be able to start dialing.
-    """
-    settings_mod.set_many({'dialing_enabled': on}, updated_by='operator')
-    live = settings_mod.all_settings(force=True)['dialing_enabled']
-    msg = 'DIALING IS ON' if live else 'dialing is paused'
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg)}',
-                            status_code=303)
-
-
-@router.post('/campaign/cap')
-def campaign_cap(daily_cap: str = Form(...)):
-    r = settings_mod.set_many({'daily_cap': daily_cap})
-    msg = (f"cap set to {r['set']['daily_cap']} new leads/day" if r['ok']
-           else 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items()))
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg)}',
-                            status_code=303)
+@router.get('/prompts', response_class=HTMLResponse)
+def prompts_page(request: Request, msg: str = ''):
+    """Prompt versions with their notes. A version is not a campaign - it is
+    something a campaign points at, so this is a reference list, not a picker."""
+    cfg = _cfg()
+    with db.get_conn() as conn:
+        hdr = _header(conn, cfg)
+    return templates.TemplateResponse(request, 'prompts.html', {
+        'hdr': hdr, 'msg': msg,
+        'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1'),
+                        'L3': prompts_mod.listing(cfg, 'L3')},
+        'campaigns': campaigns.list_all()})
 
 
-@router.post('/campaign/spacing')
-def campaign_spacing(max_concurrent: str = Form(...),
-                     dial_interval_min: str = Form(...),
-                     dial_interval_max: str = Form(...)):
-    """
-    Spacing is the OPERATOR's setting, changed here rather than in env,
-    because an env change needs a container recreate.
-    """
-    r = settings_mod.set_many({'max_concurrent': max_concurrent,
-                               'dial_interval_min': dial_interval_min,
-                               'dial_interval_max': dial_interval_max})
-    if r['ok']:
-        v = r['set']
-        msg = (f"spacing: {v.get('max_concurrent','-')} at a time, "
-               f"{v.get('dial_interval_min','-')}-{v.get('dial_interval_max','-')}s apart "
-               f"(takes effect on the next tick, no restart)")
-    else:
-        msg = 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items())
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
-                            status_code=303)
-
-
-@router.post('/campaign/prompt')
-def campaign_prompt(stage: str = Form('L1'), agent_version: str = Form(...)):
-    """
-    Choose which prompt version is LIVE.
-
-    This exists because v8 became live as a SIDE EFFECT - agent.update()
-    applies to whatever draft is sitting in the dashboard. Editing a draft in
-    Retell must not change what dials; only this does.
-    """
-    key = 'agent_l1_version' if stage == 'L1' else 'agent_l3_version'
-    r = settings_mod.set_many({key: agent_version})
-    msg = (f'{stage} now runs v{r["set"][key]} on new calls' if r['ok']
-           else 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items()))
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}#prompts',
-                            status_code=303)
-
-
-@router.post('/campaign/prompt/note')
-def campaign_prompt_note(stage: str = Form('L1'), agent_version: int = Form(...),
-                         note: str = Form('')):
+@router.post('/prompts/note')
+def prompts_note(stage: str = Form('L1'), agent_version: int = Form(...),
+                 note: str = Form('')):
     cfg = _cfg()
     agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
     ok = prompts_mod.set_note(agent_id, agent_version, note.strip())
     return RedirectResponse(
-        f'/campaign?msg={urllib.parse.quote(("note saved" if ok else "no such version"))}#prompts',
+        f'/prompts?msg={urllib.parse.quote("note saved" if ok else "no such version")}',
         status_code=303)
 
 
-@router.post('/campaign/prompt/sync')
-def campaign_prompt_sync():
+@router.post('/prompts/sync')
+def prompts_sync():
     cfg = _cfg()
     a = prompts_mod.sync_versions(cfg, 'L1')
     b = prompts_mod.sync_versions(cfg, 'L3')
     msg = f"synced {a['versions']} L1 and {b['versions']} L3 versions from Retell"
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg)}#prompts',
+    return RedirectResponse(f'/prompts?msg={urllib.parse.quote(msg)}', status_code=303)
+
+
+@router.post('/campaign/{campaign_id}/save')
+def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(''),
+                  agent_l1_version: int = Form(...), agent_l3_version: int = Form(...),
+                  sender_email: str = Form(...), sender_name: str = Form(...),
+                  sender_company_line: str = Form(...), daily_cap: int = Form(...),
+                  max_concurrent: int = Form(...), dial_interval_min: int = Form(...),
+                  dial_interval_max: int = Form(...)):
+    if dial_interval_min > dial_interval_max:
+        return RedirectResponse(
+            f'/campaign/{campaign_id}?msg={urllib.parse.quote("REJECTED: gap min cannot exceed gap max")}',
+            status_code=303)
+    try:
+        campaigns.update(campaign_id, name=name, notes=notes,
+                         agent_l1_version=agent_l1_version,
+                         agent_l3_version=agent_l3_version,
+                         sender_email=sender_email, sender_name=sender_name,
+                         sender_company_line=sender_company_line,
+                         daily_cap=daily_cap, max_concurrent=max_concurrent,
+                         dial_interval_min=dial_interval_min,
+                         dial_interval_max=dial_interval_max)
+        msg = 'saved'
+    except Exception as exc:
+        msg = f'REJECTED: {str(exc)[:150]}'
+    return RedirectResponse(f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}',
                             status_code=303)
 
 
-@router.post('/campaign/sender')
-def campaign_sender(sender_email: str = Form(...), sender_name: str = Form(...),
-                    sender_company_line: str = Form(...)):
-    """
-    From-address is a FIELD, not an env var: counselorai.io now,
-    demandcounselor.com once warm, and that switch should not be a deploy.
-    """
-    r = settings_mod.set_many({'sender_email': sender_email,
-                               'sender_name': sender_name,
-                               'sender_company_line': sender_company_line})
-    msg = (f"sender set to {r['set'].get('sender_email','')}" if r['ok']
-           else 'REJECTED: ' + '; '.join(f'{k}: {e}' for k, e in r['errors'].items()))
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
-                            status_code=303)
-
-
-@router.post('/campaign/windows')
-async def campaign_windows(request: Request):
-    """
-    Per-weekday calling window, in the CALLED PARTY's local time.
-
-    These can only ever NARROW the TCPA window - the legal 08:00-20:30 check is
-    ANDed in separately and no value here can widen past it.
-    """
-    form = await request.form()
-    changed = []
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            for dow in range(7):
-                enabled = form.get(f'enabled_{dow}') == 'on'
-                start = (form.get(f'start_{dow}') or '09:00').strip()
-                end = (form.get(f'end_{dow}') or '17:00').strip()
-                cur.execute(
-                    """UPDATE dialing_windows
-                          SET enabled=%s, start_time=%s::time, end_time=%s::time
-                        WHERE dow=%s AND (enabled, start_time, end_time)
-                              IS DISTINCT FROM (%s, %s::time, %s::time)""",
-                    (enabled, start, end, dow, enabled, start, end))
-                if cur.rowcount:
-                    changed.append(DAYS[dow])
-    msg = ('windows updated: ' + ', '.join(changed)) if changed else 'windows unchanged'
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
-                            status_code=303)
-
-
-@router.post('/campaign/action')
-def campaign_action(do: str = Form(...), cap: int = Form(200)):
-    cfg = _cfg()
-    if do == 'cap':
-        campaigns.ensure(cfg)
-        with db.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    'UPDATE campaigns SET daily_cap=%s WHERE campaign_date=%s',
-                    (cap, campaigns.campaign_date(cfg)))
-        msg = f'cap set to {cap}'
-    elif do in ('enroll', 'start', 'pause', 'resume', 'rollover'):
-        result = getattr(campaigns, do)(cfg)
-        msg = f'{do}: {result}'
+@router.post('/campaign/{campaign_id}/email')
+def campaign_email_save(campaign_id: str,
+                        subject_with_name: str = Form(...),
+                        subject_without: str = Form(...),
+                        body_with_name: str = Form(...),
+                        body_without: str = Form(...)):
+    """The copy is a property of the campaign, saved on its own form so a copy
+    edit never has to pass the cap and spacing validation."""
+    fields = {'subject_with_name': subject_with_name.strip(),
+              'subject_without': subject_without.strip(),
+              'body_with_name': body_with_name, 'body_without': body_without}
+    empty = [k for k, v in fields.items() if not v.strip()]
+    if empty:
+        msg = 'REJECTED: empty ' + ', '.join(empty)
     else:
-        msg = f'unknown action {do!r}'
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(str(msg)[:300])}',
+        campaigns.update(campaign_id, **fields)
+        msg = 'copy saved'
+    return RedirectResponse(f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}#copy',
                             status_code=303)
+
+
+@router.post('/campaign/{campaign_id}/email/preview')
+async def campaign_email_preview(campaign_id: str, request: Request):
+    """
+    Renders the text CURRENTLY IN THE BOXES against a real lead.
+
+    Server-side on purpose: the preview must go through the same render() the
+    draft generator uses, or it is a second implementation that can disagree
+    with what actually gets sent.
+    """
+    camp = campaigns.get(campaign_id)
+    if camp is None:
+        return JSONResponse({'error': 'no such campaign'}, status_code=404)
+    form = await request.form()
+    overrides = {f: form.get(f) for f in campaigns.TEMPLATE_FIELDS
+                 if form.get(f) is not None}
+    lead, real = drafts_mod.preview_lead(campaign_id)
+    out = drafts_mod.preview(camp, lead=lead, overrides=overrides)
+    return JSONResponse({
+        'lead': {'name': lead.get('dm_name'), 'company': lead.get('company'),
+                 'real': real},
+        'with_name': out['with_name'], 'without_name': out['without_name']})
+
+
+@router.post('/campaign/{campaign_id}/windows')
+async def campaign_windows_save(campaign_id: str, request: Request):
+    form = await request.form()
+    rows = {d: (form.get(f'enabled_{d}') == 'on',
+                (form.get(f'start_{d}') or '09:00').strip(),
+                (form.get(f'end_{d}') or '17:00').strip()) for d in range(7)}
+    changed = campaigns.set_windows(campaign_id, rows)
+    msg = ('window updated: ' + ', '.join(DAYS[d] for d in changed)) if changed \
+          else 'window unchanged'
+    return RedirectResponse(f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}',
+                            status_code=303)
+
+
+@router.post('/campaign/{campaign_id}/start')
+def campaign_start(campaign_id: str, stop_running: str = Form('')):
+    """
+    Start a campaign.
+
+    NEVER A SILENT HANDOVER. If another is running this bounces to a
+    confirmation naming both, and only comes back here with stop_running set.
+    """
+    try:
+        row = campaigns.start(campaign_id, stop_running=(stop_running == 'yes'))
+    except campaigns.CampaignConflict:
+        return RedirectResponse(f'/campaigns?confirm={campaign_id}', status_code=303)
+    return RedirectResponse(
+        f'/campaign/{campaign_id}?msg={urllib.parse.quote(row["name"] + " is RUNNING")}',
+        status_code=303)
+
+
+@router.post('/campaign/{campaign_id}/stop')
+def campaign_stop(campaign_id: str):
+    row = campaigns.stop(campaign_id)
+    name = row['name'] if row else 'campaign'
+    return RedirectResponse(
+        f'/campaign/{campaign_id}?msg={urllib.parse.quote(name + " stopped - nothing dials")}',
+        status_code=303)
 
 
 @router.post('/upload-form')

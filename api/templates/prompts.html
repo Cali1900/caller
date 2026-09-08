@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% block title %}Prompts · Caller{% endblock %}
+{% block body %}
+<h1>Prompt versions</h1>
+<p class="sub">A version is <b>not</b> a campaign &mdash; it is something a
+   campaign points at. Two campaigns can use the same version. Set which one a
+   campaign uses on its own page; this list is for notes and history.</p>
+{% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
+<p><form class="inline" method="post" action="/prompts/sync">
+   <button type="submit" class="ghost">Re-sync from Retell</button></form></p>
+
+{% for stage, rows in prompt_rows.items() %}
+  {% if rows %}
+  <h2>{{ stage }}</h2>
+  <table style="margin-bottom:20px">
+  <tr><th>Version</th><th>Date</th><th>Model</th><th class="right">Chars</th>
+      <th class="right">Calls run</th><th>Used by</th><th>Note</th></tr>
+  {% for r in rows %}
+    {% set users = campaigns | selectattr(('agent_l1_version' if stage=='L1' else 'agent_l3_version'), 'equalto', r.agent_version) | list %}
+    <tr>
+      <td><b>v{{ r.agent_version }}</b>{% if not r.is_published %} <span class="pill">draft</span>{% endif %}</td>
+      <td class="dim">{{ r.retell_updated_at.strftime('%b %d %H:%M') if r.retell_updated_at else '' }}</td>
+      <td class="dim">{{ r.model or '' }}</td>
+      <td class="right dim">{{ r.prompt_chars }}</td>
+      <td class="right">{{ r.calls_run }}</td>
+      <td>{% for u in users %}<a href="/campaign/{{ u.campaign_id }}"><span class="pill {{ 'completed' if u.is_running else '' }}">{{ u.name }}</span></a> {% endfor %}</td>
+      <td><form class="inline" method="post" action="/prompts/note">
+          <input type="hidden" name="stage" value="{{ stage }}">
+          <input type="hidden" name="agent_version" value="{{ r.agent_version }}">
+          <input name="note" style="width:300px" value="{{ r.change_note or '' }}"
+                 placeholder="what changed">
+          <button type="submit" class="ghost">Save</button></form></td>
+    </tr>
+  {% endfor %}
+  </table>
+  {% endif %}
+{% endfor %}
+{% endblock %}

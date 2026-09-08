@@ -27,7 +27,7 @@ SUCCESS_OUTCOMES = ('gave_name_and_email', 'gave_name', 'demo_agreed',
                     'send_email', 'busy_callback', 'transferred')
 
 
-def _stats(conn, date):
+def _stats(conn, date, tz):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT
@@ -44,83 +44,87 @@ def _stats(conn, date):
                  round(coalesce(sum(s.cost_cents), 0)::numeric, 1)     AS score_cents
                FROM calls c
                LEFT JOIN call_scores s ON s.call_id = c.call_id
-              WHERE c.created_at >= %s::date
-                AND c.created_at < (%s::date + 1)""",
-            (date, date))
+              WHERE (c.created_at AT TIME ZONE %s)::date = %s::date""",
+            (tz, date))
         return cur.fetchone()
 
 
-def _failures(conn, date):
+def _failures(conn, date, tz):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT s.what_happened, count(*) AS n
                  FROM call_scores s JOIN calls c ON c.call_id = s.call_id
-                WHERE c.created_at >= %s::date AND c.created_at < (%s::date + 1)
+                WHERE (c.created_at AT TIME ZONE %s)::date = %s::date
                   AND NOT (s.what_happened = ANY(%s))
                 GROUP BY s.what_happened ORDER BY n DESC LIMIT %s""",
-            (date, date, list(SUCCESS_OUTCOMES), TOP_FAILURES))
+            (tz, date, list(SUCCESS_OUTCOMES), TOP_FAILURES))
         return cur.fetchall()
 
 
-def _wins(conn, date):
+def _wins(conn, date, tz):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT s.what_happened, count(*) AS n
                  FROM call_scores s JOIN calls c ON c.call_id = s.call_id
-                WHERE c.created_at >= %s::date AND c.created_at < (%s::date + 1)
+                WHERE (c.created_at AT TIME ZONE %s)::date = %s::date
                   AND s.what_happened = ANY(%s)
                 GROUP BY s.what_happened ORDER BY n DESC""",
-            (date, date, list(SUCCESS_OUTCOMES)))
+            (tz, date, list(SUCCESS_OUTCOMES)))
         return cur.fetchall()
 
 
-def _quotes(conn, date, what_happened):
+def _quotes(conn, date, tz, what_happened):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT s.their_words, count(*) AS n
                  FROM call_scores s JOIN calls c ON c.call_id = s.call_id
-                WHERE c.created_at >= %s::date AND c.created_at < (%s::date + 1)
+                WHERE (c.created_at AT TIME ZONE %s)::date = %s::date
                   AND s.what_happened = %s
                   AND s.their_words IS NOT NULL AND s.their_words <> ''
                 GROUP BY s.their_words ORDER BY n DESC, length(s.their_words)
                 LIMIT %s""",
-            (date, date, what_happened, QUOTES_PER_FAILURE))
+            (tz, date, what_happened, QUOTES_PER_FAILURE))
         return cur.fetchall()
 
 
-def _deductions(conn, date):
+def _deductions(conn, date, tz):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT d AS deduction, count(*) AS n
                  FROM call_scores s JOIN calls c ON c.call_id = s.call_id,
                       unnest(s.agent_deductions) d
-                WHERE c.created_at >= %s::date AND c.created_at < (%s::date + 1)
-                GROUP BY d ORDER BY n DESC""", (date, date))
+                WHERE (c.created_at AT TIME ZONE %s)::date = %s::date
+                GROUP BY d ORDER BY n DESC""", (tz, date))
         return cur.fetchall()
 
 
-def _flagged(conn, date):
+def _flagged(conn, date, tz):
     with conn.cursor() as cur:
         cur.execute(
             """SELECT s.call_id, l.company, s.what_happened, s.their_words
                  FROM call_scores s
                  JOIN calls c ON c.call_id = s.call_id
                  JOIN leads l ON l.lead_id = s.lead_id
-                WHERE c.created_at >= %s::date AND c.created_at < (%s::date + 1)
+                WHERE (c.created_at AT TIME ZONE %s)::date = %s::date
                   AND s.needs_human
-                ORDER BY c.created_at LIMIT 20""", (date, date))
+                ORDER BY c.created_at LIMIT 20""", (tz, date))
         return cur.fetchall()
 
 
 def build(cfg, date=None):
     date = date or campaigns.campaign_date(cfg)
+    # The day boundary is the OPERATOR's, not UTC's. Comparing a timestamptz
+    # against a bare ::date applies it in the session timezone, which silently
+    # dropped every evening call from the digest between 17:00 Pacific and
+    # midnight UTC - exactly the calls made at the end of a calling day.
+    tz = cfg.OPERATOR_TIMEZONE
     with db.get_conn() as conn:
-        st = _stats(conn, date)
-        fails = _failures(conn, date)
-        wins = _wins(conn, date)
-        deds = _deductions(conn, date)
-        flagged = _flagged(conn, date)
-        quotes = {f['what_happened']: _quotes(conn, date, f['what_happened'])
+        st = _stats(conn, date, tz)
+        fails = _failures(conn, date, tz)
+        wins = _wins(conn, date, tz)
+        deds = _deductions(conn, date, tz)
+        flagged = _flagged(conn, date, tz)
+        quotes = {f['what_happened']: _quotes(conn, date, tz, f['what_happened'])
                   for f in fails}
 
     dialed = st['dialed'] or 0

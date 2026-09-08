@@ -141,3 +141,34 @@ def test_a_send_failure_is_recorded_and_retryable(db, cfg_env, monkeypatch):
         row = cur.fetchone()
     assert row['sent_at'] is None
     assert 'boom' in row['send_error']
+
+
+def test_the_digest_day_is_the_operators_day_not_utcs(db, cfg_env):
+    """
+    REGRESSION. The day filter compared a timestamptz against a bare ::date,
+    which Postgres applies in the SESSION timezone (UTC). Between 17:00 Pacific
+    and midnight UTC the calls had already rolled into the next UTC day, so the
+    digest for "today" silently omitted them - the end-of-day calls, which are
+    the ones worth reading about.
+
+    Two calls on the SAME Pacific day, either side of the UTC boundary.
+    """
+    from api import digest as d
+    la_day = '2026-09-07'
+    with db.cursor() as cur:
+        for i, when in enumerate(['2026-09-07 23:30:00+00',   # 16:30 Pacific
+                                  '2026-09-08 01:30:00+00']):  # 18:30 Pacific
+            cur.execute("""INSERT INTO leads (company, phone_e164, timezone,
+                                              pool_status, status)
+                           VALUES (%s,%s,%s,'active','completed')
+                           RETURNING lead_id""",
+                        (f'Boundary {i}', f'+1555999{i:04d}', LA))
+            lid = cur.fetchone()['lead_id']
+            cur.execute("""INSERT INTO calls (call_id, lead_id, stage, transcript,
+                                              cost_cents, created_at)
+                           VALUES (%s,%s,'L1','t',20.0,%s)""",
+                        (f'c_boundary_{i}', lid, when))
+    db.commit()
+
+    body = d.build(cfg_env, date=la_day)['body']
+    assert '2 dialed' in body, f'both Pacific-day calls must count:\n{body[:300]}'

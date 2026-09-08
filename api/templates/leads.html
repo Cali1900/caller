@@ -1,8 +1,9 @@
 {% extends "base.html" %}{% block title %}Leads · Caller{% endblock %}
 {% block body %}
 <h1>Leads</h1>
-<p class="sub">{{ total }} matching{% if not dialing_on %} &middot;
-  <span style="color:var(--bad)">dialing is paused</span>{% endif %}</p>
+<p class="sub">{{ total }} matching &middot;
+  {% if running %}<span style="color:var(--good)">{{ running.name }} running</span>
+  {% else %}<span style="color:var(--bad)">no campaign running</span>{% endif %}</p>
 
 {% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
 {% if needs_you %}<div class="banner">Showing only leads that need a person:
@@ -27,11 +28,16 @@
 <form method="post" action="/leads/queue">
 <div class="card toolbar">
   <b>With selected:</b>
+  <select name="campaign_id">
+    <option value="">pick a campaign&hellip;</option>
+    {% for c in campaigns %}
+      <option value="{{ c.campaign_id }}" {% if c.is_running %}selected{% endif %}>{{ c.name }}{% if c.is_running %} (running){% endif %}</option>
+    {% endfor %}
+  </select>
   <button type="submit" name="action" value="add" class="gold">Add to campaign</button>
   <button type="submit" name="action" value="remove" class="ghost">Remove from queue</button>
-  <span class="dim">Adding to the queue does <b>not</b> start dialing &mdash;
-    that is one switch on the campaign screen, and it is
-    {% if dialing_on %}<b style="color:var(--good)">on</b>{% else %}<b style="color:var(--bad)">off</b>{% endif %}.</span>
+  <span class="dim">Adding assigns and queues them &mdash; it never dials.
+    {% if running %}<b>{{ running.name }}</b> is running.{% else %}<b>No campaign is running.</b>{% endif %}</span>
 </div>
 
 <div class="scroll-x">

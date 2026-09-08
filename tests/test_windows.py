@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from api import campaigns, dialer
+from conftest import running_campaign_id
 
 ZONES = ['America/New_York', 'America/Chicago', 'America/Denver',
          'America/Los_Angeles', 'Pacific/Honolulu', 'Europe/London',
@@ -27,16 +28,23 @@ def _in_legal(tz):
     return datetime.time(8, 0) <= t <= datetime.time(20, 30)
 
 
-def _dow_enabled(db, tz):
+def _dow_enabled(db, tz, campaign_id=None):
+    """The window THE DIALER ACTUALLY CONSULTS.
+
+    This used to read `dialing_windows`, the pre-campaign global table, which
+    nothing has read since windows became per-campaign. It agreed with the
+    campaign only because both seed Mon-Fri 09:00-17:00, so every assertion
+    built on it was checking a table with no effect on dialing."""
     dow = int(_local(tz).strftime('%w'))
     with db.cursor() as cur:
-        cur.execute('SELECT enabled, start_time, end_time FROM dialing_windows WHERE dow=%s',
-                    (dow,))
+        cur.execute("""SELECT enabled, start_time, end_time FROM campaign_windows
+                        WHERE dow=%s AND campaign_id=%s""",
+                    (dow, campaign_id or running_campaign_id()))
         return cur.fetchone()
 
 
-def _in_preference(db, tz):
-    w = _dow_enabled(db, tz)
+def _in_preference(db, tz, campaign_id=None):
+    w = _dow_enabled(db, tz, campaign_id)
     if not w or not w['enabled']:
         return False
     t = _local(tz).time()
@@ -80,9 +88,9 @@ def _lead(db, tz, company='W Firm', phone=None):
     phone = phone or '+1555' + str(abs(hash(tz)) % 10_000_000).zfill(7)
     with db.cursor() as cur:
         cur.execute("""INSERT INTO leads (company, phone_e164, timezone,
-                                          pool_status, status)
-                       VALUES (%s,%s,%s,'active','new') RETURNING lead_id""",
-                    (company, phone, tz))
+                                          pool_status, status, campaign_id)
+                       VALUES (%s,%s,%s,'active','new',%s) RETURNING lead_id""",
+                    (company, phone, tz, running_campaign_id()))
         return cur.fetchone()['lead_id']
 
 
@@ -94,19 +102,21 @@ def running_campaign(db, cfg_env, monkeypatch):
     The windows are deliberately NOT neutralised here - in this file the
     window IS the thing under test.
     """
-    from api import settings as settings_mod
+    from api import campaigns as c, settings as settings_mod
     settings_mod._cache.update(at=0.0, values=None)
-    settings_mod.set_many({'dialing_enabled': 'true', 'daily_cap': 1000},
-                          updated_by='test')
+    cid = running_campaign_id()          # the cap and the pause live HERE now
+    c.update(cid, daily_cap=1000)
 
     def _queue(ids):
         if not isinstance(ids, (list, tuple)):
             ids = [ids]
         with db.cursor() as cur:
-            cur.execute("UPDATE leads SET pool_status='active' "
-                        "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
+            cur.execute("UPDATE leads SET pool_status='active', campaign_id=%s "
+                        "WHERE lead_id = ANY(%s::uuid[])",
+                        (cid, [str(i) for i in ids],))
         db.commit()
         settings_mod._cache.update(at=0.0, values=None)
+    _queue.campaign_id = cid
     return _queue
 
 
@@ -165,8 +175,9 @@ def test_preference_window_can_narrow_but_never_widen(db, cfg_env, running_campa
     tz = _zone_outside_legal_window()
     assert tz is not None, 'no zone outside 08:00-20:30 - impossible across 26 offsets'
     with db.cursor() as cur:
-        cur.execute("""UPDATE dialing_windows
-                          SET enabled=true, start_time='00:00', end_time='23:59'""")
+        cur.execute("""UPDATE campaign_windows
+                          SET enabled=true, start_time='00:00', end_time='23:59'
+                        WHERE campaign_id=%s""", (running_campaign.campaign_id,))
     db.commit()
     lid = _lead(db, tz)
     claimed = _enrol_and_select(db, cfg_env, running_campaign, [lid])
@@ -178,7 +189,8 @@ def test_preference_window_can_narrow_but_never_widen(db, cfg_env, running_campa
 def test_disabling_the_weekday_stops_everything(db, cfg_env, running_campaign):
     """The preference window CAN narrow: disable today and nothing dials."""
     with db.cursor() as cur:
-        cur.execute('UPDATE dialing_windows SET enabled=false')
+        cur.execute('UPDATE campaign_windows SET enabled=false WHERE campaign_id=%s',
+                    (running_campaign.campaign_id,))
     db.commit()
     ids = [_lead(db, tz) for tz in ZONES]
     claimed = _enrol_and_select(db, cfg_env, running_campaign, ids)

@@ -11,6 +11,8 @@ import pytest
 
 from api import campaigns, dialer, settings as settings_mod
 
+from conftest import running_campaign_id
+
 LA = 'America/Los_Angeles'
 
 
@@ -26,9 +28,9 @@ def _leads(db, n, prefix='+1555660'):
     with db.cursor() as cur:
         for i in range(n):
             cur.execute("""INSERT INTO leads (company, phone_e164, timezone,
-                                              pool_status, status)
-                           VALUES (%s,%s,%s,'active','new') RETURNING lead_id""",
-                        (f'Firm {i}', f'{prefix}{i:04d}', LA))
+                                              pool_status, status, campaign_id)
+                           VALUES (%s,%s,%s,'active','new',%s) RETURNING lead_id""",
+                        (f'Firm {i}', f'{prefix}{i:04d}', LA, running_campaign_id()))
             ids.append(cur.fetchone()['lead_id'])
     db.commit()
     return ids
@@ -39,19 +41,21 @@ def running(db, cfg_env, monkeypatch):
     """Standing queue: put leads in it and switch dialing on."""
     monkeypatch.setattr('api.windows.LEGAL_WINDOW', '')
     monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
-    from api import settings as settings_mod
+    from api import campaigns as c, settings as settings_mod
     settings_mod._cache.update(at=0.0, values=None)
-    settings_mod.set_many({'dialing_enabled': 'true', 'daily_cap': 1000},
-                          updated_by='test')
+    cid = running_campaign_id()          # the cap and the pause live HERE now
+    c.update(cid, daily_cap=1000)
 
     def _queue(ids):
         if not isinstance(ids, (list, tuple)):
             ids = [ids]
         with db.cursor() as cur:
-            cur.execute("UPDATE leads SET pool_status='active' "
-                        "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
+            cur.execute("UPDATE leads SET pool_status='active', campaign_id=%s "
+                        "WHERE lead_id = ANY(%s::uuid[])",
+                        (cid, [str(i) for i in ids],))
         db.commit()
         settings_mod._cache.update(at=0.0, values=None)
+    _queue.campaign_id = cid
     return _queue
 
 
@@ -79,15 +83,23 @@ def test_a_tick_dials_only_max_concurrent_leads(db, running, no_real_calls, monk
     The real spacing control. With a batch limit of 10, a single tick could
     place ten calls 0.2s apart and defeat any interval however wide.
     """
-    settings_mod.set_many({'max_concurrent': 1})
+    from api import campaigns as c
+    # Set it ON THE CAMPAIGN, which is where the dialer reads it. This line
+    # used to write settings['max_concurrent'], which nothing has consumed
+    # since the named-campaign change; the assertion held only because the
+    # campaign default is also 1, so the test did not control the value it
+    # claims to. Set it to 2 and dial 6 so the number under test is not the
+    # default - a test that passes when its own knob is ignored is not a test.
+    c.update(running.campaign_id, max_concurrent=2)
     running(_leads(db, 6))
     from api.config import load_config
-    assert dialer.run_once(load_config()) == 1
-    assert len(no_real_calls) == 1
+    assert dialer.run_once(load_config()) == 2
+    assert len(no_real_calls) == 2
 
 
 def test_raising_max_concurrent_takes_effect_without_a_restart(db, running, no_real_calls):
-    settings_mod.set_many({'max_concurrent': 3})
+    from api import campaigns as c
+    c.update(running.campaign_id, max_concurrent=3)   # config, not a redeploy
     running(_leads(db, 6, prefix='+1555661'))
     from api.config import load_config
     assert dialer.run_once(load_config()) == 3
@@ -98,14 +110,29 @@ def test_raising_max_concurrent_takes_effect_without_a_restart(db, running, no_r
 # the interval is TIME based, never outcome driven
 # --------------------------------------------------------------------------
 
-def test_the_gap_is_rerolled_within_the_configured_range():
-    settings_mod.set_many({'dial_interval_min': 210, 'dial_interval_max': 300})
-    import random
-    s = settings_mod.all_settings(force=True)
-    gaps = [random.uniform(s['dial_interval_min'], s['dial_interval_max'])
-            for _ in range(200)]
-    assert all(210 <= g <= 300 for g in gaps)
+def test_the_gap_is_rerolled_within_the_configured_range(db):
+    """
+    Calls THE REAL PICKER. This test used to set the range in settings and then
+    roll its own random.uniform over it - so it asserted on a range production
+    stopped reading, using arithmetic production does not run. It passed either
+    way. Spacing lives on the campaign, and worker.next_gap() is what the loop
+    actually calls.
+    """
+    from api import campaigns as c, worker
+    cid = running_campaign_id()
+    c.update(cid, dial_interval_min=240, dial_interval_max=280)
+    gaps = [worker.next_gap() for _ in range(200)]
+    assert all(240 <= g <= 280 for g in gaps), f'out of range: {min(gaps)}..{max(gaps)}'
     assert len(set(round(g) for g in gaps)) > 20, 'a fixed cadence is itself a pattern'
+
+
+def test_the_gap_falls_back_when_no_campaign_runs(db):
+    """No campaign running means nothing dials, so the fallback only paces an
+    idle loop - but it must still be a sane number, not a crash."""
+    from api import campaigns as c, worker
+    for row in c.list_all():
+        c.stop(row['campaign_id'])
+    assert 210 <= worker.next_gap() <= 300
 
 
 def test_the_worker_rearms_the_gap_before_dialing_not_after(db):
@@ -150,7 +177,8 @@ def test_three_busies_do_not_produce_three_immediate_dials(db, running, no_real_
     pushed 15 minutes out, so the next tick picks a DIFFERENT lead - it never
     re-dials the busy number immediately.
     """
-    settings_mod.set_many({'max_concurrent': 1})
+    from api import campaigns as c
+    c.update(running.campaign_id, max_concurrent=1)   # on the campaign, not settings
     ids = _leads(db, 3, prefix='+1555662')
     running(ids)
     from api.config import load_config

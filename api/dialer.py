@@ -14,16 +14,17 @@ remove exactly one and watch exactly one test go red:
     CAMPAIGN_JOIN               nothing dials outside a started campaign
     assert_not_suppressed       re-check, for a number suppressed mid-batch
     assert_dialable             the allowlist
-    assert_dialing_enabled      THE SWITCH - defaults off, replaces START
-    assert_under_daily_cap      new leads per day; carry-overs are exempt
-    QUEUE_MEMBERSHIP            pool_status='active' - "add to campaign"
+    assert_campaign_running     exactly one campaign runs; none by default
+    assert_under_daily_cap      the CAMPAIGN's new-leads-per-day cap
+    QUEUE_MEMBERSHIP            pool_status='active' - queued
+    CAMPAIGN_MEMBERSHIP         only the RUNNING campaign's leads dial
 """
 
 import time
 
-from api import db, retell, settings as settings_mod, windows
+from api import campaigns, db, retell, windows
 from api.config import load_config
-from api.guards import (DialRefused, assert_dialable, assert_dialing_enabled,
+from api.guards import (DialRefused, assert_campaign_running, assert_dialable,
                         assert_not_suppressed, assert_under_daily_cap)
 
 # A suppressed number must never be a CANDIDATE, not merely never dialed.
@@ -50,6 +51,10 @@ REPLIED_GUARD = "AND l.replied_at IS NULL"
 # switch dials, and it defaults to OFF.
 QUEUE_MEMBERSHIP = "AND l.pool_status = 'active'"
 
+# A lead only dials for the campaign that is RUNNING. Leads assigned to any
+# other campaign sit idle - that is the whole point of naming them.
+CAMPAIGN_MEMBERSHIP = "AND l.campaign_id = %(campaign_id)s"
+
 SELECT_DUE = """
     SELECT l.lead_id, l.phone_e164, l.status, l.stage, l.attempts,
            l.company, l.dm_name, l.dm_title, l.dm_email, l.emailed_at,
@@ -59,6 +64,7 @@ SELECT_DUE = """
       FROM leads l
      WHERE true
        {queue}
+       {campaign}
        AND l.status IN ('new', 'callback', 'no_answer', 'queued')
        AND l.next_attempt_at <= now()
        {stage_dialable}
@@ -79,6 +85,7 @@ SELECT_DUE = """
 def _build_select():
     return SELECT_DUE.format(
         queue=QUEUE_MEMBERSHIP,
+        campaign=CAMPAIGN_MEMBERSHIP,
         stage_dialable=STAGE_DIALABLE,
         replied_guard=REPLIED_GUARD,
         suppression=SUPPRESSION_JOIN,
@@ -104,20 +111,23 @@ def select_and_claim(cfg, date=None, limit: int = 10):
     Rollovers sort first: a lead due yesterday that never got dialed has
     waited longest.
     """
-    # The switch is checked HERE too, so a paused queue produces no
-    # candidates at all rather than claims that are refused one by one.
-    if not settings_mod.get('dialing_enabled'):
+    # Checked HERE too, so a stopped campaign produces no candidates at all
+    # rather than claims that are refused one by one.
+    campaign = campaigns.running()
+    if not campaign:
         return []
     claimed = []
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(_build_select(), {'limit': limit})
+            cur.execute(_build_select(),
+                        {'limit': limit, 'campaign_id': campaign['campaign_id']})
             for r in cur.fetchall():
                 cur.execute(
                     """UPDATE leads SET status = 'dialing', last_called_at = now(),
                                         updated_at = now()
                         WHERE lead_id = %s""", (r['lead_id'],))
-                claimed.append({**r, 'prior_status': r['status']})
+                claimed.append({**r, 'prior_status': r['status'],
+                                'campaign': campaign})
     return claimed
 
 
@@ -134,7 +144,7 @@ def _revert(lead, outcome, detail):
 
 _REFUSAL_OUTCOMES = (
     ('suppressed', 'refused_suppressed'),
-    ('switched OFF', 'refused_paused'),
+    ('no campaign is running', 'refused_paused'),
     ('daily cap', 'refused_cap'),
     ('allowlist', 'refused_allowlist'),
     ('DIAL_MODE', 'refused_allowlist'),
@@ -144,16 +154,29 @@ _REFUSAL_OUTCOMES = (
 def dial_one(cfg, lead, use_web: bool = False):
     """Guard, then dial. Returns the call_id, or None if refused/failed."""
     phone = lead['phone_e164']
-    st = settings_mod.all_settings()
     try:
         with db.get_conn() as conn:
+            # RE-READ the campaign. The row on the claimed lead is a snapshot
+            # from selection time, so a pause during an in-flight batch was
+            # invisible to the guard below - which is the one case the
+            # in-transaction re-check exists for. Read the lead's OWN
+            # campaign, not whatever is running now: if A was stopped and B
+            # started, this lead must not be dialed under B's config.
+            with conn.cursor() as cur:
+                cur.execute('SELECT campaign_id FROM leads WHERE lead_id = %s',
+                            (lead['lead_id'],))
+                row = cur.fetchone()
+            cid = row and row['campaign_id']
+            # No fallback to running(): "whatever is running now" is how a
+            # lead claimed under A ends up dialed under B.
+            campaign = campaigns.get(cid) if cid else None
             # All four re-checked in the SAME transaction as the dial. The
             # gap between claiming a batch and dialing it is real: a call can
             # end with "remove me", or someone can hit pause, while an earlier
             # batch is still in flight.
             assert_not_suppressed(conn, phone)
-            assert_dialing_enabled(st)
-            assert_under_daily_cap(conn, lead, st, cfg.OPERATOR_TIMEZONE)
+            assert_campaign_running(campaign)
+            assert_under_daily_cap(conn, lead, campaign, cfg.OPERATOR_TIMEZONE)
             assert_dialable(phone, cfg)
 
             # Every {{variable}} any prompt uses, built in one place. An
@@ -210,7 +233,8 @@ def run_once(cfg=None, limit: int = None) -> int:
     """
     cfg = cfg or load_config()
     if limit is None:
-        limit = settings_mod.get('max_concurrent')
+        camp = campaigns.running()
+        limit = camp['max_concurrent'] if camp else 1
     placed = 0
     for lead in select_and_claim(cfg, limit=limit):
         if dial_one(cfg, lead) is not None:

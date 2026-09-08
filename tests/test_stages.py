@@ -14,12 +14,15 @@ import pytest
 
 from api import campaigns, dialer, drain, retell, stages
 
+from conftest import running_campaign_id
+
 LA = 'America/Los_Angeles'
 
 
 def _lead(db, **kw):
     cols = {'company': 'Whitfield Law', 'phone_e164': '+15552220001',
-            'timezone': LA, 'pool_status': 'active', 'status': 'new', 'stage': 'L1'}
+            'timezone': LA, 'pool_status': 'active', 'status': 'new', 'stage': 'L1',
+            'campaign_id': running_campaign_id()}
     cols.update(kw)
     keys = ', '.join(cols); ph = ', '.join(['%s'] * len(cols))
     with db.cursor() as cur:
@@ -41,10 +44,11 @@ def enrolled(db, cfg_env, monkeypatch):
     """Standing queue: put leads in it and switch dialing on."""
     monkeypatch.setattr('api.windows.LEGAL_WINDOW', '')
     monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
-    from api import settings as settings_mod
+    from api import campaigns as c, settings as settings_mod
     settings_mod._cache.update(at=0.0, values=None)
-    settings_mod.set_many({'dialing_enabled': 'true', 'daily_cap': 1000},
-                          updated_by='test')
+    # The pause and the cap live on the campaign; settings has not been
+    # consulted for either since the named-campaign change.
+    c.update(running_campaign_id(), daily_cap=1000)
 
     def _queue(ids):
         if not isinstance(ids, (list, tuple)):

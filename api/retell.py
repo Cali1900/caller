@@ -66,7 +66,7 @@ STAGE_AGENTS = {
 STAGE_VERSION_SETTING = {'L1': 'agent_l1_version', 'L3': 'agent_l3_version'}
 
 
-def agent_for(cfg, stage: str):
+def agent_for(cfg, stage: str, campaign=None):
     """
     (agent_id, version) for a stage. Raises for a stage that must not dial.
 
@@ -82,8 +82,12 @@ def agent_for(cfg, stage: str):
     key = STAGE_VERSION_SETTING.get(stage)
     if key:
         try:
-            from api import settings as _settings
-            version = _settings.get(key)
+            # The prompt version is a PROPERTY OF THE RUNNING CAMPAIGN.
+            # Falling back to the env seed beats guessing at 'latest'.
+            from api import campaigns as _campaigns
+            camp = campaign or _campaigns.running()
+            if camp and camp.get(key) is not None:
+                version = camp[key]
         except Exception:
             pass
     return getattr(cfg, aid), version
@@ -125,7 +129,7 @@ def create_phone_call(cfg, to_number: str, lead, dynamic=None):
     bypassed rather than two.
     """
     stage = lead.get('stage') or 'L1'
-    agent_id, agent_version = agent_for(cfg, stage)
+    agent_id, agent_version = agent_for(cfg, stage, lead.get('campaign'))
     lead_id = lead.get('lead_id')
     resp = _client(cfg).call.create_phone_call(
         from_number=cfg.RETELL_FROM_NUMBER,

@@ -76,6 +76,29 @@ def _safe(label, fn, *args):
         return None
 
 
+def next_gap():
+    """
+    Seconds to wait before the next dial, re-rolled EVERY tick.
+
+    Spacing belongs to the RUNNING campaign. With none running the loop still
+    ticks (to drain, score and alert) but nothing dials, so the fallback only
+    governs an idle loop.
+
+    Module level rather than a closure in main() so the spacing test can call
+    THIS function. It used to be nested, and the test reimplemented the roll
+    against settings - which stopped being where spacing lives, so the test
+    was asserting on a range production never read.
+    """
+    import random
+    from api import campaigns as _c
+    camp = _c.running()
+    lo = camp['dial_interval_min'] if camp else 210
+    hi = camp['dial_interval_max'] if camp else 300
+    if lo > hi:
+        lo, hi = hi, lo
+    return random.uniform(lo, hi)
+
+
 def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
@@ -94,20 +117,20 @@ def main():
     if cfg.DIAL_MODE == 'allowlist' and not cfg.DIAL_ALLOWLIST:
         print('[worker] allowlist is EMPTY - nothing can be dialed. '
               'That is correct, not a bug.', flush=True)
-    from api import settings as _s
-    if not _s.get('dialing_enabled'):
-        print('[worker] dialing is SWITCHED OFF. Nothing will dial until it is '
-              'turned on from /campaign.', flush=True)
+    from api import campaigns as _c
+    _running = _c.running()
+    if _running:
+        print(f'[worker] campaign RUNNING: {_running["name"]} '
+              f'(cap {_running["daily_cap"]}, L1 v{_running["agent_l1_version"]})',
+              flush=True)
+    else:
+        print('[worker] NO CAMPAIGN RUNNING. Nothing will dial until one is '
+              'started from /campaigns.', flush=True)
 
     import random
     from api import settings as settings_mod
 
-    def _next_gap():
-        s_ = settings_mod.all_settings()
-        lo, hi = s_['dial_interval_min'], s_['dial_interval_max']
-        if lo > hi:
-            lo, hi = hi, lo
-        return random.uniform(lo, hi)
+    _next_gap = next_gap
 
     last_drain = 0.0
     last_dial = 0.0
