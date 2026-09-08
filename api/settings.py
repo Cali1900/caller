@@ -29,9 +29,9 @@ SPEC = {
     # happened to be sitting in the Retell dashboard. See migration 009.
     'agent_l1_version': (9, int, 'live L1 agent version', 0, 9999),
     'agent_l3_version': (1, int, 'live L3 agent version', 0, 9999),
-    # THE SWITCH. Replaces the old start button. Defaults to OFF: adding
-    # leads to the queue must never be able to start dialing.
-    'dialing_enabled': (False, bool, 'dialing on/off', None, None),
+    # 'dialing_enabled' WAS HERE. It is gone: the pause is
+    # campaign_configs.is_running, and leaving a key here that nothing reads is
+    # how scripts/deploy.sh ended up "pausing" a no-op before every restart.
     'daily_cap':       (100,   int,  'new leads per day', 1, 5000),
 }
 

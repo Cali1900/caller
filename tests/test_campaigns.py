@@ -64,8 +64,18 @@ def _cfg():
 # --------------------------------------------------------------------------
 
 def test_dialing_defaults_to_off(db):
-    settings_mod._cache.update(at=0.0, values=None)
-    assert settings_mod.all_settings(force=True)['dialing_enabled'] is False
+    """
+    Reads the REAL switch. This asserted on settings['dialing_enabled'], which
+    nothing had consulted since campaigns became named configurations - so the
+    property everything else rests on was being checked against a dead key.
+
+    A newly created campaign is created STOPPED, and nothing runs until one is
+    started deliberately.
+    """
+    assert campaigns.running() is None
+    row = campaigns.create('DEFAULTS-OFF')
+    assert row['is_running'] is False
+    assert campaigns.running() is None
 
 
 def test_queueing_five_hundred_leads_places_zero_calls(db, no_real_calls):

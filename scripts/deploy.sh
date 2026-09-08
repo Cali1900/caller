@@ -12,36 +12,48 @@ cd "$(dirname "$0")/.."
 
 SERVICES="${*:-caller-api caller-worker}"
 
-state() {
+# THE PAUSE IS campaign_configs.is_running.
+#
+# This used to read settings['dialing_enabled'], which nothing has consulted
+# since campaigns became named configurations - so the pause was a NO-OP and a
+# deploy during calling hours would have rebuilt straight through a live call
+# while reporting that it had paused. Same failure as the masked guards: it
+# wrote one place and the dialer read another.
+running_campaign() {
   docker compose exec -T caller-api python -c "
-from api import settings
-print('on' if settings.all_settings(force=True)['dialing_enabled'] else 'off')" 2>/dev/null || echo unknown
+from api import campaigns
+r = campaigns.running()
+print(r['campaign_id'] if r else '')" 2>/dev/null | tr -d '\r' | tail -1
 }
-set_dialing() {
+stop_campaign() {
   docker compose exec -T caller-api python -c "
-from api import settings
-settings.set_many({'dialing_enabled': '$1'}, updated_by='deploy.sh')
-print('  dialing ->', settings.all_settings(force=True)['dialing_enabled'])"
+from api import campaigns
+campaigns.stop()
+print('  running now:', campaigns.running() or 'nothing')"
+}
+start_campaign() {
+  docker compose exec -T caller-api python -c "
+from api import campaigns
+campaigns.start('$1')
+r = campaigns.running()
+print('  running now:', r['name'] if r else 'NOTHING - start it at /campaigns')"
 }
 
-BEFORE=$(state)
-echo "==> dialing is currently: $BEFORE"
-
-RESUME=0
-if [[ "$BEFORE" == "on" ]]; then
-  echo "==> pausing before restart (a restart mid-call drops that call)"
-  set_dialing false
-  RESUME=1
+RUNNING=$(running_campaign)
+if [[ -n "$RUNNING" ]]; then
+  echo "==> a campaign is RUNNING ($RUNNING)"
+  echo "==> stopping it before restart (a restart mid-call drops that call)"
+  stop_campaign
   # let an in-flight tick finish rather than yanking the process mid-dial
   sleep 3
 else
-  echo "==> already paused; nothing to pause"
+  echo "==> no campaign running; nothing to pause"
 fi
 
 restore() {
-  if [[ $RESUME -eq 1 ]]; then
-    echo "==> resuming dialing"
-    set_dialing true || echo "!! COULD NOT RESUME - turn it on at /campaign"
+  if [[ -n "$RUNNING" ]]; then
+    echo "==> restarting the campaign that was running"
+    start_campaign "$RUNNING" || echo "!! COULD NOT RESUME - start it at /campaigns"
   fi
 }
 trap restore EXIT      # resume even if the build fails

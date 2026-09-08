@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.templating import Jinja2Templates
 
 from api import (campaigns, db, digest as digest_mod, drafts as drafts_mod,
+                 senders as senders_mod,
                  prompts as prompts_mod, settings as settings_mod, stages,
                  upload as upload_mod)
 from api.config import load_config
@@ -441,6 +442,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
     per_hour = round(3600.0 / avg * camp['max_concurrent'], 1) if avg else 0
     remaining = max(0, camp['daily_cap'] - (q['new_today'] or 0))
     pv_lead, pv_real = drafts_mod.preview_lead(campaign_id)
+    _sender_opts = senders_mod.options(cfg, camp['sender_email'])
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg,
         'per_hour': per_hour, 'remaining': remaining,
@@ -448,6 +450,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
         'windows': campaigns.windows(campaign_id), 'days': DAYS,
         'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1'),
                         'L3': prompts_mod.listing(cfg, 'L3')},
+        'sender_options': _sender_opts[0], 'sender_error': _sender_opts[1],
         'placeholders': drafts_mod.PLACEHOLDERS,
         'preview': drafts_mod.preview(camp, lead=pv_lead),
         'preview_lead': pv_lead, 'preview_real': pv_real,
@@ -498,6 +501,12 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
     if dial_interval_min > dial_interval_max:
         return RedirectResponse(
             f'/campaign/{campaign_id}?msg={urllib.parse.quote("REJECTED: gap min cannot exceed gap max")}',
+            status_code=303)
+    # The sender is a choice from a list. A typed address that Brevo has never
+    # heard of is the config-that-cannot-send this replaced a text field to stop.
+    if not senders_mod.is_allowed(_cfg(), sender_email):
+        return RedirectResponse(
+            f'/campaign/{campaign_id}?msg={urllib.parse.quote(f"REJECTED: {sender_email} is not an offered or verified sender")}',
             status_code=303)
     try:
         campaigns.update(campaign_id, name=name, notes=notes,

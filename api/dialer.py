@@ -47,8 +47,8 @@ REPLIED_GUARD = "AND l.replied_at IS NULL"
 # THE STANDING QUEUE. A lead is queued when pool_status='active' - that is
 # what "add to campaign" sets. There is no per-day campaign and no enrol step.
 #
-# Uploading does not queue. Queueing does not dial. Only the dialing_enabled
-# switch dials, and it defaults to OFF.
+# Uploading does not queue. Queueing does not dial. Only STARTING A
+# CAMPAIGN dials, and that is a deliberate act on /campaigns.
 QUEUE_MEMBERSHIP = "AND l.pool_status = 'active'"
 
 # A lead only dials for the campaign that is RUNNING. Leads assigned to any

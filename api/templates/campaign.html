@@ -110,7 +110,27 @@
     <div class="card">
       <h2>Sender</h2>
       <div class="field"><label for="se">From address</label>
-        <input id="se" type="email" name="sender_email" value="{{ c.sender_email }}"></div>
+        <select id="se" name="sender_email">
+          {% for o in sender_options %}
+          <option value="{{ o.email }}" {% if o.current %}selected{% endif %}>
+            {{ o.email }}{% if not o.verified %} — not verified in Brevo{% endif %}
+          </option>{% endfor %}
+        </select>
+        <p class="dim" style="margin:.4em 0 0">
+          Brevo only delivers from a verified sender, so this is a list, not a
+          text field.
+          {% if sender_error %}<br><span class="warn">&#9888; could not reach
+            Brevo ({{ sender_error }}) — the list may be stale.</span>
+          {% else %}
+            {% set unver = sender_options | rejectattr('verified') | list %}
+            {% if unver %}<br><span class="warn">&#9888;
+              {{ unver | map(attribute='email') | join(', ') }}
+              {{ 'is' if unver|length == 1 else 'are' }} not verified in Brevo yet.</span>
+              Fine for a draft you send by hand — the From: is just shown to you —
+              but the digest and anything that sends automatically will be refused.
+            {% endif %}
+          {% endif %}
+        </p></div>
       <div class="fields-2">
         <div class="field"><label for="sn">From name</label>
           <input id="sn" type="text" name="sender_name" value="{{ c.sender_name }}"></div>

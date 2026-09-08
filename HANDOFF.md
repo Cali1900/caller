@@ -13,9 +13,9 @@ Last updated 2026-09-08.
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260908_013_drop_legacy_campaign_tables.sql` |
-| Tests | 253 passed, 1 skipped |
-| Break pass | 29 definitions. Last **full** clean run: `BREAK PASS: OK`, 29/29 red on their own named test — **before** the draft/follow-up work below |
+| Last migration | `20260908_014_sender_from_the_verified_list.sql` |
+| Tests | 261 passed, 1 skipped |
+| Break pass | 32 definitions. Last **full** clean run: `BREAK PASS: OK`, 29/29. Breaks 30–32 verified individually since |
 | Campaigns | `C1` and `C2`, both **stopped**. Nothing dials while nothing runs |
 | Data | 2 leads (2 queued), 7 calls, 6 scores, 1 draft, 3 suppressed |
 
@@ -24,11 +24,9 @@ stopped. Starting one is a deliberate act on `/campaigns`.
 
 ### ⚠️ Open before this is "done"
 
-1. **The break pass has not been re-run since the follow-up work.** Two new
-   guards have no break definition: `retarget()` refusing to touch a SENT
-   draft, and the `_EMAIL_STATE` precedence. Until a break proves each turns
-   its own test red, treat them as untested — that is this project's standing
-   rule and it has caught eleven masked guards so far.
+1. **A full break pass has not run since breaks 30–32 were added.** Each was
+   verified individually (red on its own named test), but the last full
+   29/29 run predates them. Run `./scripts/break_pass.sh` once over all 32.
 2. Items 5, 6 and 7 below are specified and not built.
 
 ---
@@ -163,6 +161,19 @@ transaction, with no fallback to `running()`.
 
 ---
 
+## ⚠️ settings.py is dead weight
+
+Nothing in `api/` or the templates reads a single key from `settings.SPEC` any
+more — all ten moved onto the campaign. `dialing_enabled` has been removed
+because it actively misled `scripts/deploy.sh`, whose "pause before restart"
+was writing a key nothing read: **a deploy during calling hours would have
+rebuilt straight through a live call while reporting it had paused.** Now fixed
+to stop the running campaign.
+
+The remaining nine keys are inert. Recommend deleting the module and its
+`set_many` validation tests — but that is a decision, not a cleanup, so it is
+flagged rather than done.
+
 ## Next, in order
 
 These are specified and **not built**.
@@ -206,6 +217,12 @@ Then the four in `BACKLOG.md`: `B-batch-review`, `B-objection-scoring`,
   and clicks only.
 * **Recordings stay in Retell.** `opt_in_signed_url` is true; public recording
   URLs are not defensible.
+* **The from-address is a list, not a text field.** Brevo only delivers from a
+  verified sender. `api/senders.py` pulls the live list, unions it with the two
+  offered addresses, and labels anything unverified. `info@counselorai.io` is
+  the default. **Brevo's API needs a real User-Agent** — it answers curl with
+  200 and Python's default urllib UA with 403 on `/v3/senders`.
+* The from-NAME stays free text; Brevo does not verify display names.
 * Sean writes the prompts and the email copy himself.
 * Suppression is backed up weekly to DO Spaces (`caller-backups-sfo3`), keep
   12. **Restore tested, not assumed** — see `BACKUP.md`.
