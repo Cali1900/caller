@@ -359,6 +359,18 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
         elif outcome == 'already_sent':
             msg = ('Saved. The draft was ALREADY SENT, so its To: still shows '
                    'the old address - that is where the mail went.')
+
+    # CONFIRMING BY HAND MUST PRODUCE A DRAFT.
+    #
+    # There was no path from human_review to a draft at all: generate_for()
+    # refuses an unconfirmed email, and the only caller was the "regenerate"
+    # button, which the page hides when no draft exists. So a lead the agent
+    # failed to get a confirmation for was stuck - correcting the address and
+    # ticking confirmed produced nothing, with no button to press.
+    if confirmed is True and dm_email.strip():
+        if drafts_mod.get(lead_id) is None:
+            if drafts_mod.generate_for(lead_id):
+                msg = msg.rstrip('.') + '. Draft generated.'
     return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
                             status_code=303)
 

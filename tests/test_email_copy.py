@@ -309,3 +309,104 @@ def test_the_filter_and_the_column_cannot_disagree(client, db):
     lid = _lead_with_draft(db, 'filter@firm.example')
     assert str(lid) in client.get('/?email_state=draft_ready').text
     assert str(lid) not in client.get('/?email_state=sent').text
+
+
+# ---------------------------------------------------------------------------
+# there must be a way OUT of an unconfirmed email
+# ---------------------------------------------------------------------------
+
+def _unconfirmed_lead(db, email='wrong@firm.example'):
+    from api import campaigns as cc, db as dbm
+    cid = cc.create('UC-' + email[:6])['campaign_id']
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
+                               dm_email, dm_email_confirmed, timezone,
+                               campaign_id, stage, status, last_called_at)
+                           VALUES (%s,'W','Sean',%s,false,
+                                   'America/Los_Angeles',%s,'L1','human_review',
+                                   now())
+                           RETURNING lead_id""",
+                        ('+1424555' + str(abs(hash(email)) % 9000 + 1000), email, cid))
+            return cur.fetchone()['lead_id']
+
+
+def test_an_unconfirmed_email_has_no_draft(db):
+    """The precondition. An unconfirmed address is how a sending domain ends
+    up in a spam trap."""
+    from api import drafts as d
+    lid = _unconfirmed_lead(db)
+    assert d.generate_for(lid) is None
+    assert d.get(lid) is None
+
+
+def test_confirming_by_hand_generates_the_draft(db, client):
+    """
+    THE GAP THIS CLOSES. There was NO path from human_review to a draft:
+    generate_for() refuses an unconfirmed email, and its only caller was the
+    "regenerate" button, which the page hides when no draft exists. A lead the
+    agent failed to get a confirmation for was simply stuck.
+    """
+    from api import drafts as d
+    lid = _unconfirmed_lead(db, 'typo@firm.example')
+    r = client.post(f'/leads/{lid}/edit',
+                    data={'dm_name': 'Sean', 'dm_title': '',
+                          'dm_email': 'correct@firm.example',
+                          'dm_email_confirmed': 'true', 'notes': ''},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    draft = d.get(lid)
+    assert draft is not None, 'confirming by hand must produce a draft'
+    assert draft['to_email'] == 'correct@firm.example'
+
+
+def test_confirming_without_changing_the_address_still_generates(db, client):
+    """The address can be right and merely unconfirmed - the agent read it back
+    and moved on without asking. Ticking the box alone must be enough."""
+    from api import drafts as d
+    lid = _unconfirmed_lead(db, 'right@firm.example')
+    client.post(f'/leads/{lid}/edit',
+                data={'dm_name': 'Sean', 'dm_title': '',
+                      'dm_email': 'right@firm.example',
+                      'dm_email_confirmed': 'true', 'notes': ''},
+                follow_redirects=False)
+    assert d.get(lid) is not None
+
+
+def test_confirming_does_not_clobber_an_edited_draft(db, client):
+    """generate_for is only called when there is NO draft. A human's edits must
+    survive a later confirm."""
+    from api import drafts as d
+    lid = _unconfirmed_lead(db, 'edited@firm.example')
+    client.post(f'/leads/{lid}/edit',
+                data={'dm_name': 'Sean', 'dm_title': '',
+                      'dm_email': 'edited@firm.example',
+                      'dm_email_confirmed': 'true', 'notes': ''},
+                follow_redirects=False)
+    d.save_edit(lid, 'My subject', 'My body')
+    client.post(f'/leads/{lid}/edit',
+                data={'dm_name': 'Sean', 'dm_title': '',
+                      'dm_email': 'edited@firm.example',
+                      'dm_email_confirmed': 'true', 'notes': ''},
+                follow_redirects=False)
+    assert d.get(lid)['body'] == 'My body'
+
+
+def test_the_page_offers_a_way_forward_from_every_no_draft_state(db, client):
+    """
+    A dead end with no button is what made this look unfixable. Each state must
+    say what to do next.
+    """
+    from api import db as dbm
+    # unconfirmed: tells you to correct and tick
+    lid = _unconfirmed_lead(db, 'state1@firm.example')
+    body = client.get(f'/leads/{lid}').text
+    assert 'not confirmed' in body and 'tick' in body
+
+    # confirmed but no draft: an actual button
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE leads SET dm_email_confirmed = true
+                            WHERE lead_id = %s""", (lid,))
+    body = client.get(f'/leads/{lid}').text
+    assert 'Generate draft' in body

@@ -116,13 +116,27 @@
         <button type="submit">mark as sent</button>
       </form>
       <span class="dim">&mdash; you send it from your own mail client; this only
-        records that you did, and queues the L3 follow-up call in 3 days</span>
+        records that you did, and when. No follow-up call is
+        scheduled &mdash; a follow-up is its own campaign.</span>
     {% endif %}
     <p class="dim">Nothing in this system sends email. Copy it out, send it
        yourself, then mark it sent.</p>
   {% else %}
-    <p class="dim">No draft. One is written automatically once a
-       <b>confirmed</b> email is captured.</p>
+    {% if lead.dm_email and lead.dm_email_confirmed %}
+      <p class="dim">No draft yet, but this lead has a <b>confirmed</b> email
+         &mdash; one can be written now.</p>
+      <form method="post" action="/leads/{{ lead.lead_id }}/draft/regenerate">
+        <button type="submit" class="gold">Generate draft</button>
+      </form>
+    {% elif lead.dm_email %}
+      <p class="dim">No draft. <b>{{ lead.dm_email }}</b> is <b>not confirmed</b>,
+         and an unconfirmed address is how a sending domain ends up in a spam
+         trap. Correct it above if it is wrong, tick <b>confirmed</b>, and save
+         &mdash; the draft is written then.</p>
+    {% else %}
+      <p class="dim">No draft, and no email captured. Add one above and tick
+         <b>confirmed</b> to write one.</p>
+    {% endif %}
   {% endif %}
 </div>
 
