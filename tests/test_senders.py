@@ -86,7 +86,7 @@ def test_the_save_route_rejects_an_unlisted_sender(client, db, cfg_env):
     row = c.create('SND-route')
     cid = row['campaign_id']
     form = {'name': 'SND-route', 'notes': '', 'agent_l1_version': 9,
-            'agent_l3_version': 1, 'sender_name': 'Sean',
+            'sender_name': 'Sean',
             'sender_company_line': 'CounselorAI LLC', 'daily_cap': 100,
             'max_concurrent': 1, 'dial_interval_min': 210,
             'dial_interval_max': 300}
@@ -109,7 +109,6 @@ def test_the_from_name_is_still_free_text(client, db, cfg_env):
     cid = c.create('SND-name')['campaign_id']
     client.post(f'/campaign/{cid}/save',
                 data={'name': 'SND-name', 'notes': '', 'agent_l1_version': 9,
-                      'agent_l3_version': 1,
                       'sender_email': 'info@counselorai.io',
                       'sender_name': 'Whoever I Like',
                       'sender_company_line': 'CounselorAI LLC',

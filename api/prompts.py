@@ -82,7 +82,7 @@ def sync_versions(cfg, stage: str = 'L1', force: bool = False):
     import datetime
     from retell import Retell
     c = Retell(api_key=cfg.RETELL_API_KEY)
-    agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
+    agent_id = cfg.AGENT_L1
 
     with db.get_conn() as conn:
         with conn.cursor() as cur:
@@ -143,7 +143,7 @@ def sync_if_stale(cfg, stage: str = 'L1', max_age: float = SYNC_MAX_AGE):
     version you published an hour ago.
     """
     import time
-    agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
+    agent_id = cfg.AGENT_L1
     ent = _sync_cache.setdefault(agent_id, {'at': 0.0, 'error': None})
     if time.time() - ent['at'] < max_age:
         return ent['error']
@@ -167,7 +167,7 @@ def listing(cfg, stage: str = 'L1', include_version=None):
     is unpublished, so a config that already exists is never silently dropped
     off the screen it is edited on. It is returned flagged, not hidden.
     """
-    agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
+    agent_id = cfg.AGENT_L1
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(

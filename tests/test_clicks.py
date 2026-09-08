@@ -43,46 +43,36 @@ BASE = 'https://caller-dev.counselorai.io'
 # the rewrite
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('link', [
-    'https://counselorai.io/#letter',
-    'https://counselorai.io/',
-    'https://www.counselorai.io/samples/demand',
-    'http://counselorai.io/#letter',
-])
-def test_any_counselorai_link_in_the_copy_is_rewritten(db, link):
+def test_the_tracked_url_is_built_from_the_token(db):
     """
-    THE BUG THIS EXISTS FOR. The first cut matched ONE hardcoded string. The
-    copy is operator-editable and had already been changed, so the rewrite
-    matched nothing and produced an untracked draft in silence.
+    The blanket rewrite is GONE - it swept every counselorai.io link in the
+    body, signature included. The tracked link now comes from the
+    {{sample_link}} placeholder in the copy, so only the link the operator
+    marked is rewritten. See test_a_signature_link_is_left_alone.
     """
-    lid = _lead(db, f'l{abs(hash(link))%999}@f.example')
-    out = clicks.rewrite(f'See it here: {link} - worth a look?', BASE, lid)
-    assert link not in out
-    assert f'{BASE}/c/' in out
+    lid = _lead(db, 'url@f.example')
+    url = clicks.tracked_url(BASE, lid)
+    assert url.startswith(BASE + '/c/')
+    assert clicks.token_for(lid) in url
 
 
-def test_the_link_it_replaced_becomes_the_redirect_target(db):
-    """Editing the copy changes where the click lands. Nothing to keep in sync."""
-    lid = _lead(db, 'dest@f.example')
-    clicks.rewrite('go to https://counselorai.io/pricing now', BASE, lid)
+def test_no_base_url_means_no_tracked_url(db):
+    """A dead link to a lawyer is worse than an untracked one - drafts fall
+    back to the plain sample page."""
+    lid = _lead(db, 'nobase2@f.example')
+    # It used to return "/c/<token>" - a RELATIVE path, which is a working
+    # link on a web page and a dead one in an email.
+    assert clicks.tracked_url('', lid) is None
+
+
+def test_the_destination_is_remembered_for_the_redirect(db):
+    lid = _lead(db, 'dest2@f.example')
+    clicks.set_destination(lid, 'https://counselorai.io/pricing')
+    from api import db as dbm
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT click_destination FROM leads WHERE lead_id=%s', (lid,))
             assert cur.fetchone()['click_destination'] == 'https://counselorai.io/pricing'
-
-
-def test_no_base_url_leaves_a_plain_working_link(db):
-    """
-    Failing to track is recoverable. Sending a lawyer a dead link is not.
-    """
-    lid = _lead(db, 'plain@f.example')
-    body = 'See https://counselorai.io/#letter'
-    assert clicks.rewrite(body, '', lid) == body
-
-
-def test_a_body_with_no_link_is_untouched(db):
-    lid = _lead(db, 'nolink@f.example')
-    assert clicks.rewrite('no links here', BASE, lid) == 'no links here'
 
 
 def test_the_token_is_stable_for_a_lead(db):

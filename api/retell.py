@@ -55,7 +55,6 @@ def _client(cfg) -> Retell:
 # them an email and nothing dials.
 STAGE_AGENTS = {
     'L1': ('AGENT_L1', 'AGENT_L1_VERSION'),
-    'L3': ('AGENT_L3', 'AGENT_L3_VERSION'),
 }
 
 
@@ -63,7 +62,8 @@ STAGE_AGENTS = {
 # v8 went live as a side effect of an unrelated dashboard edit; the point of
 # reading it from settings is that editing a draft in Retell can no longer
 # change what actually dials.
-STAGE_VERSION_SETTING = {'L1': 'agent_l1_version', 'L3': 'agent_l3_version'}
+# L3 is not dialable - a follow-up is its own campaign, by email.
+STAGE_VERSION_SETTING = {'L1': 'agent_l1_version'}
 
 
 def agent_for(cfg, stage: str, campaign=None):

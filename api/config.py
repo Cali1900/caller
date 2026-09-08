@@ -51,8 +51,6 @@ class Config:
     RETELL_FROM_NUMBER: str
     AGENT_L1: str
     AGENT_L1_VERSION: int
-    AGENT_L3: str
-    AGENT_L3_VERSION: int
     OPERATOR_TIMEZONE: str
 
     ANTHROPIC_API_KEY: str
@@ -114,8 +112,6 @@ def load_config() -> Config:
         RETELL_FROM_NUMBER=_required('RETELL_FROM_NUMBER'),
         AGENT_L1=_required('AGENT_L1'),
         AGENT_L1_VERSION=int(_required('AGENT_L1_VERSION')),
-        AGENT_L3=_required('AGENT_L3'),
-        AGENT_L3_VERSION=int(_required('AGENT_L3_VERSION')),
         OPERATOR_TIMEZONE=_required('OPERATOR_TIMEZONE'),
         ANTHROPIC_API_KEY=_required('ANTHROPIC_API_KEY'),
         SCORER_MODEL=_required('SCORER_MODEL'),

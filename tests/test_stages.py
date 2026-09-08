@@ -266,8 +266,12 @@ def test_recording_a_reply_twice_is_a_no_op(db, cfg_env):
 
 def test_each_stage_uses_its_own_agent(cfg_env):
     assert retell.agent_for(cfg_env, 'L1')[0] == cfg_env.AGENT_L1
-    assert retell.agent_for(cfg_env, 'L3')[0] == cfg_env.AGENT_L3
-    assert cfg_env.AGENT_L1 != cfg_env.AGENT_L3
+    # L3 HAS NO DIALING AGENT any more - a follow-up is its own campaign, by
+    # email. agent_for refuses rather than guessing, which is the fail-closed
+    # behaviour every unknown stage gets.
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        retell.agent_for(cfg_env, 'L3')
 
 
 def test_l2_has_no_agent_at_all(cfg_env):

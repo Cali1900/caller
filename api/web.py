@@ -780,7 +780,7 @@ def prompts_page(request: Request, msg: str = ''):
 def prompts_note(stage: str = Form('L1'), agent_version: int = Form(...),
                  note: str = Form('')):
     cfg = _cfg()
-    agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
+    agent_id = cfg.AGENT_L1
     ok = prompts_mod.set_note(agent_id, agent_version, note.strip())
     return RedirectResponse(
         f'/prompts?msg={urllib.parse.quote("note saved" if ok else "no such version")}',

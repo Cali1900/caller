@@ -19,7 +19,7 @@
   <tr><th>Version</th><th>Date</th><th>Model</th><th class="right">Chars</th>
       <th class="right">Calls run</th><th>Used by</th><th>Note</th></tr>
   {% for r in rows %}
-    {% set users = campaigns | selectattr(('agent_l1_version' if stage=='L1' else 'agent_l3_version'), 'equalto', r.agent_version) | list %}
+    {% set users = campaigns | selectattr('agent_l1_version', 'equalto', r.agent_version) | list %}
     <tr>
       <td><b>v{{ r.agent_version }}</b>{% if not r.is_published %} <span class="pill">draft</span>{% endif %}</td>
       <td class="dim">{{ r.retell_updated_at.strftime('%b %d %H:%M') if r.retell_updated_at else '' }}</td>

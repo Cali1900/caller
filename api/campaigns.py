@@ -27,7 +27,7 @@ from api import db, senders as _senders
 TEMPLATE_FIELDS = ('subject_with_name', 'subject_without',
                    'body_with_name', 'body_without')
 
-CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version', 'agent_l3_version',
+CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  'sender_email', 'sender_name', 'sender_company_line',
                  'daily_cap', 'max_concurrent', 'dial_interval_min',
                  'dial_interval_max',
@@ -148,7 +148,6 @@ def create(name: str, template_from=None, **overrides):
         'name': name.strip(),
         'notes': overrides.get('notes') or '',
         'agent_l1_version': (base or {}).get('agent_l1_version', 9),
-        'agent_l3_version': (base or {}).get('agent_l3_version', 1),
         'sender_email': (base or {}).get('sender_email',
                                          _senders.DEFAULT_SENDER),
         'sender_name': (base or {}).get('sender_name', 'Sean'),

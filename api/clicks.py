@@ -25,18 +25,9 @@ import secrets
 from api import db
 
 import ipaddress
-import re
 
 # Fallback destination when a lead has none recorded. The real page, unchanged.
 DESTINATION = 'https://counselorai.io/#letter'
-
-# ANY counselorai.io link in the copy is the tracked one.
-#
-# The first cut matched one hardcoded string. The copy is OPERATOR-EDITABLE and
-# had already been changed from '.../#letter' to '/', so the rewrite matched
-# nothing and produced an untracked draft without a word of complaint. A
-# constant that must agree with editable text will eventually disagree with it.
-SAMPLE_LINK = re.compile(r'https?://(?:www\.)?counselorai\.io[^\s<>"\')]*')
 
 TOKEN_BYTES = 16          # 128 bits - not guessable, short enough to read
 
@@ -67,8 +58,19 @@ def token_for(lead_id) -> str:
 
 
 def tracked_url(base_url: str, lead_id) -> str:
+    """
+    The absolute tracked URL, or None when there is no base to build it from.
+
+    NO BASE MEANS NO URL. Without the guard this returned "/c/<token>" - a
+    RELATIVE path, which is a working link on a web page and a dead one in an
+    email. The caller falls back to the plain sample page, which is the whole
+    point of the fallback.
+    """
+    base = (base_url or '').strip().rstrip('/')
+    if not base:
+        return None
     tok = token_for(lead_id)
-    return f"{base_url.rstrip('/')}/c/{tok}" if tok else None
+    return f'{base}/c/{tok}' if tok else None
 
 
 def set_destination(lead_id, url: str) -> None:
@@ -77,29 +79,6 @@ def set_destination(lead_id, url: str) -> None:
         with conn.cursor() as cur:
             cur.execute('UPDATE leads SET click_destination = %s WHERE lead_id = %s',
                         (url, lead_id))
-
-
-def rewrite(body: str, base_url: str, lead_id) -> str:
-    """
-    Swap the counselorai.io link for the tracked one, and remember where it
-    pointed so the redirect lands exactly there.
-
-    Returns the body UNCHANGED when there is no base URL or no link to rewrite.
-    An unset CLICK_BASE_URL must produce a plain working link, never a tracked
-    one pointing nowhere: failing to track is recoverable, sending a dead link
-    to a lawyer is not.
-    """
-    body = body or ''
-    if not base_url:
-        return body
-    found = SAMPLE_LINK.search(body)
-    if not found:
-        return body
-    tracked = tracked_url(base_url, lead_id)
-    if not tracked:
-        return body
-    set_destination(lead_id, found.group(0))
-    return SAMPLE_LINK.sub(tracked, body)
 
 
 def _clean_ip(value):

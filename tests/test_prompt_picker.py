@@ -27,11 +27,18 @@ def test_the_live_version_comes_from_the_campaign_not_env(db, cfg_env):
     assert retell.agent_for(cfg_env, 'L1')[1] == 9
 
 
-def test_each_stage_has_its_own_live_version(db, cfg_env):
+def test_only_l1_has_a_live_version(db, cfg_env):
+    """
+    L3 was descoped - a follow-up is its own campaign, by email - so there is
+    exactly one live version and L3 has no dialing agent to point at.
+    agent_for REFUSES rather than guessing, which is the same fail-closed
+    behaviour any unknown stage gets.
+    """
     cid = running_campaign_id()
-    campaigns_mod.update(cid, agent_l1_version=9, agent_l3_version=1)
+    campaigns_mod.update(cid, agent_l1_version=9)
     assert retell.agent_for(cfg_env, 'L1')[1] == 9
-    assert retell.agent_for(cfg_env, 'L3')[1] == 1
+    with pytest.raises(ValueError):
+        retell.agent_for(cfg_env, 'L3')
 
 
 def test_two_campaigns_can_point_at_different_versions(db, cfg_env):
