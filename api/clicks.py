@@ -155,6 +155,9 @@ def record(token: str, user_agent: str = '', ip: str = None):
                 (lead['lead_id'], lead['emailed_at'], lead['emailed_at'],
                  (user_agent or '')[:500], ip))
             mins = cur.fetchone()['minutes_since_sent']
+            # A click is engagement - the strongest signal short of a reply.
+            from api import pipeline
+            pipeline.advance(cur, lead['lead_id'], 'engaged', 'clicked the sample link')
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, summary, detail)
                    VALUES (%s, 'click', 'clicked the sample link', %s)""",

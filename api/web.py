@@ -56,7 +56,9 @@ templates.env.filters['ago'] = _ago
 
 STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'email_path', 'demo_pending', 'dnc', 'max_attempts', 'failed',
-            'human_review', 'paused']
+            'human_review', 'paused',
+            'emailed', 'engaged', 'demo_booked', 'won', 'lost',
+            'lost_no_response', 'bad_email']
 STAGES = ['L1', 'L2', 'L3', 'L4', 'won', 'lost']
 DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
         'Friday', 'Saturday']
@@ -507,9 +509,14 @@ def lead_emailed(lead_id: str, emailed_by: str = Form('operator')):
 #              strands the lead: claimed forever, never selected again.
 # Both are easy to add back if Sean wants them; a stranded lead and an
 # unsuppressed DNC are not as easy to undo.
-MANUAL_STATUSES = ('new', 'queued', 'completed', 'callback', 'no_answer',
-                   'email_path', 'demo_pending', 'max_attempts', 'failed',
-                   'human_review', 'paused')
+MANUAL_STATUSES = (
+    # where the dialer left it
+    'new', 'queued', 'completed', 'callback', 'no_answer', 'email_path',
+    'max_attempts', 'failed', 'paused', 'human_review', 'demo_pending',
+    # the pipeline
+    'emailed', 'engaged', 'demo_booked', 'won', 'lost', 'lost_no_response',
+    'bad_email',
+)
 
 
 @router.post('/leads/{lead_id}/status')
@@ -646,7 +653,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
 
 @router.get('/funnel', response_class=HTMLResponse)
 def funnel_page(request: Request, campaign_id: str = '', agent_version: str = '',
-                date_from: str = '', date_to: str = ''):
+                date_from: str = '', date_to: str = '', status: str = ''):
     """
     Where leads stop, and which step is worst.
 
@@ -657,7 +664,7 @@ def funnel_page(request: Request, campaign_id: str = '', agent_version: str = ''
     cfg = _cfg()
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
-    data = funnel_mod.build(campaign_id, agent_version, date_from, date_to)
+    data = funnel_mod.build(campaign_id, agent_version, date_from, date_to, status)
     fc = forecast_mod.build(campaign_id)
     return templates.TemplateResponse(request, 'funnel.html', {
         'hdr': hdr, 'rows': data['rows'], 'counts': data['counts'],
@@ -665,7 +672,8 @@ def funnel_page(request: Request, campaign_id: str = '', agent_version: str = ''
         'campaigns': campaigns.list_all(),
         'versions': funnel_mod.versions_seen(campaign_id),
         'campaign_id': campaign_id, 'agent_version': agent_version,
-        'date_from': date_from, 'date_to': date_to, 'fc': fc})
+        'date_from': date_from, 'date_to': date_to, 'fc': fc,
+        'status': status, 'statuses': STATUSES})
 
 
 @router.get('/prompts', response_class=HTMLResponse)

@@ -34,7 +34,7 @@ STEPS = (
 )
 
 
-def _where(campaign_id, agent_version, date_from, date_to):
+def _where(campaign_id, agent_version, date_from, date_to, status=''):
     """Filters on the LEAD COHORT, not on individual events."""
     where, params = ['1=1'], {}
     if campaign_id:
@@ -46,6 +46,9 @@ def _where(campaign_id, agent_version, date_from, date_to):
     if date_to:
         where.append('l.first_dialed_at < (%(dto)s::date + 1)')
         params['dto'] = date_to
+    if status:
+        where.append('l.status = %(status)s')
+        params['status'] = status
     if agent_version not in (None, ''):
         # A lead belongs to a version if any of its calls ran that version.
         where.append("""EXISTS (SELECT 1 FROM calls cv
@@ -55,8 +58,9 @@ def _where(campaign_id, agent_version, date_from, date_to):
     return ' AND '.join(where), params
 
 
-def counts(campaign_id='', agent_version='', date_from='', date_to=''):
-    where, params = _where(campaign_id, agent_version, date_from, date_to)
+def counts(campaign_id='', agent_version='', date_from='', date_to='',
+           status=''):
+    where, params = _where(campaign_id, agent_version, date_from, date_to, status)
     sql = f"""
         SELECT
           count(*)                                                  AS in_queue,
@@ -79,7 +83,8 @@ def counts(campaign_id='', agent_version='', date_from='', date_to=''):
             return dict(cur.fetchone())
 
 
-def build(campaign_id='', agent_version='', date_from='', date_to=''):
+def build(campaign_id='', agent_version='', date_from='', date_to='',
+          status=''):
     """
     Rows of {key, label, n, pct, pct_of, drop_n, drop_pct, worst}.
 
@@ -87,7 +92,7 @@ def build(campaign_id='', agent_version='', date_from='', date_to=''):
     stop. A percentage of the top would make every late step look terrible and
     hide which one is actually leaking.
     """
-    c = counts(campaign_id, agent_version, date_from, date_to)
+    c = counts(campaign_id, agent_version, date_from, date_to, status)
     rows = []
     for key, label, denom_key in STEPS:
         n = c.get(key) or 0

@@ -121,6 +121,10 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 raise NotAtL2(
                     f"lead is at {cur_row['stage']}, not L2 - a send is only "
                     f"owed once a confirmed email has advanced it")
+            # The pipeline stage moves with the send, so the forecast reads
+            # a real status instead of deriving one.
+            from api import pipeline
+            pipeline.advance(cur, lead_id, 'emailed', f'email 1 sent by {emailed_by}')
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, stage, summary, detail)
                    VALUES (%s, 'email_sent', 'L2', 'emailed - waiting on them', %s)""",
@@ -142,7 +146,7 @@ def record_reply(lead_id, when=None):
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """UPDATE leads SET replied_at = %s, status = 'completed',
+                """UPDATE leads SET replied_at = %s, status = 'engaged',
                           updated_at = now()
                     WHERE lead_id = %s AND replied_at IS NULL
                     RETURNING lead_id""", (when, lead_id))

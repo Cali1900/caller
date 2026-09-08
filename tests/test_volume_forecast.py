@@ -70,15 +70,22 @@ def test_an_absurd_number_is_refused():
 
 def _lead(cid, *, volume_n=None, emailed=False, clicked=False, demo=False,
           phone='+14245557700'):
+    """
+    The forecast reads STATUS now, not emailed_at + clicks. Setting the status
+    directly is what a real lead would carry - pipeline.advance() puts it there
+    on a send or a click.
+    """
+    status = ('demo_booked' if demo else
+              'engaged' if clicked else
+              'emailed' if emailed else 'new')
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (company, phone_e164, timezone,
                                campaign_id, demands_per_month, emailed_at, status)
                            VALUES ('F',%s,'America/Los_Angeles',%s,%s,
-                                   CASE WHEN %s THEN now() END,
-                                   CASE WHEN %s THEN 'demo_pending' ELSE 'new' END)
+                                   CASE WHEN %s THEN now() END, %s)
                            RETURNING lead_id""",
-                        (phone, cid, volume_n, emailed or clicked or demo, demo))
+                        (phone, cid, volume_n, emailed or clicked or demo, status))
             lid = cur.fetchone()['lead_id']
             if clicked:
                 cur.execute('INSERT INTO email_clicks (lead_id) VALUES (%s)', (lid,))

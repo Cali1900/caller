@@ -1,8 +1,12 @@
-# A lead that clicked AND booked a demo is ONE lead at its strongest stage. If
-# the stage expression stops being ordered, the same lead is counted at two
-# weights and the forecast double-counts exactly the leads that matter most.
+# A lead is counted ONCE, at the strongest stage it reached. If the CASE stops
+# being ordered strongest-first, a lead that reached demo_booked also matches
+# the earlier arms and the forecast double-counts exactly the leads that matter
+# most - inflating the number Sean would act on.
+#
+# Re-anchored: the stage expression now reads STATUS rather than deriving from
+# clicks and timestamps.
 TARGET = 'api/forecast.py'
-EXPECT = 'test_a_lead_counts_once_at_its_strongest_stage'
-LABEL = 'let a lead count at more than one forecast stage'
-OLD = """    CASE WHEN l.status = 'demo_pending'                       THEN 'demo_booked'"""
-NEW = """    CASE WHEN false                                           THEN 'demo_booked'"""
+EXPECT = 'test_won_weighs_with_demo_booked_not_as_a_fifth_stage'
+LABEL = 'stop counting a lead at its strongest forecast stage'
+OLD = """    CASE WHEN l.status IN ('won', 'demo_booked', 'demo_pending') THEN 'demo_booked'"""
+NEW = """    CASE WHEN l.status IN ('demo_booked', 'demo_pending')        THEN 'demo_booked'"""

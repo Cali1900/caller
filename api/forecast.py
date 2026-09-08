@@ -23,15 +23,21 @@ TWO RULES THAT KEEP IT HONEST:
 
 from api import db
 
-# How far a lead has got, in the order that decides which weight applies.
-# demo_booked beats engaged beats emailed: a lead that clicked AND booked is
-# counted once, at the strongest stage it reached.
+# How far a lead has got, READ FROM THE STATUS the system sets and the operator
+# overrules - not derived from clicks and timestamps.
+#
+# Deriving worked only while the derivation stayed true to what Sean meant, and
+# it could never express a stage nobody can compute: a demo booked in a phone
+# call the app never saw, or `won`.
+#
+# demo_booked beats engaged beats emailed, so a lead counted at its strongest
+# stage is counted ONCE. `won` weighs with demo_booked rather than inventing a
+# fifth probability for a deal that has already closed - it is no longer a
+# forecast at that point.
 STAGE_SQL = """
-    CASE WHEN l.status = 'demo_pending'                       THEN 'demo_booked'
-         WHEN l.replied_at IS NOT NULL
-           OR EXISTS (SELECT 1 FROM email_clicks e
-                       WHERE e.lead_id = l.lead_id)           THEN 'engaged'
-         WHEN l.emailed_at IS NOT NULL                        THEN 'emailed'
+    CASE WHEN l.status IN ('won', 'demo_booked', 'demo_pending') THEN 'demo_booked'
+         WHEN l.status = 'engaged'                               THEN 'engaged'
+         WHEN l.status = 'emailed'                               THEN 'emailed'
          ELSE 'unweighted' END
 """
 

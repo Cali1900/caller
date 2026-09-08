@@ -21,6 +21,12 @@
     <option value="{{ v }}" {% if agent_version == v|string %}selected{% endif %}>v{{ v }}</option>
     {% endfor %}
   </select>
+  <select name="status">
+    <option value="">any status</option>
+    {% for st in statuses %}
+    <option value="{{ st }}" {% if st == status %}selected{% endif %}>{{ st }}</option>
+    {% endfor %}
+  </select>
   <span class="dim">first dialed</span>
   <input type="date" name="date_from" value="{{ date_from }}">
   <span class="dim">to</span>
