@@ -43,6 +43,9 @@ STAGES = ['L1', 'L2', 'L3', 'L4', 'won', 'lost']
 DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
         'Friday', 'Saturday']
 PAGE = 100
+# Selectable page sizes. Bounded on purpose: an unbounded "all" is a Select All
+# that queues leads nobody has looked at.
+PAGE_SIZES = (100, 200, 500)
 
 
 def _cfg():
@@ -147,14 +150,15 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state=''):
 @router.get('/', response_class=HTMLResponse)
 def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
                needs_you: str = '', email_state: str = '', page: int = 1,
-               msg: str = ''):
+               per: int = PAGE, msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
+    per = per if per in PAGE_SIZES else PAGE
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
         sql, params, where, cparams = _lead_query(
-            q, status, stage, needs_you, PAGE, (page - 1) * PAGE, email_state)
+            q, status, stage, needs_you, per, (page - 1) * per, email_state)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
@@ -177,15 +181,16 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
     qs = urllib.parse.urlencode(
         {k: v for k, v in
          (('q', q), ('status', status), ('stage', stage),
-          ('needs_you', needs_you), ('email_state', email_state))
+          ('needs_you', needs_you), ('email_state', email_state),
+          ('per', per if per != PAGE else ''))
          if v})
     return templates.TemplateResponse(request, 'leads.html', {
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
-        'email_state': email_state,
+        'email_state': email_state, 'per': per, 'page_sizes': PAGE_SIZES,
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
-        'pages': max(1, (total + PAGE - 1) // PAGE)})
+        'pages': max(1, (total + per - 1) // per)})
 
 
 @router.post('/leads/queue')
@@ -631,7 +636,10 @@ async def upload_form(file: UploadFile = File(...)):
     if r['rejects']:
         msg += ' (' + '; '.join(f"line {x['line']}: {x['reason']}"
                                 for x in r['rejects'][:3]) + ')'
-    return RedirectResponse(f'/campaign?msg={urllib.parse.quote(msg[:300])}',
+    # Back to /leads, not /campaign: uploading is about LEADS, and the whole
+    # point of moving the form was to stop bouncing between two screens to do
+    # one thing.
+    return RedirectResponse(f'/?msg={urllib.parse.quote(msg[:300])}',
                             status_code=303)
 
 

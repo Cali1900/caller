@@ -82,16 +82,29 @@
     <div class="card">
       <h2>Prompt version</h2>
       <div class="field">
-        <label for="v1">Prompt version</label>
-        <select id="v1" name="agent_l1_version" size="5" class="verlist">
+        <label>Prompt version</label>
+        <p class="dim" style="margin:.2em 0 .6em">Published versions only,
+          newest first, synced from Retell when you open this page. The one
+          marked LIVE is what dials. Pick another and save to switch &mdash;
+          nothing changes it for you.</p>
+        <div class="verscroll">
+        <table class="vertable">
           {% for r in prompt_rows['L1'] %}
-          <option value="{{ r.agent_version }}" {% if r.agent_version == c.agent_l1_version %}selected{% endif %}>
-            v{{ r.agent_version }} · {{ r.model }} · {{ r.prompt_chars }}ch{% if not r.is_published %} · DRAFT{% endif %}{% if r.change_note %} · {{ r.change_note|truncate(40) }}{% endif %}
-          </option>{% endfor %}
-        </select>
-        <p class="dim" style="margin:.4em 0 0">Published versions only, newest
-          first, synced from Retell when you open this page. Which one is live
-          is your choice &mdash; nothing changes it for you.</p>
+          <tr class="{% if r.agent_version == c.agent_l1_version %}islive{% endif %}">
+            <td class="verpick">
+              <input type="radio" id="v{{ r.agent_version }}"
+                     name="agent_l1_version" value="{{ r.agent_version }}"
+                     {% if r.agent_version == c.agent_l1_version %}checked{% endif %}></td>
+            <td><label for="v{{ r.agent_version }}">
+              <b>v{{ r.agent_version }}</b>
+              {% if r.agent_version == c.agent_l1_version %}<span class="livetag">LIVE</span>{% endif %}
+              {% if not r.is_published %}<span class="drafttag">DRAFT</span>{% endif %}
+              <span class="dim">{{ r.model }} · {{ r.prompt_chars }}ch{% if r.calls_run %} · {{ r.calls_run }} calls{% endif %}</span>
+              {% if r.change_note %}<br><span class="dim">{{ r.change_note|truncate(60) }}</span>{% endif %}
+            </label></td>
+          </tr>{% endfor %}
+        </table>
+        </div>
       </div>
       <p class="dim" style="margin-bottom:0">The version is a <b>property</b> of
          this campaign. Two campaigns can run the same one. Every call records

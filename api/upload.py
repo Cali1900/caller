@@ -135,12 +135,12 @@ def upload(text: str):
             for r in rows:
                 cur.execute(
                     """INSERT INTO leads (company, phone_e164, timezone, city,
-                                          state, segment, external_ref,
+                                          state, segment, external_ref, website,
                                           tz_source, tz_needs_review,
                                           pool_status, status)
                        VALUES (%(company)s, %(phone_e164)s, %(timezone)s, %(city)s,
                                %(state)s, COALESCE(%(segment)s,'default'),
-                               %(external_ref)s, %(tz_source)s,
+                               %(external_ref)s, %(website)s, %(tz_source)s,
                                %(tz_needs_review)s, 'pool', 'new')
                        ON CONFLICT (phone_e164) DO NOTHING""",
                     r)

@@ -27,8 +27,27 @@
     <a class="dim" href="/">reset</a>
     <span class="spacer" style="flex:1"></span>
     <a href="/export.csv?{{ qs }}">Export CSV</a>
+    <span class="dim">per page</span>
+    <select name="per" onchange="this.form.submit()">
+      {% for n in page_sizes %}
+      <option value="{{ n }}" {% if n == per %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+    </select>
   </div>
 </form>
+
+<div class="card">
+  <h2>Upload a CSV</h2>
+  <form method="post" action="/upload-form" enctype="multipart/form-data" class="toolbar">
+    <input type="file" name="file" accept=".csv,text/csv" required>
+    <button type="submit" class="ghost">Upload to the pool</button>
+    <span class="dim">Required: <code>company</code>, <code>phone</code>,
+      <code>timezone</code>. Optional: <code>city</code>, <code>state</code>,
+      <code>segment</code>, <code>external_ref</code>, <code>website</code>.
+      <b>Upload lands leads in the POOL, not the queue</b> &mdash; select them
+      below and add them to a campaign deliberately.</span>
+  </form>
+</div>
 
 <form method="post" action="/leads/queue">
 <div class="card toolbar">
@@ -40,6 +59,7 @@
     {% endfor %}
   </select>
   <button type="submit" name="action" value="add" class="gold">Add to campaign</button>
+    <span class="dim" id="selnote"></span>
   <button type="submit" name="action" value="remove" class="ghost">Remove from queue</button>
   <span class="dim">Adding assigns and queues them &mdash; it never dials.
     {% if running %}<b>{{ running.name }}</b> is running.{% else %}<b>No campaign is running.</b>{% endif %}</span>
@@ -48,7 +68,8 @@
 <div class="scroll-x">
 <table>
 <tr>
-  <th style="width:28px"><input type="checkbox" onclick="for(const b of document.querySelectorAll('input[name=lead_id]'))b.checked=this.checked"></th>
+  <th style="width:28px" title="Selects only the rows on THIS page">
+    <input type="checkbox" id="selall"></th>
   <th>Firm</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
   <th>Contact</th><th>Email</th><th>Follow-up</th><th class="right">Calls</th>
   <th class="right">Agent</th><th class="right">Outcome</th><th>Last said</th><th>Last call</th></tr>
@@ -82,15 +103,44 @@
 </tr>
 {% else %}
 <tr><td colspan="14" class="dim">No leads match.
-  {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV from the campaign screen.{% endif %}</td></tr>
+  {% if q or status or stage or needs_you %}<a href="/">Clear the filters</a>{% else %}Upload a CSV above to fill the pool.{% endif %}</td></tr>
 {% endfor %}
 </table>
 </div>
 </form>
 
 {% if pages > 1 %}
-<p class="dim">Page {{ page }} of {{ pages }}
+<p class="dim">Page {{ page }} of {{ pages }} &middot; {{ per }} per page
   {% if page > 1 %}&middot; <a href="/?{{ qs }}&page={{ page - 1 }}">prev</a>{% endif %}
   {% if page < pages %}&middot; <a href="/?{{ qs }}&page={{ page + 1 }}">next</a>{% endif %}</p>
 {% endif %}
+
+<script>
+// SELECT ALL SELECTS THIS PAGE ONLY.
+//
+// A "select all" that reaches past the visible rows is a checkbox that queues
+// leads nobody has looked at. The rows on screen are the rows you can see, so
+// those are the rows it touches - and the count says so out loud.
+(function () {
+  var master = document.getElementById('selall');
+  var note = document.getElementById('selnote');
+  if (!master) return;
+  function boxes() { return document.querySelectorAll('table input[name=lead_id]'); }
+  function recount() {
+    var n = 0;
+    boxes().forEach(function (b) { if (b.checked) n++; });
+    if (note) note.textContent = n ? n + ' selected on this page' : '';
+  }
+  master.addEventListener('change', function () {
+    boxes().forEach(function (b) { b.checked = master.checked; });
+    recount();
+  });
+  boxes().forEach(function (b) {
+    b.addEventListener('change', function () {
+      if (!b.checked) master.checked = false;
+      recount();
+    });
+  });
+})();
+</script>
 {% endblock %}

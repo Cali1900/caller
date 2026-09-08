@@ -139,6 +139,23 @@ form.inline{display:inline}
 .field select.verlist{height:auto;padding:0;overflow-y:auto;line-height:1.5}
 .field select.verlist option{padding:6px 8px;border-bottom:1px solid #f0eee9}
 .field select.verlist option:checked{background:#fdf3d6;color:#7a5a10;font-weight:600}
+/* Prompt versions as RADIO ROWS. A collapsed dropdown does not answer "which
+   one is live?" at a glance, which is the only question this control is for. */
+.verscroll{max-height:230px;overflow-y:auto;border:1px solid var(--line);
+  border-radius:6px;background:#fff}
+table.vertable{box-shadow:none;margin:0;width:100%}
+table.vertable td{padding:7px 10px;border-bottom:1px solid #f2efe9;
+  vertical-align:top;background:transparent}
+table.vertable tr:last-child td{border-bottom:none}
+table.vertable td.verpick{width:30px;padding-right:0}
+table.vertable label{display:block;cursor:pointer;font-weight:400}
+table.vertable tr.islive{background:#fdf8ea}
+table.vertable tr.islive td{border-left:3px solid var(--gold)}
+table.vertable tr.islive td.verpick{border-left-width:3px}
+.livetag{display:inline-block;background:var(--gold);color:#fff;border-radius:3px;
+  font:10px/1.6 Sora,sans-serif;letter-spacing:.06em;padding:0 6px;margin-left:6px}
+.drafttag{display:inline-block;background:#eee;color:#777;border-radius:3px;
+  font:10px/1.6 Sora,sans-serif;letter-spacing:.06em;padding:0 6px;margin-left:6px}
 .fields-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
 
 /* nothing inside a card may exceed it */
