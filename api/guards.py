@@ -41,6 +41,38 @@ def assert_dialable(phone_e164: str, cfg) -> None:
         raise DialRefused(f'{phone_e164} not in dev allowlist')
 
 
+class EmailRefused(RuntimeError):
+    """Raised when an email must not be sent. Never caught silently."""
+
+
+def assert_emailable(address: str, cfg) -> None:
+    """
+    THE EMAIL HALF OF THE DIAL GUARD. Same shape, same failure mode, same
+    reasoning: dialing a stranger and emailing one are the same mistake
+    through different wires.
+
+    Fails CLOSED. An error, a missing config, or an unrecognised mode all
+    result in no email being sent.
+
+    'unrestricted' is prod, and only prod. Anything that is not exactly
+    'unrestricted' or 'allowlist' - including an empty string, whitespace, or
+    a typo - refuses.
+
+    An EMPTY allowlist sends NOTHING. That is the point of it: a dev box with
+    no list configured must not be able to mail anyone at all.
+    """
+    mode = cfg.EMAIL_MODE
+
+    if mode == 'unrestricted':
+        return                       # prod, and only prod
+
+    if mode != 'allowlist':
+        raise EmailRefused(f'unknown EMAIL_MODE {mode!r} - refusing')
+
+    if (address or '').strip().lower() not in cfg.EMAIL_ALLOWLIST:
+        raise EmailRefused(f'{address} not in dev email allowlist')
+
+
 # ---------------------------------------------------------------------------
 # SUPPRESSION
 #

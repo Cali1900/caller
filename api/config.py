@@ -42,6 +42,11 @@ class Config:
     DIAL_MODE: str
     DIAL_ALLOWLIST: frozenset
 
+    # The email half of the same idea. Dialing a stranger and emailing one are
+    # the same mistake through different wires.
+    EMAIL_MODE: str
+    EMAIL_ALLOWLIST: frozenset
+
     RETELL_API_KEY: str
     RETELL_FROM_NUMBER: str
     AGENT_L1: str
@@ -73,10 +78,26 @@ def parse_allowlist(raw: str | None) -> frozenset:
     return frozenset(p.strip() for p in raw.split(',') if p.strip())
 
 
+def parse_email_allowlist(raw: str | None) -> frozenset:
+    """
+    Comma-separated addresses. EMPTY MEANS EMPTY, which sends nothing.
+
+    Lower-cased on the way in: an allowlist that misses because someone typed
+    Bob@Firm.com is an allowlist that failed open in the only direction that
+    matters.
+    """
+    if not raw:
+        return frozenset()
+    return frozenset(p.strip().lower() for p in raw.split(',') if p.strip())
+
+
 def load_config() -> Config:
     mode = os.getenv('DIAL_MODE')
     # Absent -> allowlist (fail closed). Empty string is NOT absent.
     mode = 'allowlist' if mode is None else mode
+
+    email_mode = os.getenv('EMAIL_MODE')
+    email_mode = 'allowlist' if email_mode is None else email_mode
 
     return Config(
         DB_HOST=_required('CALLER_DB_HOST'),
@@ -86,6 +107,8 @@ def load_config() -> Config:
         DB_PASSWORD=_required('CALLER_DB_PASSWORD'),
         DIAL_MODE=mode,
         DIAL_ALLOWLIST=parse_allowlist(os.getenv('DIAL_ALLOWLIST')),
+        EMAIL_MODE=email_mode,
+        EMAIL_ALLOWLIST=parse_email_allowlist(os.getenv('EMAIL_ALLOWLIST')),
         RETELL_API_KEY=_required('RETELL_API_KEY'),
         RETELL_FROM_NUMBER=_required('RETELL_FROM_NUMBER'),
         AGENT_L1=_required('AGENT_L1'),

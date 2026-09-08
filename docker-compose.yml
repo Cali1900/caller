@@ -75,6 +75,10 @@ services:
       DIGEST_FROM_NAME: ${DIGEST_FROM_NAME:?DIGEST_FROM_NAME not set}
       SENDER_DOMAIN: ${SENDER_DOMAIN:?SENDER_DOMAIN not set}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL-}
+      # The email half of the dial guard. Absent -> allowlist, empty list
+      # sends nothing. Prod flips it deliberately, once.
+      EMAIL_MODE: ${EMAIL_MODE-}
+      EMAIL_ALLOWLIST: ${EMAIL_ALLOWLIST-}
       SPACES_KEY: ${SPACES_KEY:?SPACES_KEY not set}
       SPACES_SECRET: ${SPACES_SECRET:?SPACES_SECRET not set}
       SPACES_ENDPOINT: ${SPACES_ENDPOINT:?SPACES_ENDPOINT not set}
@@ -125,6 +129,10 @@ services:
       DIGEST_FROM_NAME: ${DIGEST_FROM_NAME:?DIGEST_FROM_NAME not set}
       SENDER_DOMAIN: ${SENDER_DOMAIN:?SENDER_DOMAIN not set}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL-}
+      # The email half of the dial guard. Absent -> allowlist, empty list
+      # sends nothing. Prod flips it deliberately, once.
+      EMAIL_MODE: ${EMAIL_MODE-}
+      EMAIL_ALLOWLIST: ${EMAIL_ALLOWLIST-}
       SPACES_KEY: ${SPACES_KEY:?SPACES_KEY not set}
       SPACES_SECRET: ${SPACES_SECRET:?SPACES_SECRET not set}
       SPACES_ENDPOINT: ${SPACES_ENDPOINT:?SPACES_ENDPOINT not set}

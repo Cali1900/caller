@@ -13,15 +13,20 @@ BREVO_URL = 'https://api.brevo.com/v3/smtp/email'
 
 
 def send(cfg, to: str, subject: str, text: str, timeout: int = 20,
-         attachments=None) -> dict:
+         attachments=None, sender_email: str = None,
+         sender_name: str = None) -> dict:
     """
     Returns {'ok': bool, 'detail': str}. Never raises.
 
     attachments: [(filename, bytes)] - base64'd inline. Used by the weekly
     suppression backup, which must leave this droplet.
     """
+    # The digest sends as itself; a campaign email sends as THE CAMPAIGN's
+    # verified sender. Defaulting to the digest identity would quietly send
+    # firm mail from the wrong address.
     payload = {
-        'sender': {'email': cfg.DIGEST_FROM, 'name': cfg.DIGEST_FROM_NAME},
+        'sender': {'email': sender_email or cfg.DIGEST_FROM,
+                   'name': sender_name or cfg.DIGEST_FROM_NAME},
         'to': [{'email': to}],
         'subject': subject,
         'textContent': text,
