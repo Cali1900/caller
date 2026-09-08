@@ -76,6 +76,11 @@ def _safe(label, fn, *args):
         return None
 
 
+# The spacing used when the running campaign cannot be read. Deliberately the
+# wide default, not a tight one: unknown must never dial faster than configured.
+FALLBACK_GAP = (210, 300)
+
+
 def next_gap():
     """
     Seconds to wait before the next dial, re-rolled EVERY tick.
@@ -91,9 +96,19 @@ def next_gap():
     """
     import random
     from api import campaigns as _c
-    camp = _c.running()
-    lo = camp['dial_interval_min'] if camp else 210
-    hi = camp['dial_interval_max'] if camp else 300
+    try:
+        camp = _c.running()
+    except Exception as exc:
+        # FAILS SLOW, NEVER FAST. If the database cannot be read we do not know
+        # the configured spacing, and the safe unknown is the wide default -
+        # an outage must never be able to tighten the gap between calls. The
+        # settings module used to own this property; it was deleted, so it
+        # lives here now.
+        print(f'[worker] cannot read the campaign ({exc}) - '
+              f'falling back to {FALLBACK_GAP[0]}-{FALLBACK_GAP[1]}s', flush=True)
+        camp = None
+    lo = camp['dial_interval_min'] if camp else FALLBACK_GAP[0]
+    hi = camp['dial_interval_max'] if camp else FALLBACK_GAP[1]
     if lo > hi:
         lo, hi = hi, lo
     return random.uniform(lo, hi)
@@ -128,7 +143,6 @@ def main():
               'started from /campaigns.', flush=True)
 
     import random
-    from api import settings as settings_mod
 
     _next_gap = next_gap
 

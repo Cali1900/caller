@@ -151,9 +151,16 @@ if ! flock -n 9; then
   echo "It mutates api/ and shares the test database; two at once corrupts both."
   exit 1
 fi
-if pgrep -f 'scripts/test\.sh' | grep -qv $$; then
-  echo "A test run is already in flight - refusing, it would deadlock the test DB."
-  echo "  $(pgrep -af 'scripts/test\.sh' | head -3)"
+# Look for the test CONTAINER, not a process name. `pgrep -f scripts/test.sh`
+# matched the invoking shell, whose command line merely CONTAINED that string,
+# so the guard refused to let the break pass start at all. A safety check that
+# fires on itself is worse than none: it trains you to bypass it.
+in_flight=$(docker ps --format '{{.Names}}' \
+            | grep -c '^caller-caller-api-run' || true)
+if [[ "$in_flight" != "0" ]]; then
+  echo "A test run is already in flight ($in_flight container(s)) - refusing,"
+  echo "it would deadlock the test database."
+  docker ps --format '  {{.Names}}\t{{.Status}}' | grep '^  caller-caller-api-run'
   exit 1
 fi
 

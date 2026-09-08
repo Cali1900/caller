@@ -111,14 +111,52 @@ def test_no_test_configures_a_settings_key_production_ignores():
           'allowlist unless the test is exercising the settings module itself.')
 
 
+def test_the_settings_module_stays_deleted():
+    """
+    api/settings.py was deleted on 2026-09-08. Every key it held moved onto the
+    campaign; what remained was ten inert rows that still LOOKED authoritative.
+
+    That is not cosmetic. scripts/deploy.sh paused before every restart by
+    writing settings['dialing_enabled'], which nothing had read for days - so
+    its pause was a no-op, and a deploy during calling hours would have rebuilt
+    straight through a live call while reporting that it had paused.
+
+    If a global settings store is ever genuinely needed again, that is a design
+    decision that should break this test and be argued for - not something that
+    reappears because one value had nowhere obvious to live.
+    """
+    assert not os.path.exists(os.path.join(ROOT, 'api', 'settings.py')), (
+        'api/settings.py is back. Operator config belongs to the campaign that '
+        'uses it; a global store is how config and reader drift apart.')
+
+    importers = []
+    for path in _py('api/**/*.py') + _py('scripts/*.sh'):
+        src = open(path).read()
+        if re.search(r'\bfrom api import [^\n]*\bsettings\b|\bapi\.settings\b', src):
+            importers.append(os.path.relpath(path, ROOT))
+    assert not importers, f'these import a settings module again: {importers}'
+
+
 # ---------------------------------------------------------------------------
 # tables
 # ---------------------------------------------------------------------------
 
+# Require the SHAPE of the statement, not just the keyword. Matching a bare
+# `UPDATE <word>` found "a stray UPDATE cannot get round it" in a docstring and
+# reported a table called `cannot` - a checker that cries wolf gets muted, and
+# a muted checker is the thing it was written to prevent.
 WRITE_TABLE = re.compile(
-    r'\b(?:INSERT\s+INTO|UPDATE|TRUNCATE|DELETE\s+FROM)\s+([a-z_]{3,40})', re.I)
+    r'\b(?:INSERT\s+INTO\s+([a-z_]{3,40})\s*[(]'
+    r'|UPDATE\s+([a-z_]{3,40})\s+SET\b'
+    r'|TRUNCATE\s+(?:TABLE\s+)?([a-z_]{3,40})\b'
+    r'|DELETE\s+FROM\s+([a-z_]{3,40})\b)', re.I)
 ANY_TABLE = re.compile(
-    r'\b(?:FROM|JOIN|INSERT\s+INTO|UPDATE|TRUNCATE|DELETE\s+FROM)\s+([a-z_]{3,40})', re.I)
+    r'\b(?:FROM\s+([a-z_]{3,40})\b'
+    r'|JOIN\s+([a-z_]{3,40})\b'
+    r'|INSERT\s+INTO\s+([a-z_]{3,40})\b'
+    r'|UPDATE\s+([a-z_]{3,40})\s+SET\b'
+    r'|TRUNCATE\s+(?:TABLE\s+)?([a-z_]{3,40})\b'
+    r'|DELETE\s+FROM\s+([a-z_]{3,40})\b)', re.I)
 
 SQL_NOISE = {'select', 'values', 'set', 'only', 'where', 'the', 'and', 'not'}
 
@@ -127,8 +165,8 @@ def _tables(paths, pattern):
     out = {}
     for path in paths:
         for m in pattern.finditer(open(path).read()):
-            t = m.group(1).lower()
-            if t in SQL_NOISE:
+            t = next((g for g in m.groups() if g), '').lower()
+            if not t or t in SQL_NOISE:
                 continue
             out.setdefault(t, set()).add(os.path.basename(path))
     return out

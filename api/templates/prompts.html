@@ -5,8 +5,12 @@
    campaign points at. Two campaigns can use the same version. Set which one a
    campaign uses on its own page; this list is for notes and history.</p>
 {% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
-<p><form class="inline" method="post" action="/prompts/sync">
-   <button type="submit" class="ghost">Re-sync from Retell</button></form></p>
+<p class="dim">Synced from Retell automatically when you open this page.
+  {% if sync_err %}<br><span class="warn">&#9888; could not reach Retell
+    ({{ sync_err }}) &mdash; the list below may be missing recent versions.</span>
+  {% endif %}
+  <form class="inline" method="post" action="/prompts/sync" style="margin-left:8px">
+    <button type="submit" class="ghost">Force a full re-sync</button></form></p>
 
 {% for stage, rows in prompt_rows.items() %}
   {% if rows %}

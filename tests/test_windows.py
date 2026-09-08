@@ -102,8 +102,7 @@ def running_campaign(db, cfg_env, monkeypatch):
     The windows are deliberately NOT neutralised here - in this file the
     window IS the thing under test.
     """
-    from api import campaigns as c, settings as settings_mod
-    settings_mod._cache.update(at=0.0, values=None)
+    from api import campaigns as c
     cid = running_campaign_id()          # the cap and the pause live HERE now
     c.update(cid, daily_cap=1000)
 
@@ -115,7 +114,6 @@ def running_campaign(db, cfg_env, monkeypatch):
                         "WHERE lead_id = ANY(%s::uuid[])",
                         (cid, [str(i) for i in ids],))
         db.commit()
-        settings_mod._cache.update(at=0.0, values=None)
     _queue.campaign_id = cid
     return _queue
 

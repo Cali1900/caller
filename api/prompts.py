@@ -61,11 +61,20 @@ def active(cfg, stage: str = 'L1'):
             return cur.fetchone()
 
 
-def sync_versions(cfg, stage: str = 'L1'):
+_sync_cache = {}          # agent_id -> {'at': float, 'error': str|None}
+SYNC_MAX_AGE = 120.0      # seconds
+
+
+def sync_versions(cfg, stage: str = 'L1', force: bool = False):
     """
-    Pull EVERY Retell agent version into prompt_versions so the picker can
-    show version, date, model, char count and note without hitting the API on
-    every page load.
+    Pull Retell's agent versions into prompt_versions.
+
+    INCREMENTAL. `get_versions()` is ONE call and carries each version's
+    last-modification timestamp, so a version we already hold with the same
+    timestamp is skipped without fetching its prompt. A full detail fetch is
+    two API calls per version - seventeen versions meant thirty-four calls,
+    which is why this only ever ran from a button and the list sat eight
+    versions behind what Retell actually had.
 
     Notes are preserved: a version already recorded keeps its change_note,
     because that is the operator's text, not Retell's.
@@ -75,11 +84,25 @@ def sync_versions(cfg, stage: str = 'L1'):
     c = Retell(api_key=cfg.RETELL_API_KEY)
     agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
 
-    seen = 0
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT agent_version, retell_updated_at
+                             FROM prompt_versions
+                            WHERE agent_id = %s AND agent_version IS NOT NULL""",
+                        (agent_id,))
+            known = {r['agent_version']: r['retell_updated_at'] for r in cur.fetchall()}
+
+    seen = fetched = 0
     for v in c.agent.get_versions(agent_id):
         ver = getattr(v, 'version', None)
         if ver is None:
             continue
+        seen += 1
+        ms = getattr(v, 'last_modification_timestamp', None)
+        when = (datetime.datetime.fromtimestamp(ms / 1000, datetime.UTC)
+                if ms else None)
+        if not force and ver in known and known[ver] == when:
+            continue                      # unchanged - do not pay for details
         try:
             a = c.agent.retrieve(agent_id, version=ver)
             eng = a.response_engine
@@ -89,9 +112,7 @@ def sync_versions(cfg, stage: str = 'L1'):
             model = getattr(llm, 'model', None)
         except Exception:
             prompt, model = '', None
-        ms = getattr(v, 'last_modification_timestamp', None)
-        when = (datetime.datetime.fromtimestamp(ms / 1000, datetime.UTC)
-                if ms else None)
+        fetched += 1
         with db.get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -109,18 +130,29 @@ def sync_versions(cfg, stage: str = 'L1'):
                                        is_published=EXCLUDED.is_published""",
                     (stage, agent_id, ver, prompt, model, len(prompt), when,
                      bool(getattr(v, 'is_published', False))))
-        seen += 1
-    return {'stage': stage, 'versions': seen}
+    return {'stage': stage, 'versions': seen, 'fetched': fetched}
 
 
-def set_note(agent_id, agent_version: int, note: str):
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE prompt_versions SET change_note = %s
-                    WHERE agent_id = %s AND agent_version = %s
-                    RETURNING version""", (note, agent_id, agent_version))
-            return cur.fetchone() is not None
+def sync_if_stale(cfg, stage: str = 'L1', max_age: float = SYNC_MAX_AGE):
+    """
+    Refresh the list on page load. Returns an error string, or None.
+
+    NEVER RAISES. A prompts page that will not load because Retell is slow is
+    worse than one showing a slightly stale list with a note saying so - and
+    the whole point is that you should not have to click a button to see a
+    version you published an hour ago.
+    """
+    import time
+    agent_id = cfg.AGENT_L1 if stage == 'L1' else cfg.AGENT_L3
+    ent = _sync_cache.setdefault(agent_id, {'at': 0.0, 'error': None})
+    if time.time() - ent['at'] < max_age:
+        return ent['error']
+    try:
+        sync_versions(cfg, stage)
+        ent.update(at=time.time(), error=None)
+    except Exception as exc:
+        ent.update(at=time.time(), error=f'{type(exc).__name__}: {exc}'[:140])
+    return ent['error']
 
 
 def listing(cfg, stage: str = 'L1'):

@@ -10,15 +10,13 @@ something a campaign points at, so two campaigns can run different prompts -
 but the property under test is unchanged.
 """
 import pytest
-from api import campaigns as campaigns_mod, retell, settings as settings_mod
+from api import campaigns as campaigns_mod, retell
 from conftest import running_campaign_id
 
 
 @pytest.fixture(autouse=True)
 def fresh(db):
-    settings_mod._cache.update(at=0.0, values=None)
     yield
-    settings_mod._cache.update(at=0.0, values=None)
 
 
 def test_the_live_version_comes_from_the_campaign_not_env(db, cfg_env):
@@ -50,7 +48,6 @@ def test_it_falls_back_to_a_known_version_if_the_db_cannot_be_read(db, cfg_env, 
     def boom():
         raise RuntimeError('db down')
     monkeypatch.setattr('api.db.get_conn', boom)
-    settings_mod._cache.update(at=0.0, values=None)
     agent_id, version = retell.agent_for(cfg_env, 'L1')
     assert agent_id == cfg_env.AGENT_L1
     assert isinstance(version, int)
@@ -78,5 +75,15 @@ def test_the_dialed_version_is_stamped_into_call_metadata(db, cfg_env, monkeypat
 
 
 def test_an_out_of_range_version_is_refused(db):
-    assert settings_mod.set_many({'agent_l1_version': -1})['ok'] is False
-    assert settings_mod.set_many({'agent_l1_version': 'abc'})['ok'] is False
+    """
+    Enforced by a DB CHECK now that settings.py is deleted - stronger than the
+    Python validation it replaces, because a script or a stray UPDATE cannot
+    get round it either.
+    """
+    import psycopg2
+    cid = running_campaign_id()
+    before = campaigns_mod.get(cid)['agent_l1_version']
+    for bad in (-1, 10000):
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            campaigns_mod.update(cid, agent_l1_version=bad)
+    assert campaigns_mod.get(cid)['agent_l1_version'] == before

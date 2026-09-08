@@ -8,7 +8,7 @@ removing the start button removed what stopped "add 500 leads" becoming
 
 import pytest
 
-from api import campaigns, dialer, settings as settings_mod, upload
+from api import campaigns, dialer, upload
 
 LA = 'America/Los_Angeles'
 
@@ -89,7 +89,6 @@ def test_queueing_five_hundred_leads_places_zero_calls(db, no_real_calls):
     with db.cursor() as cur:
         cur.execute("UPDATE leads SET pool_status='active'")   # add ALL to the queue
     db.commit()
-    settings_mod._cache.update(at=0.0, values=None)
 
     assert dialer.run_once(_cfg(), limit=50) == 0
     assert no_real_calls == []

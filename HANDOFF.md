@@ -13,9 +13,9 @@ Last updated 2026-09-08.
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260908_014_sender_from_the_verified_list.sql` |
-| Tests | 261 passed, 1 skipped |
-| Break pass | 32 definitions. Last **full** clean run: `BREAK PASS: OK`, 29/29. Breaks 30–32 verified individually since |
+| Last migration | `20260908_015_drop_settings.sql` |
+| Tests | 270 passed, 1 skipped |
+| Break pass | 34 definitions. Last full run: **`BREAK PASS: OK`, 34/34** red on their own named test |
 | Campaigns | `C1` and `C2`, both **stopped**. Nothing dials while nothing runs |
 | Data | 2 leads (2 queued), 7 calls, 6 scores, 1 draft, 3 suppressed |
 
@@ -24,10 +24,7 @@ stopped. Starting one is a deliberate act on `/campaigns`.
 
 ### ⚠️ Open before this is "done"
 
-1. **A full break pass has not run since breaks 30–32 were added.** Each was
-   verified individually (red on its own named test), but the last full
-   29/29 run predates them. Run `./scripts/break_pass.sh` once over all 32.
-2. Items 5, 6 and 7 below are specified and not built.
+1. Items 5 and 7 below are specified and not built.
 
 ---
 
@@ -161,18 +158,48 @@ transaction, with no fallback to `running()`.
 
 ---
 
-## ⚠️ settings.py is dead weight
+## settings.py is DELETED — and why that mattered
 
-Nothing in `api/` or the templates reads a single key from `settings.SPEC` any
-more — all ten moved onto the campaign. `dialing_enabled` has been removed
-because it actively misled `scripts/deploy.sh`, whose "pause before restart"
-was writing a key nothing read: **a deploy during calling hours would have
-rebuilt straight through a live call while reporting it had paused.** Now fixed
-to stop the running campaign.
+`api/settings.py` and the `settings` table are gone (migration 015). Every key
+had moved onto the campaign; what remained was ten inert rows that still LOOKED
+authoritative.
 
-The remaining nine keys are inert. Recommend deleting the module and its
-`set_many` validation tests — but that is a decision, not a cleanup, so it is
-flagged rather than done.
+That was not cosmetic. `scripts/deploy.sh` paused before every restart by
+writing `settings['dialing_enabled']`, which nothing had read for days — so its
+pause was a **no-op**, and a deploy during calling hours would have rebuilt
+straight through a live call while reporting that it had paused.
+
+Three properties that lived in that module were ported, not dropped:
+
+* **range refusal** → DB `CHECK` constraints on `campaign_configs`, which is
+  stronger: a script or a stray `UPDATE` cannot get round them either
+* **agent version range** → the same, newly added (it had no constraint)
+* **"an outage must not speed up dialing"** → `worker.next_gap()` caught
+  nothing and would have *raised* on a DB outage; it now falls back to the wide
+  210–300 default. Unknown must never dial faster than configured.
+
+`tests/test_no_dead_config.py` asserts the module stays deleted. A global
+settings store returning is a design decision that should break that test and
+be argued for — not something that reappears because one value had nowhere
+obvious to live.
+
+Archived: `/root/caller-archive/settings.py.deleted-20260908`,
+`/root/caller-archive/settings_table_20260908.sql`.
+
+## Three defects found in the SAFETY TOOLING itself
+
+All three shared one shape: **the tool reported success without doing the
+thing.** Worth knowing about, because that shape is not caught by tests passing.
+
+1. `deploy.sh` "paused" by writing a key nothing read (above).
+2. The break pass leaked live breaks into `api/` when killed — once with the
+   allowlist check deleted. Fixed with a fixed-path state dir, a journal, signal
+   traps, and `--check`/`--recover`.
+3. The break pass's own concurrency guard used `pgrep -f 'scripts/test\.sh'`,
+   which matched the *invoking shell's* command line and refused to let the pass
+   start at all. It now looks for the `caller-caller-api-run` container — the
+   thing that would actually deadlock the database. **A safety check that fires
+   on itself is worse than none: it trains you to bypass it.**
 
 ## Next, in order
 
@@ -184,14 +211,6 @@ leads to. Campaign config shows ONE prompt version, not L1 and L3. Leads that
 capture name + email stop and wait. **Keep the L3 agent in Retell**, just
 unwire it. `stages.mark_emailed()` should stop scheduling an L3 dial, and
 `STAGE_DIALABLE` should drop `'L3'`.
-
-**6 — Prompt picker auto-sync.** It shows v9 while Retell is at v15.
-`listing()` already orders newest-first — the list is not wrong, it is never
-refreshed, because `sync_versions()` only runs from a manual button. Sync
-periodically (worker) and on page load when stale, degrading to the stale list
-with a notice if Retell is slow. **Choosing which version is live stays
-manual** — that is the property that stopped v8 going live as a side effect of
-a dashboard edit.
 
 **7 — Click tracking.** Sean sends by hand; the app tracks what happens after.
 Draft's sample link is rewritten to `https://caller-dev.counselorai.io/c/{token}`;

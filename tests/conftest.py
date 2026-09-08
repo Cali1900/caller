@@ -125,10 +125,10 @@ def db(test_db, monkeypatch):
                      calls, leads, suppression, campaign_configs
             RESTART IDENTITY CASCADE
         """)
-        # Windows are per-campaign now and campaign_windows cascades off
+        # Windows are per-campaign and campaign_windows cascades off
         # campaign_configs above, so a test's window edits die with its
-        # campaign. Settings are still global config that tests mutate.
-        cur.execute('TRUNCATE settings')
+        # campaign. There is no global settings table any more - every piece
+        # of operator config belongs to a campaign.
     conn.commit()
     yield conn
     conn.rollback()

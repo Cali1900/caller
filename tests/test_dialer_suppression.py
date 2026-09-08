@@ -38,15 +38,12 @@ def _queue_the_lead(db, request):
     """
     if 'lead' not in request.fixturenames:
         return
-    from api import settings as settings_mod
-    settings_mod._cache.update(at=0.0, values=None)
     # `lead` attaches the lead to a RUNNING campaign; that is the switch now.
     lead = request.getfixturevalue('lead')
     with db.cursor() as cur:
         cur.execute("UPDATE leads SET pool_status='active' WHERE lead_id=%s",
                     (lead['lead_id'],))
     db.commit()
-    settings_mod._cache.update(at=0.0, values=None)
 
 
 @pytest.fixture

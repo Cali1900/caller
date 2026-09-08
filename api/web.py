@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 
 from api import (campaigns, db, digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
-                 prompts as prompts_mod, settings as settings_mod, stages,
+                 prompts as prompts_mod, stages,
                  upload as upload_mod)
 from api.config import load_config
 
@@ -441,6 +441,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
     avg = (camp['dial_interval_min'] + camp['dial_interval_max']) / 2.0
     per_hour = round(3600.0 / avg * camp['max_concurrent'], 1) if avg else 0
     remaining = max(0, camp['daily_cap'] - (q['new_today'] or 0))
+    prompts_mod.sync_if_stale(cfg, 'L1')
     pv_lead, pv_real = drafts_mod.preview_lead(campaign_id)
     _sender_opts = senders_mod.options(cfg, camp['sender_email'])
     return templates.TemplateResponse(request, 'campaign.html', {
@@ -462,10 +463,14 @@ def prompts_page(request: Request, msg: str = ''):
     """Prompt versions with their notes. A version is not a campaign - it is
     something a campaign points at, so this is a reference list, not a picker."""
     cfg = _cfg()
+    # Pulled on load, not on a button. You should not have to click sync to see
+    # a version you published an hour ago; that is how the list came to sit
+    # eight versions behind Retell.
+    sync_err = prompts_mod.sync_if_stale(cfg, 'L1')
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
     return templates.TemplateResponse(request, 'prompts.html', {
-        'hdr': hdr, 'msg': msg,
+        'hdr': hdr, 'msg': msg, 'sync_err': sync_err,
         'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1'),
                         'L3': prompts_mod.listing(cfg, 'L3')},
         'campaigns': campaigns.list_all()})
@@ -485,9 +490,12 @@ def prompts_note(stage: str = Form('L1'), agent_version: int = Form(...),
 @router.post('/prompts/sync')
 def prompts_sync():
     cfg = _cfg()
-    a = prompts_mod.sync_versions(cfg, 'L1')
-    b = prompts_mod.sync_versions(cfg, 'L3')
-    msg = f"synced {a['versions']} L1 and {b['versions']} L3 versions from Retell"
+    # The button now forces a FULL re-fetch; the incremental sync already ran
+    # on page load. This is for "Retell changed something under a version".
+    a = prompts_mod.sync_versions(cfg, 'L1', force=True)
+    b = prompts_mod.sync_versions(cfg, 'L3', force=True)
+    msg = (f"re-fetched {a['fetched']} of {a['versions']} L1 and "
+           f"{b['fetched']} of {b['versions']} L3 versions from Retell")
     return RedirectResponse(f'/prompts?msg={urllib.parse.quote(msg)}', status_code=303)
 
 

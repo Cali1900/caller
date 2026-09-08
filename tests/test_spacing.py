@@ -9,7 +9,7 @@ signals in a row must not fire three calls.
 
 import pytest
 
-from api import campaigns, dialer, settings as settings_mod
+from api import campaigns, dialer
 
 from conftest import running_campaign_id
 
@@ -18,9 +18,7 @@ LA = 'America/Los_Angeles'
 
 @pytest.fixture(autouse=True)
 def fresh_settings(db):
-    settings_mod._cache.update(at=0.0, values=None)
     yield
-    settings_mod._cache.update(at=0.0, values=None)
 
 
 def _leads(db, n, prefix='+1555660'):
@@ -41,8 +39,7 @@ def running(db, cfg_env, monkeypatch):
     """Standing queue: put leads in it and switch dialing on."""
     monkeypatch.setattr('api.windows.LEGAL_WINDOW', '')
     monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
-    from api import campaigns as c, settings as settings_mod
-    settings_mod._cache.update(at=0.0, values=None)
+    from api import campaigns as c
     cid = running_campaign_id()          # the cap and the pause live HERE now
     c.update(cid, daily_cap=1000)
 
@@ -54,7 +51,6 @@ def running(db, cfg_env, monkeypatch):
                         "WHERE lead_id = ANY(%s::uuid[])",
                         (cid, [str(i) for i in ids],))
         db.commit()
-        settings_mod._cache.update(at=0.0, values=None)
     _queue.campaign_id = cid
     return _queue
 
@@ -191,36 +187,60 @@ def test_three_busies_do_not_produce_three_immediate_dials(db, running, no_real_
 
 
 # --------------------------------------------------------------------------
-# settings are operator-editable and validated
+# spacing is operator-editable and VALIDATED
+#
+# These used to exercise api/settings.py. That module is deleted - every piece
+# of operator config belongs to a campaign now - so the same properties are
+# asserted where they actually live. The range checks are enforced by DB CHECK
+# constraints on campaign_configs, which is stronger than the Python
+# validation was: nothing can write an out-of-range value, not even a script.
 # --------------------------------------------------------------------------
 
-def test_a_db_value_overrides_the_default(db):
-    assert settings_mod.set_many({'dial_interval_min': 240})['ok']
-    assert settings_mod.get('dial_interval_min') == 240
+def test_a_saved_value_is_what_the_dialer_reads(db):
+    from api import campaigns as c, worker
+    cid = running_campaign_id()
+    c.update(cid, dial_interval_min=240, dial_interval_max=240)
+    assert worker.next_gap() == 240
 
 
 def test_min_greater_than_max_is_refused(db):
-    settings_mod.set_many({'dial_interval_min': 210, 'dial_interval_max': 300})
-    r = settings_mod.set_many({'dial_interval_min': 600})
-    assert r['ok'] is False
-    assert 'dial_interval_min' in r['errors']
-    assert settings_mod.get('dial_interval_min') == 210, 'a refused write must change nothing'
+    """A refused write must change nothing."""
+    import psycopg2
+    from api import campaigns as c
+    cid = running_campaign_id()
+    c.update(cid, dial_interval_min=210, dial_interval_max=300)
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        c.update(cid, dial_interval_min=600)
+    assert c.get(cid)['dial_interval_min'] == 210
 
 
-@pytest.mark.parametrize('key,bad', [('max_concurrent', 0), ('max_concurrent', 99),
-                                     ('dial_interval_min', 1), ('dial_interval_max', 99999)])
-def test_out_of_range_is_refused_not_clamped(db, key, bad):
+@pytest.mark.parametrize('field,bad', [('max_concurrent', 0), ('max_concurrent', 99),
+                                       ('dial_interval_min', 1),
+                                       ('dial_interval_max', 99999),
+                                       ('daily_cap', 0), ('daily_cap', 99999)])
+def test_out_of_range_is_refused_not_clamped(db, field, bad):
     """A typo that halves the spacing should be visible, not silently fixed."""
-    r = settings_mod.set_many({key: bad})
-    assert r['ok'] is False
+    import psycopg2
+    from api import campaigns as c
+    cid = running_campaign_id()
+    before = c.get(cid)[field]
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        c.update(cid, **{field: bad})
+    assert c.get(cid)[field] == before
 
 
-def test_a_settings_outage_falls_back_slower_not_faster(db, monkeypatch):
-    """If the table cannot be read, dialing must not speed up."""
+def test_an_outage_falls_back_SLOWER_not_faster(db, monkeypatch):
+    """
+    If the campaign cannot be read, dialing must not speed up.
+
+    An outage that tightened the gap would dial a hundred firms in the time
+    meant for twenty, and it would do it exactly when nobody is watching the
+    database. The unknown case takes the WIDE default.
+    """
+    from api import worker
     def boom():
         raise RuntimeError('db down')
-    monkeypatch.setattr('api.db.get_conn', boom)
-    settings_mod._cache.update(at=0.0, values=None)
-    s = settings_mod.all_settings(force=True)
-    assert s['max_concurrent'] == 1
-    assert s['dial_interval_min'] >= 210
+    monkeypatch.setattr('api.campaigns.running', boom)
+    gaps = [worker.next_gap() for _ in range(50)]
+    assert min(gaps) >= worker.FALLBACK_GAP[0] >= 210
+    assert max(gaps) <= worker.FALLBACK_GAP[1]

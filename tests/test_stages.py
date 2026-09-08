@@ -44,8 +44,7 @@ def enrolled(db, cfg_env, monkeypatch):
     """Standing queue: put leads in it and switch dialing on."""
     monkeypatch.setattr('api.windows.LEGAL_WINDOW', '')
     monkeypatch.setattr('api.windows.PREFERENCE_WINDOW', '')
-    from api import campaigns as c, settings as settings_mod
-    settings_mod._cache.update(at=0.0, values=None)
+    from api import campaigns as c
     # The pause and the cap live on the campaign; settings has not been
     # consulted for either since the named-campaign change.
     c.update(running_campaign_id(), daily_cap=1000)
@@ -57,7 +56,6 @@ def enrolled(db, cfg_env, monkeypatch):
             cur.execute("UPDATE leads SET pool_status='active' "
                         "WHERE lead_id = ANY(%s::uuid[])", ([str(i) for i in ids],))
         db.commit()
-        settings_mod._cache.update(at=0.0, values=None)
     return _queue
 
 
