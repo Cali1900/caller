@@ -6,9 +6,19 @@ the sender identity, the cap, the spacing, the calling windows and its notes.
 Two campaigns can both run v9 - the version is a property of a campaign, never
 the thing that identifies it.
 
-ONE RUNS AT A TIME, and that is enforced by a unique partial index in the
-database (one_running_campaign), not by this module being careful. A second
-concurrent start is rejected by Postgres.
+A campaign has a TYPE: 'call' or 'drip'. A call campaign dials - it owns the
+prompt version, the cap, the spacing and the windows - and exactly ONE runs at
+a time, enforced by a unique partial index (one_running_campaign), not by this
+module being careful. There is one phone number and one worker.
+
+A drip campaign emails, and MANY run at once: a lead's sequence is a property
+of the lead, not of whichever call campaign sourced it. The index is scoped to
+type='call' so a second drip is not refused by an index whose error names an
+index and not a reason.
+
+Type is set at CREATION. Changing it under live leads would move a lead's
+whole ladder sideways, so it is deliberately absent from CONFIG_FIELDS and
+update() refuses it.
 
 THE SWITCH IS NEVER SILENT. start() refuses while another campaign is running
 and returns what is running instead, so the caller must come back with an
@@ -129,23 +139,49 @@ def get(campaign_id):
 
 
 def running():
-    """The one running campaign, or None. Everything the dialer needs."""
+    """
+    The one running CALL campaign, or None. Everything the dialer needs.
+
+    Scoped to type='call' on purpose: every caller of this - the dialer, the
+    version picker, the draft sender - means "the campaign that is dialing".
+    Once drips run, an unscoped query would return one of them at random and
+    the dialer would take its cap and its windows.
+    """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT * FROM campaign_configs WHERE is_running')
+            cur.execute("SELECT * FROM campaign_configs "
+                        "WHERE is_running AND type = 'call'")
             return cur.fetchone()
 
 
-def create(name: str, template_from=None, **overrides):
+def running_drips():
+    """Every running drip campaign. Many may run at once."""
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM campaign_configs "
+                        "WHERE is_running AND type = 'drip' ORDER BY name")
+            return cur.fetchall()
+
+
+def create(name: str, template_from=None, type: str = 'call', **overrides):
     """
     A new campaign, seeded Mon-Fri 09:00-17:00.
 
     An empty week is a campaign that silently dials nothing, which is worse
     than a default that has to be changed.
+
+    TYPE IS A NAMED ARGUMENT, not an override. It is absent from CONFIG_FIELDS
+    (it must not be editable afterwards), and **overrides filters to that list
+    - so passing it through there would drop it silently and every drip would
+    be created as a call campaign. That is the fault update() already raises
+    for; here it is avoided by not routing it through the filter at all.
     """
+    if type not in ('call', 'drip'):
+        raise ValueError(f"campaign type must be 'call' or 'drip', got {type!r}")
     base = get(template_from) if template_from else None
     vals = {
         'name': name.strip(),
+        'type': type,
         'notes': overrides.get('notes') or '',
         'agent_l1_version': (base or {}).get('agent_l1_version', 9),
         'sender_email': (base or {}).get('sender_email',
@@ -260,11 +296,15 @@ def start(campaign_id, stop_running: bool = False):
     stop_running=True after asking a person. There is deliberately no path
     that swaps silently.
     """
-    current = running()
-    if current and str(current['campaign_id']) != str(campaign_id):
-        if not stop_running:
-            raise CampaignConflict(current)
-        stop(current['campaign_id'])
+    # Only a CALL campaign is exclusive. Many drips run at once, so starting
+    # one asks nobody's permission and stops nothing.
+    this = get(campaign_id)
+    if this and this['type'] == 'call':
+        current = running()
+        if current and str(current['campaign_id']) != str(campaign_id):
+            if not stop_running:
+                raise CampaignConflict(current)
+            stop(current['campaign_id'])
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -282,8 +322,11 @@ def stop(campaign_id=None):
                 cur.execute("""UPDATE campaign_configs SET is_running=false
                                 WHERE campaign_id=%s RETURNING *""", (campaign_id,))
             else:
+                # The CALL campaign. Bare stop() has always meant "stop
+                # dialing"; without the type scope it would silently stop
+                # every running drip too.
                 cur.execute("""UPDATE campaign_configs SET is_running=false
-                                WHERE is_running RETURNING *""")
+                                WHERE is_running AND type='call' RETURNING *""")
             return cur.fetchone()
 
 

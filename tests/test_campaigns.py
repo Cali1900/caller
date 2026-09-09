@@ -365,3 +365,96 @@ def test_carryovers_still_come_before_fresh_leads(db, queued, no_real_calls):
     queued(fresh + carry)
     first = dialer.select_and_claim(_cfg(), limit=1)
     assert str(first[0]['lead_id']) == str(carry[0]), 'carry-over first'
+
+
+# --------------------------------------------------------------------------
+# campaign type: call is exclusive, drip is not
+# --------------------------------------------------------------------------
+
+def test_a_campaign_is_a_call_campaign_unless_told_otherwise(db):
+    """Every campaign that existed before type did is a call campaign, and
+    the default must keep it that way without anyone restating it."""
+    c = campaigns.create('T-default')
+    assert c['type'] == 'call'
+
+
+def test_two_call_campaigns_cannot_run_at_once(db):
+    a = campaigns.create('T-call-a')
+    b = campaigns.create('T-call-b')
+    campaigns.start(a['campaign_id'])
+    with pytest.raises(campaigns.CampaignConflict) as e:
+        campaigns.start(b['campaign_id'])
+    assert e.value.running['campaign_id'] == a['campaign_id'], \
+        'the refusal must carry what is running, so the caller can ask'
+
+
+def test_many_drips_run_at_once(db):
+    """
+    one_running_campaign was UNIQUE (is_running) WHERE is_running. The second
+    drip would have been refused by Postgres, with an error naming an index
+    instead of a reason. A lead's sequence belongs to the lead, not to
+    whichever call campaign sourced it, so many drips is the normal case.
+    """
+    a = campaigns.create('T-drip-a', type='drip')
+    b = campaigns.create('T-drip-b', type='drip')
+    campaigns.start(a['campaign_id'])
+    campaigns.start(b['campaign_id'])      # must NOT raise
+    assert {c['name'] for c in campaigns.running_drips()} == {'T-drip-a', 'T-drip-b'}
+
+
+def test_a_running_drip_does_not_block_or_masquerade_as_the_call_campaign(db):
+    """
+    The premise every other filter would pass: the drip IS running, so an
+    unscoped `WHERE is_running` returns it.
+
+    running() feeds the dialer, the version picker and the sender, and all
+    three mean "the campaign that is dialing". Handing them a drip gives the
+    dialer a drip's cap and windows.
+    """
+    d = campaigns.create('T-drip-solo', type='drip')
+    campaigns.start(d['campaign_id'])
+    assert campaigns.running() is None, 'a drip is not the dialing campaign'
+
+    c = campaigns.create('T-call-solo')
+    campaigns.start(c['campaign_id'])       # the drip must not have blocked it
+    assert campaigns.running()['campaign_id'] == c['campaign_id']
+    assert [x['name'] for x in campaigns.running_drips()] == ['T-drip-solo'], \
+        'starting a call campaign must not have stopped the drip'
+
+
+def test_bare_stop_stops_dialing_and_leaves_the_drips_running(db):
+    """stop() with no argument has always meant "stop dialing". Without the
+    type scope it would silently stop every drip as well."""
+    d = campaigns.create('T-drip-keep', type='drip')
+    c = campaigns.create('T-call-go')
+    campaigns.start(d['campaign_id'])
+    campaigns.start(c['campaign_id'])
+    campaigns.stop()
+    assert campaigns.running() is None
+    assert [x['name'] for x in campaigns.running_drips()] == ['T-drip-keep']
+
+
+def test_type_cannot_be_edited_after_creation(db):
+    """Moving a lead's whole ladder sideways is not an edit. update() refuses
+    it the same way it refuses any field not in CONFIG_FIELDS."""
+    c = campaigns.create('T-frozen')
+    with pytest.raises(ValueError) as e:
+        campaigns.update(c['campaign_id'], type='drip')
+    assert 'type' in str(e.value)
+
+
+def test_create_refuses_a_type_that_is_not_call_or_drip(db):
+    with pytest.raises(ValueError):
+        campaigns.create('T-bad', type='email')
+
+
+def test_type_is_not_silently_dropped_by_the_override_filter(db):
+    """
+    THE FAULT THIS PREVENTS, twice seen: create(**overrides) filters to
+    CONFIG_FIELDS, and type is deliberately not in it. Routed through there,
+    every drip would be created as a call campaign, and the only symptom
+    would be a drip that refuses to start alongside another one.
+    """
+    c = campaigns.create('T-drip-kw', type='drip')
+    assert campaigns.get(c['campaign_id'])['type'] == 'drip', \
+        'type must reach the INSERT, not be filtered out on the way'

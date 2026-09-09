@@ -25,7 +25,8 @@
 {% for c in campaigns %}
 <tr>
   <td>{% if c.is_running %}<span class="pill completed">RUNNING</span>{% endif %}</td>
-  <td><a href="/campaign/{{ c.campaign_id }}"><b>{{ c.name }}</b></a></td>
+  <td><a href="/campaign/{{ c.campaign_id }}"><b>{{ c.name }}</b></a>
+      {% if c.type != 'call' %}<span class="pill">{{ c.type }}</span>{% endif %}</td>
   <td class="dim">v{{ c.agent_l1_version }}</td>
   <td class="dim">{{ c.sender_email }}</td>
   <td class="right">{{ c.daily_cap }}</td>
