@@ -5,10 +5,29 @@ is retained commented-out in `BACKLOG.md` as history. That model could not
 express many drips and tied a lead's sequence to whichever call campaign
 sourced it.
 
-**Status: PARKED 2026-09-09.** Sean reads every reply himself at this volume;
-the drip is not worth building until that stops being true. Nothing below
-exists, and reply ingest was reverted rather than left half-built - an applied
-migration that is not in git makes dev and a fresh database disagree.
+**Status: BUILT 2026-09-09.** It was parked in error. See HANDOFF.md for what
+shipped, and read the two deviations below before treating this file as the spec.
+
+**REPLY INGEST STAYS PARKED, AND REPLY DETECTION STAYS MANUAL.** That is what
+made the drip safe to build: Sean ticks a box, stages.record_reply() writes
+replied_at, and the auto-send gate reads that field exactly as it would read
+automatic ingest - so IMAP becomes a SECOND WRITER later rather than a rewrite.
+
+⚠️ TWO THINGS IN THIS FILE DID NOT SURVIVE CONTACT WITH THE CODE:
+
+  1. "The campaign_id MOVES" (see Moving a lead, below) is WRONG. It does not
+     move; leads.drip_campaign_id was added instead. leads.campaign_id is also
+     the daily cap's counting key and the funnel's attribution key, so moving it
+     leaks the cap and makes a call campaign's funnel decay as its leads
+     succeed. The stated goal - the call selector skipping drip leads - already
+     happens via STAGE_DIALABLE. Full reasoning in migration 036 and HANDOFF.md.
+
+  2. "REPLY DETECTION IS A HARD GATE ... fail closed" is NOT TRUE and cannot be
+     while detection is manual. replied_at gates "has a reply been RECORDED",
+     not "has the firm replied". The window between a reply arriving and being
+     ticked is real and uncloseable without inbound ingest. Accepted
+     deliberately; mitigated by a digest checkpoint listing tomorrow's sends by
+     step and by firm. See HANDOFF.md - do not let that warning get softened.
 
 **Groundwork that IS being built now, because it is cheap today and a
 migration against live campaigns later:** campaign type, and archive. Read the

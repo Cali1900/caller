@@ -111,6 +111,92 @@
   </div>
 
   <div>
+    <div class="card" id="drip">
+      <h2>The sequence{% if c.type != 'drip' %} <span class="dim">&mdash; drip campaigns only</span>{% endif %}</h2>
+      {% if c.type != 'drip' %}
+        <p class="dim">This is a <b>call</b> campaign. A sequence belongs to a
+           <b>drip</b> campaign &mdash; create one on /campaigns, and sending
+           email&nbsp;1 puts the lead on it.</p>
+      {% else %}
+        <p class="dim">One row per step, in order. <b>Every delay is measured
+           from the FIRST send</b> (<code>emailed_at</code>), never from the step
+           before it &mdash; chaining lets a schedule drift, anchoring does not.
+           A step already sent is never re-sent and never re-dated, so editing
+           this is safe with leads mid-flight.</p>
+        <p class="dim"><b>Starting this campaign is the switch.</b> Steps do not
+           send while it is stopped.</p>
+        <form method="post" action="/campaign/{{ c.campaign_id }}/steps">
+          {% for st in drip_steps %}
+          <div class="card" style="margin:8px 0;padding:10px">
+            <input type="hidden" name="step_id_{{ loop.index0 }}" value="{{ st.step_id }}">
+            <div class="kv" style="align-items:center">
+              <div><b>Step {{ loop.index }}</b></div>
+              <div>
+                <label class="dim">day
+                  <input type="number" name="delay_{{ loop.index0 }}" min="0" max="365"
+                         value="{{ st.delay_days }}" style="width:5em">
+                </label>
+                <label class="dim" style="margin-left:12px">
+                  <input type="checkbox" name="delete_{{ loop.index0 }}" value="1">
+                  remove
+                </label>
+              </div>
+            </div>
+            <label>Subject</label>
+            <input type="text" name="subject_{{ loop.index0 }}" value="{{ st.subject }}">
+            <label>Body</label>
+            <textarea name="body_{{ loop.index0 }}" rows="8">{{ st.body }}</textarea>
+          </div>
+          {% endfor %}
+          {# TWO BLANK ROWS, so adding a step needs no javascript and no second
+             round trip. An empty row is simply not posted as a step. #}
+          {% for i in range(drip_steps|length, drip_steps|length + 2) %}
+          <div class="card" style="margin:8px 0;padding:10px;opacity:.85">
+            <div class="kv" style="align-items:center">
+              <div><b>New step {{ i + 1 }}</b></div>
+              <div><label class="dim">day
+                <input type="number" name="delay_{{ i }}" min="0" max="365"
+                       placeholder="e.g. {{ 4 * (i + 1) }}" style="width:5em">
+              </label></div>
+            </div>
+            <label>Subject</label>
+            <input type="text" name="subject_{{ i }}" placeholder="leave blank to skip">
+            <label>Body</label>
+            <textarea name="body_{{ i }}" rows="6" placeholder="leave blank to skip"></textarea>
+          </div>
+          {% endfor %}
+          <div class="toolbar">
+            <button type="submit">Save the sequence</button>
+            <span class="dim">Refused whole if a delay repeats, goes backwards,
+              or a step has no subject or body.</span>
+          </div>
+        </form>
+
+        {% if step_previews %}
+        <h2>Preview</h2>
+        <p class="dim">Rendered against the same sample lead as the email&nbsp;1
+           preview, so this is what <code>drafts.render()</code> will produce.
+           <b>{{ '{{sample_link}}' }}</b> becomes that step's own tracked link
+           &mdash; one token per send, so a click attributes to the step that
+           produced it.</p>
+        {% for p in step_previews %}
+          <div class="card" style="margin:8px 0;padding:10px">
+            <div class="dim">step {{ p.position }}</div>
+            <div><b>{{ p.subject }}</b></div>
+            <pre style="white-space:pre-wrap;margin:6px 0 0">{{ p.body }}</pre>
+          </div>
+        {% endfor %}
+        {% endif %}
+
+        <h2>After the last step</h2>
+        <p class="dim">Currently <b>{{ c.after_last_step }}</b>.
+           <code>archive</code> archives as <b>no_reply</b>, which keeps the
+           &ldquo;everything terminates&rdquo; property &mdash; the lead rests
+           six months and returns to the pool. <code>hold</code> leaves it for a
+           person.</p>
+      {% endif %}
+    </div>
+
     <div class="card">
       <h2>Prompt version</h2>
       <div class="field">

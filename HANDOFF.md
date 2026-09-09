@@ -14,9 +14,9 @@ Last updated 2026-09-09. Every number in the table below was read from
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260909_035_rename_stage.sql` |
-| Tests | 611 passed, 1 skipped |
-| Break pass | **95 definitions** (84 deleted with `next_day`; 91–96 added). Full pass GREEN across all 94 at 2026-09-09T15:54Z with the suite at 611; break 96 added and verified individually after. `--status` now says COMPLETE / IN PROGRESS / NEVER RUN, records `.break_pass_last` instead of erasing the only evidence, and refuses to record a completion it cannot put a test count on |
+| Last migration | `20260909_037_prepared_sends.sql` |
+| Tests | 632 passed, 1 skipped |
+| Break pass | **103 definitions** (97–104 added for the drip). Full pass GREEN across all 103 at 2026-09-09T17:23Z, suite 632. The FIRST run of that pass FAILED — break 100 reported GREEN because a drip test was passing with zero clicks; see masked-guard row 12 in README.md |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
 
@@ -132,6 +132,16 @@ If results look impossible, check for stray processes before you debug the code.
 stated as six, nine and eleven in three different places; do not add a fourth
 count here, add a row to the table.
 
+**A test may not share state with the next test.** `tests/conftest.py`
+truncates between tests, and `TRUNCATE ... CASCADE` only reaches tables with a
+foreign key to the ones named. **`email_do_not_send` has no FK to `leads` on
+purpose** — it is keyed on the ADDRESS so it outlives the lead — which meant it
+was outliving test isolation too: an address blocked by one test silently
+excluded leads in every test that ran after it. `email_audit` had the same gap.
+Found on 2026-09-09 when three drip tests failed for a reason that had nothing to
+do with the drip. The non-cascading tables are now named EXPLICITLY rather than
+left to a cascade path a future table can quietly fall outside of.
+
 **A test may not configure what production ignores.**
 `tests/test_no_dead_config.py` fails when a test writes a settings key or a
 table nothing consumes. Most of the masked guards in that table were exactly
@@ -163,10 +173,11 @@ api/
   archive.py     a lead rests, then returns. Writes `leads` and NOTHING else
   clicks.py      click tracking. Public endpoint, token only
   retry_ladder.py per-outcome retry gaps, per campaign. A rung is a DURATION
+  drip.py        the email sequence. Steps are ROWS; delays anchor to emailed_at
   why.py         "why is it here", assembled from existing state
   funnel.py      / forecast.py / volume.py  the numbers screens
 migrations/      forward-only, applied by scripts/migrate.sh
-scripts/breaks/  95 break definitions, one per guard
+scripts/breaks/  103 break definitions, one per guard
 ```
 
 ## Running it
@@ -200,6 +211,133 @@ version. It now reads the lead's own `campaign_id` from the database inside the
 transaction, with no fallback to `running()`.
 
 ---
+
+## The drip
+
+A lead's email sequence, owned by a **drip** campaign. `api/drip.py`.
+
+**Entry is email 1 and nothing else.** `mark_emailed()` sets
+`leads.drip_campaign_id` in the same transaction as the `emailed_at` stamp, and
+auto-assigns when exactly ONE drip is running — no picker for a list of one. With
+several, a person chooses on the lead.
+
+⚠️ **`leads.campaign_id` IS NEVER MOVED.** The brief said the campaign_id should
+move from the call campaign to the drip. It should not, and this is the one place
+the design deviates from `DRIP_ARCHIVE_BRIEF.md`:
+
+`leads.campaign_id` is doing a **second job** — neither `dial_audit` nor `calls`
+records a campaign, so it is the only record of which campaign dialed a lead.
+Moving it would (a) **leak the daily cap**, because
+`guards.assert_under_daily_cap` counts leads currently assigned to the campaign,
+so every send would let one extra fresh lead dial; and (b) **rewrite the funnel**,
+because `funnel._where` filters on it, so a call campaign would lose exactly its
+successes as they migrated out — "40 humans, 12 emails" decaying to "40 humans,
+0 emails", which breaks the prompt-version comparisons the agent version is
+pinned for. Same fault `archive.return_due()` refuses to commit.
+
+The brief's stated goal is met anyway, at zero cost: entering a drip requires
+`has_confirmed_email`, and `dialer.STAGE_DIALABLE` is
+`AND NOT l.has_confirmed_email`, so **the call selector already skips every lead
+in a drip.** No dialer change at all. `drip_campaign_id` joins `_CLEAR_GATES` —
+a resting lead must not be in a drip.
+
+**The sequence is Sean's.** `drip_steps` are ROWS: any number of steps, any
+delays. `save_steps()` replaces the whole sequence in one act and **refuses it
+whole** on an empty sequence, a repeated delay, a backwards delay, or a blank
+subject or body — a half-saved sequence would schedule from steps nobody
+approved.
+
+⚠️ **DELAYS ANCHOR TO `emailed_at`, NEVER TO THE PREVIOUS STEP.** Chaining lets
+the schedule drift by however long each send was late, and the drift compounds.
+Break 97. This is also why `emailed_at` is write-once (break 18): a restamp would
+move every scheduled send at once.
+
+⚠️ **TWO DIFFERENT ANCHORS, and anyone reading one will assume the other:**
+
+| | anchored to |
+|---|---|
+| the SCHEDULE (when a step is due) | `leads.emailed_at` — the FIRST send |
+| CLICK TIMING (`minutes_since_sent`) | **that step's own send** (`email_sends.sent_at`) |
+
+"clicked 47m after send" on step 3 must mean 47 minutes after **step 3** went
+out; from `emailed_at` it would report every later click as "11 days after send"
+— true of the sequence, useless about the email.
+
+**One token per SEND, not per lead** (`email_sends.click_token`), which is what
+makes a click attributable to the step that produced it: if step 1 pulls every
+click the follow-ups are noise, if step 3 does the opener needs rewriting.
+`leads.click_token` is gone.
+
+`email_sends.sent_at` is **nullable** and that is load-bearing: a row means
+*prepared*. Email 1's draft is rendered and STORED at capture time and break 60
+pins that Copy and Send produce identical bytes, so the token must exist before
+the send. `sent_at IS NULL` → the token is live and a click records
+`minutes_since_sent = NULL`, which is correct — there is no send to measure from.
+
+**A step already sent is never re-sent and never re-dated** (break 98). Every
+mid-flight edit rule falls out of that one fragment rather than being coded case
+by case: editing copy or a delay touches only leads who have not reached the
+step, deleting one **soft-deletes** so those who got it keep the record, and
+inserting one sends nobody backwards.
+
+**One step per lead per tick** (break 104). After a pause several steps can be
+due at once; sending them all puts three emails in front of one firm in a minute.
+
+**What stops it:** a recorded reply (99), a stopped drip campaign (101 —
+`is_running` is the switch, and it is unscoped from `one_running_campaign` so
+many drips run at once), an archived lead, the email do-not-send list (102), a
+terminal status, or a person on the lead page. **A CLICK DOES NOT** (100) — a
+click is interest, not an answer, and stopping on one would silence the sequence
+exactly when it is working. After the last step: `archive('no_reply')`, or
+`hold` if the campaign says so.
+
+**An email unsubscribe suppresses EMAIL ONLY** (103). Someone who does not want
+our emails has not given up the right to be phoned about a case they asked about,
+so `drip.stop()` never writes to `suppression`. A prose "take me off your list"
+is broader — that is a person's call at the DNC button.
+
+## ⚠️ THE REPLY GATE IS NOT FAIL-CLOSED. SEAN READING HIS INBOX IS THE GUARD.
+
+**Read this before touching the drip, and do not let it get softened.**
+
+`DRIP_ARCHIVE_BRIEF.md` says *"nothing auto-sends if detection is unavailable —
+fail closed, exactly like `assert_dialable`"*. **That property does not hold, and
+cannot, while reply detection is manual.**
+
+Reply detection IS manual and staying that way: Sean ticks a box, and
+`stages.record_reply()` writes `replied_at`. There is nothing that can *be*
+unavailable, so there is nothing to fail closed about.
+
+What is true, precisely:
+
+* `replied_at` is a sound gate for **"has a reply been RECORDED"**. Once it is
+  set, `drip.REPLIED_STOP` ends the sequence. Break 99.
+* It is **not** a gate for *"has the firm replied"*. Nothing in the system has
+  any inbound signal at all.
+* **THE WINDOW IS REAL AND UNCLOSEABLE WITHOUT INBOUND INGEST.** A firm that
+  answers on Tuesday and is ticked on Wednesday **will receive** a step that fell
+  due Tuesday night. No code check can see it.
+
+That is accepted deliberately, at this volume, because Sean reads every reply —
+which is exactly why the drip was safe to unpark. **The guard is a person, not a
+code path.** It is written here rather than implied because "Sean is diligent"
+being an unstated assumption is the actual danger: the next person to read
+`REPLIED_STOP` will assume it means more than it does.
+
+**The mitigation is a checkpoint, not a fix.** The drip never sends silently into
+the future. `drip.upcoming()` feeds a **GOING OUT IN THE NEXT 24 HOURS** block in
+the daily digest, listing every send **by step and by firm name** — not a count,
+because "6 sends tomorrow" is not actionable and "step 2 to Whitfield Law" is.
+One lead can then be stopped on its own lead page
+(`POST /leads/{id}/drip/stop`) **without pausing the whole drip**.
+
+Everything else in the send path still fails closed properly — see
+`autosend.eligibility()`, which the drip reuses verbatim.
+
+**If inbound ingest is ever built**, it becomes a SECOND WRITER to `replied_at`
+rather than a rewrite: the gate, the dialer's `REPLIED_GUARD` and the drip all
+already read that one field from that one place. At that point this section can
+be deleted and the brief's fail-closed rule becomes true as written.
 
 ## The archive return clears GATES and keeps FACTS (2026-09-09)
 
@@ -526,10 +664,13 @@ archive fix — in one commit those failures would have had two candidate causes
 `clicked_at`, `minutes_since_sent`, `user_agent`, `ip` and a count, and an
 UNKNOWN TOKEN STILL REDIRECTS so a scanner learns nothing from a 404.
 
+**THE DRIP IS BUILT** (2026-09-09) — it was parked in error. See the drip
+section below. **Reply ingest stays parked** and reply detection stays MANUAL;
+read the fail-closed warning above before assuming otherwise.
+
 Still specified and **not built**: the four in `BACKLOG.md` —
 `B-batch-review`, `B-objection-scoring`, `B-scorer-model-cost`,
-`B-demands-volume`. The drip and reply ingest are **PARKED** — see
-`DRIP_ARCHIVE_BRIEF.md`; do not start either.
+`B-demands-volume`.
 
 ---
 

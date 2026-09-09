@@ -45,17 +45,26 @@ class HoldReason:
     ALREADY_REPLIED = 'they already replied - never auto-contact again'
     NO_CAMPAIGN = 'lead is not on a campaign'
     NOT_AUTO = 'campaign email 1 is set to manual'
+    DRIP_STOPPED = 'the drip campaign is not running'
     NO_EMAIL = 'no email address'
     DO_NOT_SEND = 'address is on the email do-not-send list'
     ARCHIVED = 'lead is archived - it is resting'
     CHECK_FAILED = 'eligibility check could not run'
 
 
-def eligibility(lead, campaign, validate=None) -> dict:
+def eligibility(lead, campaign, validate=None, drip_step: bool = False) -> dict:
     """
     {'ok': bool, 'reasons': [str], 'domain_class': str|None}
 
     ok=True means EVERY exclusion ran and passed. Anything else holds.
+
+    `drip_step=True` swaps ONE thing: the switch. Email 1 is gated by the call
+    campaign's email_1_mode; a drip step is gated by its own campaign's
+    is_running, which is the switch a person throws on /campaigns and is
+    already unscoped from one_running_campaign so many drips may run.
+    THE SEVEN EXCLUSIONS ARE IDENTICAL AND REUSED VERBATIM - the brief requires
+    them on every step, not just the first, and a second copy of that list is
+    the copy that drifts.
 
     `validate` is injectable so tests never touch DNS. It defaults to the same
     email_validation.check() the restart button uses - ONE implementation, so a
@@ -73,9 +82,13 @@ def eligibility(lead, campaign, validate=None) -> dict:
             return {'ok': False, 'reasons': [HoldReason.NO_CAMPAIGN],
                     'domain_class': None}
 
-        # The switch itself. Not an exclusion - a campaign on manual is not
-        # holding anything, it is simply not auto-sending.
-        if campaign.get('email_1_mode') != 'auto':
+        # THE SWITCH. Not an exclusion - a campaign that is off is not holding
+        # anything, it is simply not sending.
+        if drip_step:
+            if not campaign.get('is_running'):
+                return {'ok': False, 'reasons': [HoldReason.DRIP_STOPPED],
+                        'domain_class': None}
+        elif campaign.get('email_1_mode') != 'auto':
             return {'ok': False, 'reasons': [HoldReason.NOT_AUTO],
                     'domain_class': None}
 

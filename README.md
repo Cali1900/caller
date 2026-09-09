@@ -125,7 +125,14 @@ happen.
 | 10 | the archive return's confirmed-email reset (then called `stage`) | every lead in `tests/test_archive.py` is built at `stage='L1'` — which is what makes the suppression test properly isolated. But the three EMAIL-derived archive reasons (`no_reply`, `bad_email`, `unsubscribed`) can only be reached from **L2**, so "a returned lead is dialable" was only ever asserted for leads that never reach the state that breaks it. `return_due()` never reset `stage`, nothing writes `'L1'` back, and `STAGE_DIALABLE` is L1-only — the lead came back unreachable down **both** wires. Only observable on a lead archived **from L2**. Fixed 2026-09-09, breaks 91–93. |
 | 11 | `REPLIED_GUARD` across the archive return | the same fixture shape, found by asking the same question of the next gate: no test set `replied_at` on a lead that was archived and returned, so the permanent block it created was unobserved. A firm that said "not interested", archived `refused`, could never be dialed again. Only observable on a returned lead with `replied_at` set. Fixed 2026-09-09, break 95 — and a companion test proves clearing it does **not** let a suppressed number through, because suppression is keyed on the phone. |
 
+| 12 | `drip.REPLIED_STOP`, via a test that never clicked | ⚠️ **A NEW SUB-SHAPE: the test's SETUP silently no-opped.** `test_a_click_does_NOT_stop_the_sequence` asserted that a click leaves the drip running — while never producing a click. Its fixture inserted `email_sends` rows with no `click_token`, so `clicks.record()` had nothing to look up and returned `None`, and the test's own `if row and row['click_token']:` made the skip invisible. Break 100 removed the guard, nothing failed, and the pass reported GREEN. Only observable by asserting the click was RECORDED before asserting the consequence. Found 2026-09-09. |
+
 Note #5: the *test* was wrong, not the code. That is the usual shape.
+
+Note #12 is worth reading on its own: **defensive coding inside a test can
+turn an assertion into a no-op.** `if row and row['click_token']:` looks careful
+and was the whole bug — it swallowed the case where the setup had not produced
+what the test needed. A test's premise must be ASSERTED, never guarded.
 
 Note #10 and #11: the *fixture* was wrong — it built a state production never
 produces at that point in a lead's life. That is the shape to watch for in any

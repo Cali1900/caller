@@ -36,6 +36,19 @@ DRAIN_EVERY = 10
 # handler: the webhook drain must stay fast, and a transient LLM outage must
 # not leave calls permanently unscored.
 SCORE_EVERY = 60
+# EMAIL. Both loops are gated OFF by default and stay off until a person throws
+# a switch: email 1 needs the call campaign on email_1_mode='auto', and a drip
+# step needs its drip campaign is_running. A tick with neither set does nothing.
+#
+# ⚠️ THE REPLY GATE IS NOT FAIL-CLOSED. Reply detection is MANUAL - Sean ticks a
+# box and stages.record_reply() writes replied_at - so nothing here can know a
+# firm has answered until he does. The window between a reply arriving and being
+# ticked is real and cannot be closed without inbound ingest. That is accepted
+# at this volume because he reads every reply, and the mitigation is that the
+# drip never sends silently into the future: the digest lists tomorrow's sends
+# by step and by firm, so there is a checkpoint BEFORE each batch. See
+# api/drip.py and HANDOFF.md.
+SEND_EVERY = 120
 # Alerts are immediate on purpose - a verbal yes decays. The digest is the
 # batched channel; these two are not.
 ALERT_EVERY = 60
@@ -123,7 +136,8 @@ def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
-    from api import alerts, archive, dialer, drafts, drain, scorer
+    from api import (alerts, archive, dialer, drafts, drain, drip, scorer,
+                     sender)
     from api.config import load_config
 
     # Fail fast and loudly on bad config rather than idling in a loop that
@@ -155,6 +169,7 @@ def main():
     last_dial = 0.0
     dial_gap = _next_gap()
     last_score = 0.0
+    last_send = 0.0
     last_alert = 0.0
     last_digest = 0.0
     last_archive = 0.0
@@ -178,6 +193,19 @@ def main():
             d = _safe('drafts', drafts.generate_pending)
             if d and d['drafted']:
                 print(f'[worker] drafted {d["drafted"]} email(s) - NOT sent', flush=True)
+
+        if now - last_send >= SEND_EVERY:
+            last_send = now
+            # EMAIL 1, for campaigns set to auto. Off by default.
+            r = _safe('sender', sender.run_once, cfg)
+            if r and (r['sent'] or r['refused']):
+                print(f'[worker] email 1: sent {r["sent"]}, '
+                      f'refused {r["refused"]}', flush=True)
+            # THE DRIP: steps 2..N, for drips that are running.
+            d = _safe('drip', drip.run_once, cfg)
+            if d and (d['sent'] or d['refused']):
+                print(f'[worker] drip: sent {d["sent"]}, '
+                      f'refused {d["refused"]}', flush=True)
 
         if now - last_alert >= ALERT_EVERY:
             last_alert = now

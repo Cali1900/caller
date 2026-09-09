@@ -186,39 +186,31 @@ def test_no_test_writes_a_table_production_never_touches():
 
 
 # ==========================================================================
-# AUTO-SEND IS BUILT AND DELIBERATELY NOT WIRED
+# THE WORKER RUNS BOTH SEND LOOPS
 # ==========================================================================
 
-def test_the_worker_does_not_run_the_sender_loop():
+def test_the_worker_runs_both_send_loops():
     """
-    ⚠️ THIS ASSERTS A DECISION, NOT A BUG.
+    THIS ASSERTION WAS INVERTED ON 2026-09-09, and the history is the point.
 
-    api/sender.py is complete: due() selects leads whose campaign is on
-    email_1_mode='auto' and whose delay has elapsed, send_one() re-checks the
-    whole gate in-transaction, run_once() loops them. api/autosend.py is the
-    gate, with seven exclusions and their own break definitions (41-47).
+    It used to assert the worker did NOT reference the sender. api/sender.py and
+    api/autosend.py were complete and tested and nothing called
+    sender.run_once() - a gap rather than a decision - so the test made closing
+    it deliberate rather than accidental.
 
-    NOTHING CALLS sender.run_once(). The worker ticks drain, scorer, drafts,
-    alerts, digest and the archive sweep - not the sender. The only production
-    caller of the module is web.py, which calls send_manual(): the "Send now"
-    button a person presses after reading the draft.
+    The drip is built now and the switches exist, so it HAS been closed on
+    purpose. Both loops are wired, and both are off by default:
 
-    That is deliberate while the drip is parked. The brief is explicit that
-    reply detection is a HARD GATE - "nothing auto-sends if detection is
-    unavailable" - and reply ingest is not built. So email_1_mode='auto'
-    changes nothing today, and that is the safe state, not an oversight.
+      email 1     the call campaign's email_1_mode, 'manual' by default
+      drip steps  the drip campaign's is_running
 
-    WITHOUT THIS TEST it reads as a missing line rather than a decision, and
-    the fix looks like a one-line addition to worker.main(). Adding that line
-    turns on automated outbound email to law firms. If you are here because
-    this test failed, you are making that decision - make it deliberately,
-    with the reply gate in place, and rewrite this test to say so.
+    What is worth guarding is now the reverse. A refactor that quietly drops
+    either call leaves two complete senders that never run and a drip that
+    silently never advances - no error, no failed send, just firms that never
+    hear from us again. Invisible failure is worse than a loud one.
     """
     src = open(os.path.join(ROOT, 'api', 'worker.py')).read()
     tree = ast.parse(src)
-
-    # Static, not behavioural: ask whether the CODE references it at all,
-    # rather than whether one run happened not to reach it.
     called = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
@@ -226,15 +218,15 @@ def test_the_worker_does_not_run_the_sender_loop():
         elif isinstance(node, ast.Name):
             called.add(node.id)
 
-    assert 'sender' not in called, (
-        'api/worker.py now references the sender. If you have wired the '
-        'auto-send loop, that is a decision to turn on automated outbound '
-        'email to law firms - see this test\'s docstring, confirm reply '
-        'detection is in place, and update it deliberately.')
+    assert 'sender' in called, \
+        'api/worker.py no longer references the sender - email 1 will never go'
+    assert 'drip' in called, \
+        'api/worker.py no longer references the drip - no sequence will advance'
+    assert 'run_once' in src
 
-    # And the positive half: the manual path IS wired, so this test cannot
-    # pass merely because the sender was deleted.
-    web = open(os.path.join(ROOT, 'api', 'web.py')).read()
-    assert 'send_manual' in web, \
-        'the "Send now" button lost its wiring - this test would then be ' \
-        'asserting nothing'
+    # And the switches that keep them off by default still exist, or "wired"
+    # would mean "sending to law firms on a timer with nothing to stop it".
+    from api import autosend, campaigns as camp
+    assert 'email_1_mode' in camp.CONFIG_FIELDS
+    assert hasattr(autosend.HoldReason, 'NOT_AUTO')
+    assert hasattr(autosend.HoldReason, 'DRIP_STOPPED')

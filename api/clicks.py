@@ -34,40 +34,47 @@ TOKEN_BYTES = 16          # 128 bits - not guessable, short enough to read
 
 def token_for(lead_id) -> str:
     """
-    The lead's click token, generated once and reused.
+    The token of this lead's LATEST send, or None if nothing has gone out.
 
-    ONE TOKEN PER LEAD today. That is a CURRENT-STATE CHOICE, not a settled
-    one, and the drip will have to change it.
+    ⚠️ ONE TOKEN PER SEND, NOT PER LEAD (migration 036). That is what makes a
+    click attributable to the step that produced it: if step 1 pulls every click
+    the follow-ups are noise, and if step 3 does the opener needs rewriting. A
+    per-lead count cannot tell those apart, and per-lead was the shape until the
+    drip made the question real.
 
-    ⚠️ DRIP_ARCHIVE_BRIEF.md specifies clicks tracked PER STEP, and that design
-    wins (decided 2026-09-09). Per-lead cannot answer the question the drip is
-    built to ask: is step 1 pulling every click, or is step 3? If step 1 does,
-    the follow-ups are noise; if step 3 does, the opener needs rewriting. Time
-    since send cannot separate those - only attribution to the step that
-    produced the click can, and a per-lead count has no step to attribute to.
+    THIS IS EMAIL 1's TOKEN, and it is PREPARED LAZILY. Email 1's draft is
+    rendered and STORED at capture time and break 60 pins that Copy and Send
+    produce the same bytes, so the token has to exist before the send does. The
+    email_sends row is therefore created here with sent_at NULL - "prepared" -
+    and stamped when the email actually goes. A click before that records
+    minutes_since_sent = NULL, which is correct: there is no send to measure
+    from.
 
-    Per-lead is right for TODAY, where there is exactly one manual email per
-    lead, and it keeps one property worth carrying forward: anyone holding a
-    token cannot reason about a lead's other sends, because there are none.
-
-    Moving to per-step means the token belongs to the SEND, not the lead -
-    a schema change (leads.click_token is a single column), so it is parked
-    with the rest of the drip rather than half-done. Do not read this function
-    as a settled decision against the brief.
+    Drip steps do NOT come through here. They call drip.record_send()
+    explicitly, at the moment they go, so each step owns its own token.
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT click_token FROM leads WHERE lead_id = %s',
-                        (lead_id,))
+            cur.execute("""SELECT click_token FROM email_sends
+                            WHERE lead_id = %s AND seq = 1
+                              AND click_token IS NOT NULL
+                            LIMIT 1""", (lead_id,))
             row = cur.fetchone()
-            if row is None:
-                return None
-            if row['click_token']:
+            if row:
                 return row['click_token']
+            cur.execute('SELECT dm_email FROM leads WHERE lead_id = %s',
+                        (lead_id,))
+            lead = cur.fetchone()
+            if lead is None:
+                return None
             tok = secrets.token_urlsafe(TOKEN_BYTES)
-            cur.execute("""UPDATE leads SET click_token = %s
-                            WHERE lead_id = %s AND click_token IS NULL
-                            RETURNING click_token""", (tok, lead_id))
+            # ON CONFLICT: two draft generations racing must not mint two
+            # tokens for one email, or the Copy button and the send disagree.
+            cur.execute("""INSERT INTO email_sends
+                               (lead_id, step_id, seq, to_email, click_token)
+                           VALUES (%s, NULL, 1, %s, %s)
+                           RETURNING click_token""",
+                        (lead_id, lead['dm_email'] or '', tok))
             got = cur.fetchone()
             return got['click_token'] if got else tok
 
@@ -86,6 +93,19 @@ def tracked_url(base_url: str, lead_id) -> str:
         return None
     tok = token_for(lead_id)
     return f'{base}/c/{tok}' if tok else None
+
+
+def url_for_token(base_url: str, token: str) -> str:
+    """
+    The absolute tracked URL for a token we already hold.
+
+    Used by the drip: the send row exists, its token is minted, and the copy is
+    rendered against THAT token rather than looking one up by lead.
+    """
+    base = (base_url or '').strip().rstrip('/')
+    if not base or not token:
+        return None
+    return f'{base}/c/{token}'
 
 
 def set_destination(lead_id, url: str) -> None:
@@ -122,32 +142,45 @@ def record(token: str, user_agent: str = '', ip: str = None):
     tracking failure must not turn into an error page for someone who did
     nothing wrong.
 
-    minutes_since_sent is computed HERE and STORED. It is the number Sean
-    actually wants, and storing it means it stays true even if anything about
-    emailed_at ever changes. NULL when the lead has no emailed_at: a click with
-    no recorded send is possible (a forwarded mail) and must not read as zero.
+    ⚠️ minutes_since_sent IS MEASURED FROM THIS SEND, NOT FROM emailed_at.
+    TWO DIFFERENT ANCHORS, and anyone reading one will assume the other:
+
+      THE SCHEDULE anchors to leads.emailed_at - the first send. Every drip
+      step's delay_days is measured from there so the sequence cannot drift.
+
+      CLICK TIMING anchors to the send that was clicked. "clicked 47m after
+      send" on step 3 has to mean 47 minutes after STEP 3 went out; measured
+      from emailed_at it would report every later click as "11 days after
+      send" - true of the sequence, useless about the email.
+
+    Computed HERE and STORED, so it stays true whatever happens to the send row
+    afterwards. NULL when there is no recorded send time: a click with no send
+    is possible (a forwarded mail) and must not read as zero.
     """
     if not token:
         return None
     ip = _clean_ip(ip)
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT lead_id, emailed_at, click_destination
-                             FROM leads WHERE click_token = %s""", (token,))
+            cur.execute("""SELECT s.send_id, s.lead_id, s.sent_at,
+                                  l.click_destination
+                             FROM email_sends s
+                             JOIN leads l ON l.lead_id = s.lead_id
+                            WHERE s.click_token = %s""", (token,))
             lead = cur.fetchone()
             if lead is None:
                 return None
             cur.execute(
                 """INSERT INTO email_clicks
-                       (lead_id, minutes_since_sent, user_agent, ip)
-                   VALUES (%s,
+                       (lead_id, send_id, minutes_since_sent, user_agent, ip)
+                   VALUES (%s, %s,
                            CASE WHEN %s::timestamptz IS NULL THEN NULL
                                 ELSE GREATEST(0, (EXTRACT(EPOCH FROM
                                      (now() - %s::timestamptz)) / 60)::int) END,
                            %s, %s)
                    RETURNING minutes_since_sent""",
-                (lead['lead_id'], lead['emailed_at'], lead['emailed_at'],
-                 (user_agent or '')[:500], ip))
+                (lead['lead_id'], lead['send_id'], lead['sent_at'],
+                 lead['sent_at'], (user_agent or '')[:500], ip))
             mins = cur.fetchone()['minutes_since_sent']
             # A click is engagement - the strongest signal short of a reply.
             from api import pipeline

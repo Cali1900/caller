@@ -121,7 +121,20 @@ def db(test_db, monkeypatch):
         cur.execute("""
             TRUNCATE activity, dial_audit, webhook_events, call_scores,
                      score_attempts, alerts, digests, prompt_versions,
-                     calls, leads, suppression, campaign_configs
+                     calls, leads, suppression, campaign_configs,
+                     -- ⚠️ THESE HAVE NO FOREIGN KEY TO leads, SO CASCADE NEVER
+                     -- REACHES THEM. email_do_not_send is keyed on the ADDRESS
+                     -- precisely so it outlives the lead - and it was outliving
+                     -- test isolation too, leaking suppressed addresses from
+                     -- one test into every test that ran after it. A drip test
+                     -- was excluded by an address a completely different test
+                     -- had blocked, which is the masked-guard shape pointed at
+                     -- the harness instead of the code.
+                     email_do_not_send, email_audit,
+                     -- Named explicitly rather than left to CASCADE: relying on
+                     -- a cascade path means a future table with no FK silently
+                     -- starts leaking, exactly as above.
+                     email_sends, email_clicks, drip_steps, archived_contacts
             RESTART IDENTITY CASCADE
         """)
         # Windows are per-campaign and campaign_windows cascades off

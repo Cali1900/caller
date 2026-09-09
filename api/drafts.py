@@ -62,10 +62,14 @@ def render(template: str, values: dict) -> str:
     return out
 
 
-def _sample_link(lead) -> str:
+def _sample_link(lead, send=None) -> str:
     """
-    The tracked sample URL for this lead, or the plain sample page when
-    tracking is off.
+    The tracked sample URL, or the plain sample page when tracking is off.
+
+    THE TOKEN BELONGS TO A SEND, NOT TO THE LEAD. Pass `send` (an email_sends
+    row) and the link carries that send's token, so a click attributes to the
+    step that produced it. Without one - the draft preview, or email 1 before
+    its send row exists - there is no token yet and the plain page is right.
 
     Falls back to the real URL rather than an empty string or a dead one: a
     lead with no id (the preview's sample data) still needs a link that works
@@ -75,6 +79,8 @@ def _sample_link(lead) -> str:
     from api.config import load_config as _load
     try:
         base = _load().CLICK_BASE_URL
+        if base and send and send.get('click_token'):
+            return _clicks.url_for_token(base, send['click_token'])
         if base and lead.get('lead_id'):
             return _clicks.tracked_url(base, lead['lead_id']) or _clicks.DESTINATION
     except Exception as exc:
@@ -82,7 +88,7 @@ def _sample_link(lead) -> str:
     return _clicks.DESTINATION
 
 
-def values_for(lead, campaign) -> dict:
+def values_for(lead, campaign, send=None) -> dict:
     campaign = campaign or {}
     return {
         'first_name': first_name(lead.get('dm_name')),
@@ -100,7 +106,7 @@ def values_for(lead, campaign) -> dict:
         # was added. Explicit beats positional: the copy can be reordered, can
         # carry any number of other links, and only this placeholder is
         # rewritten.
-        'sample_link': _sample_link(lead),
+        'sample_link': _sample_link(lead, send),
     }
 
 

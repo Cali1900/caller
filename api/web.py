@@ -34,7 +34,7 @@ from api import (archive as _archive_mod,
                  forecast as forecast_mod, funnel as funnel_mod,
                  digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
-                 prompts as prompts_mod, stages,
+                 prompts as prompts_mod, stages, drip as _drip_mod,
                  upload as upload_mod)
 from api.config import load_config
 
@@ -682,7 +682,20 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         'why_line': why_line,
         'tags': _tags_for(lead_id),
         'archive_reasons': _archive_mod.REASONS,
-        'clicks': clicks_mod.summary(lead['lead_id'])})
+        'clicks': clicks_mod.summary(lead['lead_id']),
+        # THE DRIP: which sequence, where in it, and what has actually gone.
+        'drip': (campaigns.get(lead['drip_campaign_id'])
+                 if lead.get('drip_campaign_id') else None),
+        'drip_steps': (_drip_mod.steps(lead['drip_campaign_id'])
+                       if lead.get('drip_campaign_id') else []),
+        'sends': _drip_mod.sends(lead['lead_id']),
+        'stop_reasons': _drip_mod.STOP_REASONS,
+        # ⚠️ DATA THAT SURVIVES A RETURN AND CANNOT BE SEEN IS THE SAME FAULT AS
+        # AN OUT-OF-DATE INVENTORY. archived_contacts holds what the send record
+        # said before an archive return cleared it - "we emailed this firm in
+        # September, it clicked twice and said no on the 8th" - and until now it
+        # had a reader and tests and no way to look at it.
+        'archived_contacts': _archive_mod.contacts(lead['lead_id'])})
 
 
 def _int_or_none(v):
@@ -1107,6 +1120,77 @@ def campaign_redirect():
     return RedirectResponse('/campaigns', status_code=303)
 
 
+@router.post('/leads/{lead_id}/drip/stop')
+def lead_drip_stop(lead_id: str, reason: str = Form('by_hand'),
+                   stopped_by: str = Form('operator')):
+    """
+    STOP ONE LEAD, not the whole drip.
+
+    This is the control the digest's "going out tomorrow" block points at. Reply
+    detection is by hand, so the case that matters is "this firm has answered
+    and I have not ticked it yet" - and the right response is to stop that one
+    lead, not to pause a sequence that is working for everyone else.
+    """
+    try:
+        ok = _drip_mod.stop(lead_id, reason, by=stopped_by)
+        msg = (f'Stopped the drip for this lead ({reason}).' if ok
+               else 'That lead is not on a drip.')
+    except ValueError as exc:
+        msg = f'REJECTED: {exc}'
+    return RedirectResponse(
+        f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+
+
+@router.post('/leads/{lead_id}/drip/assign')
+def lead_drip_assign(lead_id: str, drip_campaign_id: str = Form(...)):
+    """
+    Put a lead on a named drip by hand.
+
+    Needed when SEVERAL drips run: mark_emailed() auto-assigns only when there
+    is exactly one, because a picker for a list of one is a decision nobody
+    would make differently. With a choice, a person makes it here.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            ok = _drip_mod.enter(cur, lead_id, drip_campaign_id)
+    msg = ('Put on the drip.' if ok
+           else 'Already on a drip - stop it first.')
+    return RedirectResponse(
+        f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+
+
+@router.post('/campaign/{campaign_id}/steps')
+async def campaign_steps_save(request: Request, campaign_id: str):
+    """
+    Save the whole sequence in one act: add, remove, reorder, edit.
+
+    THE FORM POSTS THE SEQUENCE AS IT SHOULD BE, not a diff. Ordering is the
+    order of the rows; a row with no step_id is new; a step that is not posted is
+    soft-deleted. That is one atomic replace rather than four endpoints whose
+    combinations have to be reasoned about.
+    """
+    form = await request.form()
+    rows = []
+    i = 0
+    while f'subject_{i}' in form or f'body_{i}' in form:
+        if (form.get(f'delete_{i}') or '') != '1':
+            rows.append({'step_id': (form.get(f'step_id_{i}') or '').strip() or None,
+                         'delay_days': form.get(f'delay_{i}'),
+                         'subject': form.get(f'subject_{i}'),
+                         'body': form.get(f'body_{i}')})
+        i += 1
+    try:
+        saved = _drip_mod.save_steps(campaign_id, rows)
+        msg = f'Sequence saved - {len(saved)} step(s).'
+    except _drip_mod.BadSequence as exc:
+        # REFUSED WHOLE. A half-saved sequence is worse than none: the schedule
+        # would be computed from steps nobody approved.
+        msg = f'REJECTED: {exc}'
+    return RedirectResponse(
+        f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}#drip',
+        status_code=303)
+
+
 @router.get('/campaign/{campaign_id}', response_class=HTMLResponse)
 def campaign_page(request: Request, campaign_id: str, msg: str = ''):
     cfg = _cfg()
@@ -1129,6 +1213,17 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
         # only applies if another attempt follows it, so a four-rung ladder
         # under max attempts 4 has a fourth rung that is decoration.
         'retry_rows': RETRY_ROWS,
+        # THE SEQUENCE, and a live preview of each step rendered against the
+        # same sample lead the email-1 preview uses - so what you see is what
+        # drafts.render() will actually produce.
+        'drip_steps': _drip_mod.steps(campaign_id),
+        'step_previews': [
+            {'position': st['position'],
+             'subject': drafts_mod.render(st['subject'],
+                                          drafts_mod.values_for(pv_lead, camp)),
+             'body': drafts_mod.render(st['body'],
+                                       drafts_mod.values_for(pv_lead, camp))}
+            for st in _drip_mod.steps(campaign_id)],
         'reachable': {o: _rl.reachable(camp[f'retry_{o}'], camp['max_attempts'])
                       for o in _rl.COLUMNS},
         'hours_left': round(remaining / per_hour, 1) if per_hour else 0,

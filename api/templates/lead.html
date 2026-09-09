@@ -111,6 +111,93 @@
       </form>
     {% endif %}
 
+    <h2>The drip</h2>
+    {% if drip %}
+      <p class="sentbar"><b>{{ drip.name }}</b> &mdash;
+         {{ sends|length }} of {{ drip_steps|length + 1 }} email(s) sent.
+         {% if drip.is_running %}running{% else %}<b>stopped</b>{% endif %}.</p>
+      <form method="post" action="/leads/{{ lead.lead_id }}/drip/stop" class="toolbar">
+        <select name="reason">
+          {% for r in stop_reasons %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="ghost">Stop the drip for this lead</button>
+        <span class="dim">Stops <b>this lead only</b> &mdash; the sequence keeps
+          running for everyone else. Every stop records why.</span>
+      </form>
+    {% elif lead.emailed_at %}
+      <p class="dim">Not on a drip. Email 1 went out
+         {{ lead.emailed_at.strftime('%b %-d') }} and no sequence picked it up
+         &mdash; either none is running, or several are and nobody chose.</p>
+    {% else %}
+      <p class="dim">A lead joins a drip when <b>email 1</b> is sent. That is the
+         only way in.</p>
+    {% endif %}
+
+    {% if sends %}
+      <h2>Emails sent</h2>
+      <table>
+        <tr><th>#</th><th>step</th><th>subject</th><th>sent</th></tr>
+        {% for sd in sends %}
+        <tr>
+          <td>{{ sd.seq }}</td>
+          <td class="dim">{% if sd.position %}step {{ sd.position }}{% else %}email 1{% endif %}</td>
+          <td>{{ sd.subject or '&mdash;'|safe }}</td>
+          <td class="dim">{% if sd.sent_at %}{{ sd.sent_at.strftime('%Y-%m-%d %H:%M') }}
+              {% else %}<b>prepared, not sent</b>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      <p class="dim">Each send carries its <b>own</b> tracked link, so a click
+         attributes to the step that produced it. Click timing is measured from
+         <b>that</b> send &mdash; the schedule is measured from the first one.</p>
+    {% endif %}
+
+    {% if archived_contacts %}
+      <h2>Before it was returned</h2>
+      <p class="dim">What the send record said before an archive return cleared
+         it. History, never a gate &mdash; nothing reads this to decide whether
+         to dial or send.</p>
+      {% for a in archived_contacts %}
+        <div class="card" style="margin:8px 0;padding:10px">
+          <div class="kv">
+            <div>archived</div>
+            <div>{% if a.archived_at %}{{ a.archived_at.strftime('%b %-d, %Y') }}{% else %}?{% endif %}
+                 &mdash; <b>{{ a.archive_reason }}</b></div>
+          </div>
+          <div class="kv">
+            <div>returned</div>
+            <div class="dim">{{ a.returned_at.strftime('%b %-d, %Y') }}</div>
+          </div>
+          {% if a.dm_name or a.dm_email %}
+          <div class="kv">
+            <div>contact then</div>
+            <div>{{ a.dm_name or '?' }} &lt;{{ a.dm_email or 'no address' }}&gt;
+                 {% if a.dm_email_confirmed %}<span class="dim">(confirmed)</span>{% endif %}</div>
+          </div>
+          {% endif %}
+          {% if a.emailed_at %}
+          <div class="kv">
+            <div>emailed</div>
+            <div>{{ a.emailed_at.strftime('%b %-d, %Y') }}
+                 {% if a.emailed_by %}by {{ a.emailed_by }}{% endif %}
+                 &mdash; {{ a.click_count }} click{{ '' if a.click_count == 1 else 's' }}
+                 {% if a.first_click_minutes is not none %}
+                   <span class="dim">(first {{ a.first_click_minutes }}m after send)</span>
+                 {% endif %}</div>
+          </div>
+          {% endif %}
+          {% if a.replied_at %}
+          <div class="kv">
+            <div>replied</div>
+            <div>{{ a.replied_at.strftime('%b %-d, %Y') }}
+                 {% if a.replied_by %}<span class="dim">(recorded by {{ a.replied_by }})</span>{% endif %}
+                 {% if a.reply_note %}<br><i>&ldquo;{{ a.reply_note }}&rdquo;</i>{% endif %}</div>
+          </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% endif %}
+
     <h2>Archive</h2>
     {% if lead.status == 'archived' %}
       <p class="sentbar"><b>Resting.</b>

@@ -216,6 +216,52 @@ def build(cfg, date=None):
                  "Check score_attempts.last_error.")
         L.append("")
 
+    # ======================================================================
+    # GOING OUT TOMORROW - THE CHECKPOINT BEFORE THE BATCH
+    # ======================================================================
+    #
+    # ⚠️ THIS BLOCK IS A MITIGATION FOR A GATE THAT CANNOT FAIL CLOSED.
+    #
+    # Reply detection is MANUAL: Sean ticks a box and stages.record_reply()
+    # writes replied_at. So nothing in code can know a firm has answered until
+    # he does, and the window between a reply arriving and being ticked is real
+    # and cannot be closed without inbound ingest. A firm that answers on
+    # Tuesday and is ticked on Wednesday will receive a step that fell due
+    # Tuesday night.
+    #
+    # The drip therefore never sends silently into the future. Every send is
+    # named here, BY STEP AND BY FIRM, the evening before - so one lead can be
+    # stopped individually rather than pausing the whole drip. It turns an
+    # invisible race into a visible one.
+    #
+    # BY FIRM NAME, not a count. "6 sends tomorrow" is not actionable; "step 2
+    # to Whitfield Law" is.
+    try:
+        from api import drip as _drip
+        upcoming = _drip.upcoming(within_hours=24)
+    except Exception as exc:                      # never break the digest
+        upcoming = []
+        L.append(f"(could not read tomorrow's drip sends: {exc})")
+        L.append("")
+    if upcoming:
+        L.append("GOING OUT IN THE NEXT 24 HOURS")
+        L.append("-" * 52)
+        L.append("Reply detection is BY HAND, so this is your checkpoint. If a")
+        L.append("firm below has answered and you have not ticked it yet, stop")
+        L.append("that one on its lead page - you do not have to pause the drip.")
+        L.append("")
+        by_step = {}
+        for r in upcoming:
+            by_step.setdefault((r['position'], r['drip_name']), []).append(r)
+        for (pos, dname), rows in sorted(by_step.items()):
+            L.append(f"  step {pos} ({dname}) - {len(rows)} firm"
+                     f"{'s' if len(rows) != 1 else ''}")
+            for r in rows:
+                when = r['due_at'].strftime('%a %H:%M') if r['due_at'] else '?'
+                L.append(f"      {when}  {r['company'] or '(no name)'}"
+                         f"  <{r['dm_email'] or 'no address'}>")
+        L.append("")
+
     total = float(st['call_cents'] or 0) + float(st['score_cents'] or 0)
     L.append(f"cost: ${total/100:.2f}  "
              f"(calls ${float(st['call_cents'] or 0)/100:.2f} + "

@@ -153,6 +153,42 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 raise NotAtL2(
                     f"lead is at {stage_label(cur_row)}, not L2 - a send is "
                     f"only owed once a confirmed email has advanced it")
+            # STAMP THE SEND, and enter the drip, in THIS transaction.
+            #
+            # email 1's email_sends row already exists (prepared when the draft
+            # was rendered - see clicks.token_for), so this marks it sent rather
+            # than creating it. If no draft was ever generated there is nothing
+            # to stamp and one is created now, so a hand-sent email is still a
+            # recorded send with a token.
+            from api import drip as _drip
+            cur.execute("""UPDATE email_sends SET sent_at = %s, sent_by = %s
+                            WHERE lead_id = %s AND seq = 1 AND sent_at IS NULL
+                        RETURNING send_id""", (when, emailed_by, lead_id))
+            if cur.fetchone() is None:
+                cur.execute("""SELECT 1 FROM email_sends
+                                WHERE lead_id = %s AND seq = 1""", (lead_id,))
+                if cur.fetchone() is None:
+                    _drip.record_send(cur, lead_id, None, 1,
+                                      row.get('dm_email') or '', None,
+                                      emailed_by)
+                    cur.execute("""UPDATE email_sends SET sent_at = %s
+                                    WHERE lead_id = %s AND seq = 1""",
+                                (when, lead_id))
+
+            # ENTER THE DRIP. Sending email 1 is the ONLY way in, and it commits
+            # with the emailed_at stamp: a lead with emailed_at and no drip, or
+            # a drip and no emailed_at, is a state the schedule cannot be
+            # computed from. Auto-assigned when exactly ONE drip is running -
+            # no picker for a list of one. With several, a person chooses on the
+            # lead, and drip_campaign_id stays NULL until they do.
+            #
+            # leads.campaign_id IS NOT TOUCHED - it stays the CALL campaign that
+            # sourced the lead, because it is the daily cap's counting key and
+            # the funnel's attribution key. See migration 036.
+            only = _drip.only_drip()
+            if only:
+                _drip.enter(cur, lead_id, only['campaign_id'])
+
             # The pipeline stage moves with the send, so the forecast reads
             # a real status instead of deriving one.
             from api import pipeline
