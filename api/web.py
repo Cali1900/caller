@@ -1267,8 +1267,14 @@ async def campaign_step_preview(campaign_id: str, request: Request):
     if camp is None:
         return JSONResponse({'error': 'no such campaign'}, status_code=404)
     form = await request.form()
-    lead = (drafts_mod.lead_for_preview(form.get('lead_id'))
-            or drafts_mod.preview_lead(campaign_id)[0])
+    # 'sample' is an explicit pick, and an unknown/absent id falls back to the
+    # SAMPLE rather than to some arbitrary lead - a preview must always work,
+    # and it must always say whose data it is.
+    lead = drafts_mod.lead_for_preview(form.get('lead_id'))
+    real = lead is not None and lead.get('lead_id') is not None
+    if lead is None:
+        lead = dict(drafts_mod.SAMPLE_LEAD)
+        real = False
     vals = drafts_mod.values_for(lead, camp)
 
     import re as _re
@@ -1288,7 +1294,8 @@ async def campaign_step_preview(campaign_id: str, request: Request):
                   'chars': len(body), 'words': len(body.split())}
     return JSONResponse({
         'steps': out,
-        'lead': {'company': lead.get('company'), 'name': lead.get('dm_name')}})
+        'lead': {'company': lead.get('company'), 'name': lead.get('dm_name'),
+                 'real': real}})
 
 
 def _step_days(value):
@@ -1414,6 +1421,8 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
             for st in _drip_mod.steps(campaign_id)},
         'source_split': _drip_mod.source_split(campaign_id),
         'preview_candidates': drafts_mod.preview_candidates(campaign_id),
+        'sample_id': drafts_mod.SAMPLE_ID,
+        'sample_lead': drafts_mod.SAMPLE_LEAD,
         'placeholders': drafts_mod.PLACEHOLDERS,
         'reachable': {o: _rl.reachable(camp[f'retry_{o}'], camp['max_attempts'])
                       for o in _rl.COLUMNS},

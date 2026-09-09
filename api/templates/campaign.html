@@ -213,12 +213,23 @@
     <div class="preview-head">
       <label class="dim">Preview against
         <select name="lead_id" id="pv-lead">
+          {# THE EXAMPLE IS AN OPTION, not a last resort - and it is FIRST when
+             there is nothing better, so the preview works before anyone is on
+             the drip, which is exactly when the copy is being written. #}
+          {% if not preview_candidates %}
+          <option value="{{ sample_id }}" selected>{{ sample_lead.company }} &mdash;
+            {{ sample_lead.dm_name }} (example, not a real lead)</option>
+          {% endif %}
           {% for l in preview_candidates %}
           <option value="{{ l.lead_id }}">{{ l.company }}{% if l.dm_name %} &mdash; {{ l.dm_name }}{% endif %}</option>
           {% endfor %}
+          {% if preview_candidates %}
+          <option value="{{ sample_id }}">{{ sample_lead.company }} &mdash;
+            {{ sample_lead.dm_name }} (example, not a real lead)</option>
+          {% endif %}
         </select>
       </label>
-      <span class="dim">A real lead, rendered by the same <code>render()</code>
+      <span class="dim" id="pv-who">Rendered by the same <code>render()</code>
         the real sends use.</span>
     </div>
 
@@ -478,6 +489,17 @@
       var c = form.querySelector('[data-count="' + i + '"]');
       if (c) c.textContent = d.chars + ' characters · ' + d.words + ' words';
     });
+    /* SAY WHOSE DATA THIS IS. An example that looks like a real firm is worse
+       than no preview if nobody can tell which it is. */
+    var who = document.getElementById('pv-who');
+    if (who && data.lead) {
+      who.textContent = data.lead.real
+        ? 'Rendered against ' + (data.lead.name ? data.lead.name + ' at ' : '')
+          + data.lead.company + ' — a real lead.'
+        : '⚠ EXAMPLE DATA — ' + data.lead.company + ' is not a real firm. '
+          + 'Pick a lead above once one is on this drip.';
+      who.classList.toggle('warn', !data.lead.real);
+    }
   }
 
   function refresh() {

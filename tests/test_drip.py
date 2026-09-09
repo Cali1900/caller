@@ -1212,3 +1212,99 @@ def test_the_editor_says_who_step_1_governs(db, dripc, client):
     assert 'name="subject_0"' in r.text and 'name="body_0"' in r.text, \
         'step 1 must stay editable - imported leads get added later'
     assert 'name="day1_0"' in r.text, 'step 1 lost its timing control'
+
+
+# ==========================================================================
+# THE PREVIEW MUST WORK BEFORE ANYONE IS ON THE DRIP
+#
+# Which is exactly when the copy is being written. It used to require
+# dm_email IS NOT NULL, and on a real database that meant 1,085 of 1,087 leads
+# were ineligible - a call list arrives as company + phone - so the picker
+# offered one option: the operator's own test lead.
+# ==========================================================================
+
+def test_a_company_name_is_enough_to_preview_against(db, dripc):
+    """
+    An address is not needed to judge COPY. {{company}} and {{first_name}} are
+    what make it read naturally, and a real firm name does that in a way
+    "Example Firm LLC" cannot.
+    """
+    from api import drafts
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO leads (company, phone_e164, timezone)
+                           VALUES ('Bergman & Co','+15553337001',
+                                   'America/Los_Angeles')""")
+    got = drafts.preview_candidates(dripc['campaign_id'])
+    assert any(c['company'] == 'Bergman & Co' for c in got), \
+        'a lead with a company and no email cannot be previewed against'
+
+
+def test_the_example_is_a_pickable_option(db, dripc, client):
+    """Not a silent last resort. It is in the dropdown, marked as an example, so
+    nobody has to wonder whose data they are reading."""
+    from api import drafts
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert f'value="{drafts.SAMPLE_ID}"' in r.text, 'the example is not offered'
+    assert 'not a real lead' in r.text, 'the example is not marked as one'
+    assert drafts.SAMPLE_LEAD['company'] in r.text
+
+
+def test_the_preview_works_with_no_leads_at_all(db, dripc, client):
+    """
+    ⚠️ THE CASE THAT WAS BROKEN. Writing the copy happens BEFORE anyone is on the
+    drip, so a preview that needs a lead is unavailable exactly when it is needed.
+    """
+    from api import drafts
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM email_clicks')
+            cur.execute('DELETE FROM email_sends')
+            cur.execute('DELETE FROM leads')
+    assert drafts.preview_candidates(dripc['campaign_id']) == []
+
+    # The page still offers a subject, and it is the example, pre-selected.
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert r.status_code == 200
+    sel = r.text[r.text.index('id="pv-lead"'):]
+    sel = sel[:sel.index('</select>')]
+    assert f'value="{drafts.SAMPLE_ID}"' in sel and 'selected' in sel, \
+        'with no leads the example must be the pre-selected option'
+
+    # And the endpoint renders against it.
+    pr = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
+                     data={'subject_0': 'Hi {{first_name}}',
+                           'body_0': 'At {{company}}.',
+                           'lead_id': drafts.SAMPLE_ID})
+    j = pr.json()
+    assert j['lead']['real'] is False, 'the example must not report as a real lead'
+    assert j['steps']['0']['subject'] == 'Hi %s' % \
+        drafts.first_name(drafts.SAMPLE_LEAD['dm_name'])
+    assert drafts.SAMPLE_LEAD['company'] in j['steps']['0']['body']
+
+
+def test_an_unknown_lead_id_falls_back_to_the_example_not_a_stranger(db, dripc, client):
+    """
+    A stale id in the dropdown must not silently render against whichever lead
+    happens to come first - that is somebody else's data appearing in a preview
+    with nothing saying so.
+    """
+    import uuid
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
+                    data={'subject_0': 's', 'body_0': 'At {{company}}.',
+                          'lead_id': str(uuid.uuid4())})
+    j = r.json()
+    assert j['lead']['real'] is False
+    from api import drafts
+    assert drafts.SAMPLE_LEAD['company'] in j['steps']['0']['body']
+
+
+def test_the_endpoint_says_whether_the_subject_was_real(db, dripc, client):
+    """The page prints this. An example that looks like a real firm is worse than
+    no preview if nobody can tell which it is."""
+    lead = _lead(db, days_ago=1, phone_e164='+15553337002',
+                 company='Whitfield Law', dm_name='Timothy Ross')
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
+                    data={'subject_0': 's', 'body_0': 'b', 'lead_id': str(lead)})
+    assert r.json()['lead'] == {'company': 'Whitfield Law',
+                               'name': 'Timothy Ross', 'real': True}

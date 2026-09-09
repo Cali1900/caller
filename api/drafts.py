@@ -276,6 +276,11 @@ def generate_pending(limit: int = 25) -> dict:
     return {'drafted': made, 'failed': failed}
 
 
+# THE SYNTHETIC PREVIEW SUBJECT, offered in the picker rather than only used as
+# a last resort. Obviously fictional (a .example domain, which can never resolve)
+# but realistic enough to judge copy against.
+SAMPLE_ID = 'sample'
+
 SAMPLE_LEAD = {
     'lead_id': None, 'dm_name': 'Sara Whitfield', 'company': 'Whitfield Injury Law',
     'gatekeeper_name': 'Denise', 'dm_email': 'sara@whitfieldinjury.example',
@@ -285,35 +290,47 @@ SAMPLE_LEAD = {
 
 def preview_candidates(campaign_id=None, limit: int = 30):
     """
-    Real leads the operator can render a step against, newest contact first.
+    Leads the operator can render a step against, best first.
 
-    A DROPDOWN, not one automatic choice: '{{first_name}}' tells you nothing
-    about whether the copy reads well, and neither does one lead if that lead
-    happens to have a short firm name and no gatekeeper. Seeing it against
-    several real firms is how you catch copy that only works for one.
+    ⚠️ A COMPANY NAME IS ENOUGH. This used to require dm_email IS NOT NULL, which
+    on a real database is far too strict: a call list arrives as company + phone,
+    so 1,085 of 1,087 leads had no address yet and the picker offered exactly one
+    option - the operator's own test lead. That is not a preview, it is a
+    reminder that nothing is set up.
 
-    Prefers leads ON this campaign (a drip's own leads), then any lead with a
-    contact name, then anything with an email. Only leads with a NAME are
-    offered where possible, because the with-name variant is the one most copy
-    is written for.
+    An address is not needed to judge COPY. {{company}} and {{first_name}} are
+    what make it read naturally or not, and a real firm name does that in a way
+    "Example Firm LLC" cannot - which is the whole reason this is a picker.
+
+    Ordered so the most useful subjects come first: leads on this drip, then on
+    this campaign, then anything with a contact NAME, then anything with an
+    address, then most recently touched.
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT lead_id, company, dm_name, dm_email
                              FROM leads
-                            WHERE dm_email IS NOT NULL
+                            WHERE company IS NOT NULL AND company <> ''
                             ORDER BY (drip_campaign_id = %s) DESC NULLS LAST,
                                      (campaign_id = %s) DESC NULLS LAST,
-                                     (dm_name IS NOT NULL) DESC,
+                                     (dm_name IS NOT NULL AND dm_name <> '') DESC,
+                                     (dm_email IS NOT NULL) DESC,
                                      updated_at DESC
-                            LIMIT %s""",
-                        (campaign_id, campaign_id, limit))
+                            LIMIT %s""", (campaign_id, campaign_id, limit))
             return cur.fetchall()
 
 
 def lead_for_preview(lead_id):
-    """One named lead, or None. Used when the operator picks from the
-    dropdown rather than taking the default."""
+    """
+    One named lead, the SAMPLE, or None.
+
+    'sample' is an explicit choice, not a fallback: the picker offers it as an
+    option so the preview works before anyone is on the drip - which is exactly
+    when the copy is being written. It is labelled on screen as an example, so
+    nobody has to wonder whose data they are looking at.
+    """
+    if lead_id == SAMPLE_ID:
+        return dict(SAMPLE_LEAD)
     if not lead_id:
         return None
     with db.get_conn() as conn:
