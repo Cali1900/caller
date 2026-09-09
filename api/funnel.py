@@ -34,9 +34,21 @@ STEPS = (
 )
 
 
-def _where(campaign_id, agent_version, date_from, date_to, status=''):
-    """Filters on the LEAD COHORT, not on individual events."""
+def _where(campaign_id, agent_version, date_from, date_to, status='',
+           lead_source=''):
+    """
+    Filters on the LEAD COHORT, not on individual events.
+
+    lead_source is the comparison worth having: a call-sourced lead costs a
+    call and arrives with a confirmed address and a referral line, an imported
+    one costs nothing and arrives with neither. Whether that difference earns
+    what it costs is a question about conversion, and it is answerable here
+    rather than by intuition.
+    """
     where, params = ['1=1'], {}
+    if lead_source:
+        where.append('l.lead_source = %(src)s')
+        params['src'] = lead_source
     if campaign_id:
         where.append('l.campaign_id = %(cid)s')
         params['cid'] = campaign_id
@@ -59,8 +71,10 @@ def _where(campaign_id, agent_version, date_from, date_to, status=''):
 
 
 def counts(campaign_id='', agent_version='', date_from='', date_to='',
+           lead_source='',
            status=''):
-    where, params = _where(campaign_id, agent_version, date_from, date_to, status)
+    where, params = _where(campaign_id, agent_version, date_from, date_to,
+                           status, lead_source)
     sql = f"""
         SELECT
           count(*)                                                  AS in_queue,

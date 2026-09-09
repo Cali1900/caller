@@ -29,6 +29,30 @@
   <div class="card">
     <h2>Contact</h2>
     <form method="post" action="/leads/{{ lead.lead_id }}/edit">
+      {# AN EMAIL-ONLY LEAD HAS NO NUMBER. Adding one makes it dialable, and a
+         TIMEZONE IS REQUIRED WITH IT: the calling window is evaluated in the
+         called party's local time, so a phone with no timezone matches no window
+         and the lead would look dialable and never be dialed. The handler
+         refuses the pair half-filled. #}
+      {% if not lead.phone_e164 %}
+      <div class="banner warn" style="margin-bottom:10px">
+        <b>No phone number.</b> This lead arrived as an email-only import, so it
+        is <b>not dialable</b>. Add a number <b>and</b> a timezone together to
+        make it one &mdash; its source stays <code>{{ lead.lead_source }}</code>,
+        which records where it came from, not what has happened since.
+      </div>
+      {% endif %}
+      <div class="field"><label for="ph">Phone</label>
+        <input id="ph" name="phone_e164" value="{{ lead.phone_e164 or '' }}"
+               placeholder="+14245551212">
+        {% if not lead.phone_e164 %}<span class="dim">E.164. Leave blank to keep
+          this an email-only lead.</span>{% endif %}</div>
+      <div class="field"><label for="tzn">Timezone</label>
+        <input id="tzn" name="timezone" value="{{ lead.timezone or '' }}"
+               placeholder="America/Los_Angeles">
+        <span class="dim">IANA region/city, never an offset &mdash; an offset is
+          wrong twice a year and the error is silent for weeks after each DST
+          change. <b>Required if a phone is set.</b></span></div>
       <div class="kv">
         <div>phone</div><div class="dim">{{ lead.phone_e164 }}</div>
         <div>timezone</div><div class="dim">{{ lead.timezone }} &mdash; local {{ local_time }}</div>

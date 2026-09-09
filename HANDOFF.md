@@ -14,8 +14,8 @@ Last updated 2026-09-09. Every number in the table below was read from
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260909_037_prepared_sends.sql` |
-| Tests | 647 passed, 1 skipped |
+| Last migration | `20260909_039_timezone_may_be_absent.sql` |
+| Tests | 675 passed, 1 skipped |
 | Break pass | **103 definitions** (97–104 added for the drip). Full pass GREEN across all 103 at 2026-09-09T17:23Z, suite 632. The FIRST run of that pass FAILED — break 100 reported GREEN because a drip test was passing with zero clicks; see masked-guard row 12 in README.md |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
@@ -199,7 +199,7 @@ api/
   why.py         "why is it here", assembled from existing state
   funnel.py      / forecast.py / volume.py  the numbers screens
 migrations/      forward-only, applied by scripts/migrate.sh
-scripts/breaks/  103 break definitions, one per guard
+scripts/breaks/  111 break definitions, one per guard
 ```
 
 ## Running it
@@ -233,6 +233,125 @@ version. It now reads the lead's own `campaign_id` from the database inside the
 transaction, with no fallback to `running()`.
 
 ---
+
+## Email-only leads: a list of firms, no calls involved
+
+`upload_emails()` takes a CSV of **company + email**. `website` and
+`demands_per_month` are optional and both earn their place: the website is what
+autosend's DOMAIN check compares the address against — the one exclusion NOT
+relaxed for an import — and the volume figure is what the forecast reads.
+
+The operator says which KIND of list it is on `/leads`. **Sniffing the headers
+would mean a file missing its phone column by mistake silently imports as
+email-only**, and 500 leads that should be dialed sit undialable.
+
+### ⚠️ THIS REMOVED A STRUCTURAL GUARANTEE
+
+`leads.phone_e164` was NOT NULL, so a lead without a number **could not exist**
+and therefore could not be dialed. Migration 038 made it nullable. From that
+point only CODE stands between a phoneless lead and a call attempt:
+
+| | |
+|---|---|
+| `dialer.PHONE_REQUIRED` | `AND l.phone_e164 IS NOT NULL` — never a CANDIDATE. Silent, which is right for a filter. Break 106 |
+| `guards.assert_has_phone` | refuses **loudly** with a `dial_audit` row if a phoneless lead reaches the dial path anyway. Break 107 |
+
+Belt and braces, the same shape as suppression being in the join *and* re-checked
+in the dial transaction. In `unrestricted` mode a NULL would otherwise reach
+`retell.create_phone_call(to_number=None)` and read as a Retell problem rather
+than a bad lead.
+
+**⚠️ NEITHER IS KEYED ON `lead_source`. PHONE PRESENCE IS THE GATE; PROVENANCE IS
+ONLY A RECORD.** An imported lead that turns out to be worth calling gets a
+number by hand and becomes dialable, staying `lead_source='import'`. Filtering on
+the source instead would make that case impossible and would *look* like a
+tightening — `test_an_imported_lead_with_a_phone_added_by_hand_dials` exists to
+stop exactly that.
+
+### A phone and a timezone are saved together or not at all
+
+`PREFERENCE_WINDOW` joins on `l.timezone`, so a NULL there matches **no window**:
+the lead would look dialable — a number, on a campaign, queued — and never be
+dialed, with nothing saying why. **That is the archive bug's exact shape**, so the
+contact save refuses the pair half-filled. Break 112.
+
+Migration 039 relaxed the IANA trigger to allow **absent** while still refusing
+**wrong**: an offset like `-05:00` is still rejected, because Postgres accepts it
+in `AT TIME ZONE` and the resulting error is silent for weeks after each DST
+change.
+
+### `lead_source`, and why not `dm_email_confirmed`
+
+autosend's `UNCONFIRMED` ("not confirmed by the agent") and `NO_NAME` exclusions
+substitute for a human having verified the contact. For a call-sourced lead the
+evidence is a spellback on a recorded call; for an import it is a person choosing
+to upload the file — **different in kind**, asserted once for a batch.
+
+Setting `dm_email_confirmed = true` on import would fake the call-sourced
+evidence and make that flag mean two different things depending on origin, with
+the gate unable to tell them apart. One fact, two homes. So the exclusions are
+**source-aware** and the call path is byte-for-byte as strict as it was — break
+111 asserts that, by treating every lead as imported and watching the call-path
+test go red.
+
+**NOT relaxed for an import:** the domain check, the do-not-send list,
+`replied_at`, `needs_human`, archived, and the dev allowlist.
+
+`lead_source` is also a funnel filter, so call-sourced and imported can be
+compared — whether the confirmed email and the referral line earn what they cost.
+It never changes: a lead that arrived by import and later gets a phone stays
+`import`, because the record is where it came from, not what has happened since.
+
+### Step 1 of an imported lead IS email 1
+
+A call-sourced lead reaches a drip by having email 1 sent, so `emailed_at` is
+already stamped. An imported lead is added **directly** — there is no email 1
+before the sequence.
+
+So a lead on a drip with **no `emailed_at`** has step 1 due immediately, and
+sending it stamps `emailed_at` through `stages.mark_emailed()` — the same
+write-once transition the button and the sender use, not a second implementation.
+From that instant it is indistinguishable from a call-sourced lead.
+
+**ONE ANCHOR, NOT TWO.** The alternative was a `sequence_started_at` column, i.e.
+two columns that must agree forever; `emailed_at` already means "when the
+sequence started".
+
+⚠️ **THE MIRROR CASE WAS A REAL BUG.** A call-sourced lead's email 1 is recorded
+with `step_id NULL` (no drip existed when it went), and `ALREADY_SENT_STOP`
+matches on `step_id` — so the drip's step 1 at delay 0 was unsent and due
+**immediately after email 1**. The firm would get the same opener twice, minutes
+apart. `enter()` now links email 1 to step 1, so both paths agree that step 1
+means "the first email". Break 108. It only surfaced because the import forced
+the question of what step 1 means when there is no call.
+
+### `default_drip_id`: the call campaign chooses its sequence
+
+⚠️ **WITHOUT IT, A SECOND DRIP SILENTLY STOPS THE FIRST'S FOLLOW-UPS.**
+`only_drip()` assigns only when exactly ONE drip runs, so with two — a
+call-sourced sequence and an imported one, for any reason — every call-sourced
+lead that got email 1 joined **no drip at all**. Email 1 out, lead at `emailed`,
+nothing following up, and nothing saying so until somebody opened that lead.
+
+A campaign already owns email 1's copy, so owning what **follows** it is the same
+shape rather than a new concept. `only_drip()` is now a fallback for the
+single-drip case. A default pointing at a *stopped* drip routes **nowhere** rather
+than falling back — falling back is how a lead lands on the wrong copy, and the
+call-sourced opener ("your front desk pointed me your way") is false for an
+imported lead. Break 109.
+
+**The safety net for whatever that does not cover:** `/today`'s needs-you queue
+surfaces **"emailed, on no drip — the sequence stalled"**. Break 110. Replied,
+archived and terminal leads are excluded: those stopped on purpose.
+
+### One more thing the partial index broke
+
+Making `leads_phone_uniq` partial (`WHERE phone_e164 IS NOT NULL`) meant
+`ON CONFLICT (phone_e164)` no longer had an arbiter — Postgres will not use a
+partial unique index unless the statement repeats its predicate. **Twelve tests
+went red immediately, all on the CALL path**, not the new one. Fixed in
+`upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
+sites target `suppression`, whose constraint was untouched.
 
 ## The drip
 

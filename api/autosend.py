@@ -104,12 +104,33 @@ def eligibility(lead, campaign, validate=None, drip_step: bool = False) -> dict:
         if lead.get('status') == 'human_review' or lead.get('needs_human'):
             reasons.append(HoldReason.NEEDS_HUMAN)
 
+        # 1 and 2 are SOURCE-AWARE, and this is the only difference between an
+        # imported lead and a call-sourced one.
+        #
+        # Both exclusions substitute for a human having verified the contact.
+        # For a CALL-sourced lead the evidence is a spellback on a recorded
+        # call, and nothing below changes for it - byte for byte, asserted by
+        # test_the_call_path_is_unchanged_by_source_awareness.
+        #
+        # For an IMPORTED lead the evidence is different in kind: a person chose
+        # to upload the file, asserted once for a batch rather than per lead.
+        # That is why lead_source exists instead of setting
+        # dm_email_confirmed = true on import - which would make that flag mean
+        # two different things depending on origin, with the gate unable to tell
+        # them apart. One fact, two homes.
+        #
+        # WHAT IS **NOT** RELAXED FOR AN IMPORT: the domain check below, the
+        # do-not-send list, replied_at, needs_human, archived, and the dev
+        # allowlist. An imported address still has to look like it belongs to
+        # the firm.
+        imported = lead.get('lead_source') == 'import'
+
         # 1
-        if lead.get('dm_email_confirmed') is not True:
+        if not imported and lead.get('dm_email_confirmed') is not True:
             reasons.append(HoldReason.UNCONFIRMED)
 
         # 2
-        if not (lead.get('dm_name') or '').strip():
+        if not imported and not (lead.get('dm_name') or '').strip():
             reasons.append(HoldReason.NO_NAME)
 
         email = (lead.get('dm_email') or '').strip()

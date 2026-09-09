@@ -107,9 +107,32 @@ def _header(conn, cfg):
 # A lead "needs you" when a PERSON has to act: an unconfirmed email that would
 # burn a sending domain, a call the scorer flagged, or a verbal demo yes with
 # no invite sent (phase 6 - the row already counts).
-_NEEDS_YOU_PREDICATE = """
+# ⚠️ 'EMAILED AND ON NO DRIP' IS THE SAFETY NET FOR A STALLED SEQUENCE.
+#
+# drip.drip_for() routes a lead to its call campaign's default_drip_id, falling
+# back to only_drip(). When neither answers - no drip running, several running
+# and no default set, or a default pointing at a stopped one - email 1 goes out
+# and NOTHING FOLLOWS UP. There is no error and no failed send: the lead simply
+# sits at 'emailed' forever.
+#
+# It used to be visible only by opening that lead, which means finding out one
+# firm at a time. A lead that has stopped and cannot say so is the failure this
+# whole system is built to avoid, so it surfaces here.
+#
+# Excludes replied/archived/terminal: those have stopped ON PURPOSE.
+_STALLED_AFTER_EMAIL = """
+    (l.emailed_at IS NOT NULL
+     AND l.drip_campaign_id IS NULL
+     AND l.replied_at IS NULL
+     AND l.status NOT IN ('archived','dnc','won','lost','bad_email',
+                          'demo_booked','lost_no_response'))
+"""
+
+_NEEDS_YOU_PREDICATE = f"""
     (l.status IN ('human_review', 'demo_pending')
-     OR (l.dm_email IS NOT NULL AND l.dm_email_confirmed IS NOT TRUE)
+     OR (l.dm_email IS NOT NULL AND l.dm_email_confirmed IS NOT TRUE
+         AND l.lead_source <> 'import')
+     OR {_STALLED_AFTER_EMAIL.strip()}
      OR EXISTS (SELECT 1 FROM call_scores s2
                  JOIN calls c2 ON c2.call_id = s2.call_id
                 WHERE c2.lead_id = l.lead_id AND s2.needs_human))
@@ -713,13 +736,55 @@ def _int_or_none(v):
 @router.post('/leads/{lead_id}/edit')
 def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
               dm_email: str = Form(''), dm_email_confirmed: str = Form(''),
-              demands_per_month: str = Form(''), notes: str = Form('')):
-    """Fix a wrong email. Every edit lands on the timeline."""
+              demands_per_month: str = Form(''), notes: str = Form(''),
+              phone_e164: str = Form(''), timezone: str = Form('')):
+    """
+    Fix a wrong email, or give an email-only lead a number. Every edit lands on
+    the timeline.
+
+    ⚠️ A PHONE AND A TIMEZONE ARE SAVED TOGETHER OR NOT AT ALL.
+
+    An imported lead has neither. Adding just the number makes it LOOK dialable
+    - a phone, on a campaign, queued - while windows.PREFERENCE_WINDOW joins on
+    l.timezone, so a NULL there matches no window and the lead is silently
+    excluded forever with nothing saying why.
+
+    That is the archive bug's exact shape: a row that reads as workable and is
+    structurally unreachable. So it REFUSES rather than saving half of what is
+    needed, and says which half is missing.
+    """
     confirmed = {'true': True, 'false': False}.get(dm_email_confirmed, None)
+    phone_e164, timezone = phone_e164.strip(), timezone.strip()
+    if phone_e164 and not timezone:
+        msg = ('REJECTED: a phone needs a timezone too. The calling window is '
+               'evaluated in the CALLED PARTY\'s local time, so a lead with a '
+               'number and no timezone matches no window - it would look '
+               'dialable and never be dialed, with nothing saying why.')
+        return RedirectResponse(
+            f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT dm_email FROM leads WHERE lead_id = %s', (lead_id,))
+            cur.execute('SELECT dm_email, phone_e164 FROM leads '
+                        'WHERE lead_id = %s', (lead_id,))
             prev = cur.fetchone()
+            if phone_e164:
+                # NULLIF keeps a blank from wiping an existing number: this form
+                # is also used to edit a call-sourced lead, and an empty box
+                # there means "unchanged", not "remove the phone".
+                cur.execute(
+                    """UPDATE leads SET phone_e164 = %s, timezone = %s,
+                              tz_source = 'hand', updated_at = now()
+                        WHERE lead_id = %s""",
+                    (phone_e164, timezone, lead_id))
+                if not (prev or {}).get('phone_e164'):
+                    cur.execute(
+                        """INSERT INTO activity (lead_id, kind, summary, detail)
+                           VALUES (%s,'note','phone added by hand',%s)""",
+                        (lead_id,
+                         f'{phone_e164} ({timezone}). This lead arrived without '
+                         f'a number; it is now dialable. Its lead_source is '
+                         f'unchanged - that records where it came from, not '
+                         f'what has happened to it since.'))
             cur.execute(
                 """UPDATE leads SET dm_name = NULLIF(%s,''), dm_title = NULLIF(%s,''),
                           dm_email = NULLIF(%s,''), dm_email_confirmed = %s,
@@ -1492,7 +1557,15 @@ def today_page(request: Request, sent: str = ''):
                 SELECT l.lead_id, l.company,
                        CASE WHEN l.status = 'demo_pending' THEN 'demo pending'
                             WHEN l.status = 'human_review' THEN 'human review'
-                            WHEN l.dm_email IS NOT NULL AND l.dm_email_confirmed IS NOT TRUE
+                            -- NAMED FIRST among the email cases, because it is
+                            -- the one nothing else would ever tell you about.
+                            WHEN l.emailed_at IS NOT NULL
+                                 AND l.drip_campaign_id IS NULL
+                                 AND l.replied_at IS NULL
+                                 THEN 'emailed, on no drip - the sequence stalled'
+                            WHEN l.dm_email IS NOT NULL
+                                 AND l.dm_email_confirmed IS NOT TRUE
+                                 AND l.lead_source <> 'import'
                                  THEN 'email unconfirmed'
                             ELSE 'flagged call' END AS why,
                        (SELECT s.their_words FROM call_scores s

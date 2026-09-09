@@ -10,6 +10,7 @@ remove exactly one and watch exactly one test go red:
 
 SELECTION (a named SQL fragment; removing one is a single visible edit):
 
+    PHONE_REQUIRED              an email-only lead has no number to dial
     QUEUE_MEMBERSHIP            pool_status='active' - queued
     CAMPAIGN_MEMBERSHIP         only the RUNNING campaign's leads dial
     STAGE_DIALABLE              L1 only. A lead we owe an email is not called
@@ -23,6 +24,7 @@ BEFORE THE DIAL (re-checked in the SAME transaction as the dial):
     assert_not_suppressed       re-check, for a number suppressed mid-batch
     assert_campaign_running     exactly one campaign runs; none by default
     assert_under_daily_cap      the CAMPAIGN's new-leads-per-day cap
+    assert_has_phone            refuses LOUDLY if a phoneless lead got this far
     assert_dialable             the allowlist
 
 ⚠️ THIS LIST IS LOAD-BEARING - keep it in step with the code. It previously
@@ -39,7 +41,8 @@ import time
 from api import campaigns, db, retell, windows
 from api.config import load_config
 from api.guards import (DialRefused, assert_campaign_running, assert_dialable,
-                        assert_not_suppressed, assert_under_daily_cap)
+                        assert_has_phone, assert_not_suppressed,
+                        assert_under_daily_cap)
 
 # A suppressed number must never be a CANDIDATE, not merely never dialed.
 SUPPRESSION_JOIN = (
@@ -61,6 +64,21 @@ SUPPRESSION_JOIN = (
 # a named configuration with its own prompt and leads, so a follow-up IS another
 # campaign - assign the leads and start it deliberately.
 STAGE_DIALABLE = 'AND NOT l.has_confirmed_email'
+
+# A LEAD WITH NO NUMBER IS NOT A CANDIDATE.
+#
+# ⚠️ THIS REPLACES A SCHEMA GUARANTEE. phone_e164 was NOT NULL until migration
+# 038; email-only leads made it nullable, so what used to be impossible is now
+# merely filtered. Excluded here SILENTLY, which is right for a filter, and
+# refused LOUDLY by guards.assert_has_phone if anything ever reaches the dial
+# path anyway - the same belt-and-braces as suppression.
+#
+# NOT keyed on lead_source. PROVENANCE IS NOT THE GATE: an imported lead that
+# turns out to be worth calling gets a number by hand and becomes dialable,
+# staying lead_source='import' as the record of where it came from. Filtering on
+# the source instead would make that case impossible and is the obvious wrong
+# turn here - see test_an_imported_lead_with_a_phone_added_by_hand_dials.
+PHONE_REQUIRED = 'AND l.phone_e164 IS NOT NULL'
 
 # A REPLY STOPS THE FOLLOW-UP DEAD. Nothing sets replied_at yet - the coming
 # sequencer from demandcounselor.com owns reply detection - but the guard
@@ -91,6 +109,7 @@ SELECT_DUE = """
        {campaign}
        AND l.status IN ('new', 'callback', 'no_answer', 'queued')
        AND l.next_attempt_at <= now()
+       {phone_required}
        {stage_dialable}
        {replied_guard}
        {suppression}
@@ -125,6 +144,7 @@ def _build_select():
     return SELECT_DUE.format(
         queue=QUEUE_MEMBERSHIP,
         campaign=CAMPAIGN_MEMBERSHIP,
+        phone_required=PHONE_REQUIRED,
         stage_dialable=STAGE_DIALABLE,
         replied_guard=REPLIED_GUARD,
         suppression=SUPPRESSION_JOIN,
@@ -185,6 +205,7 @@ _REFUSAL_OUTCOMES = (
     ('suppressed', 'refused_suppressed'),
     ('no campaign is running', 'refused_paused'),
     ('daily cap', 'refused_cap'),
+    ('no phone number', 'refused_no_phone'),
     ('allowlist', 'refused_allowlist'),
     ('DIAL_MODE', 'refused_allowlist'),
 )
@@ -213,6 +234,7 @@ def dial_one(cfg, lead, use_web: bool = False):
             # gap between claiming a batch and dialing it is real: a call can
             # end with "remove me", or someone can hit pause, while an earlier
             # batch is still in flight.
+            assert_has_phone(lead)
             assert_not_suppressed(conn, phone)
             assert_campaign_running(campaign)
             assert_under_daily_cap(conn, lead, campaign, cfg.OPERATOR_TIMEZONE)

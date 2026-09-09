@@ -11,7 +11,12 @@
 TARGET = 'api/drip.py'
 EXPECT = 'test_delays_anchor_to_the_first_send_not_the_previous_step'
 LABEL = 'chain each delay off the previous send instead of emailed_at'
-OLD = """DUE_NOW = ("AND l.emailed_at + (s.delay_days || ' days')::interval <= now()")"""
-NEW = """DUE_NOW = ("AND coalesce((SELECT max(es2.sent_at) FROM email_sends es2 "
-           " WHERE es2.lead_id = l.lead_id), l.emailed_at)"
-           " + (s.delay_days || ' days')::interval <= now()")"""
+OLD = """DUE_NOW = ("AND ((l.emailed_at IS NOT NULL"
+           "      AND l.emailed_at + (s.delay_days || ' days')::interval"
+           "          <= now())"
+           "  OR (l.emailed_at IS NULL AND s.position = 1))")"""
+NEW = """DUE_NOW = ("AND ((l.emailed_at IS NOT NULL"
+           "      AND coalesce((SELECT max(es2.sent_at) FROM email_sends es2"
+           "                     WHERE es2.lead_id = l.lead_id), l.emailed_at)"
+           "          + (s.delay_days || ' days')::interval <= now())"
+           "  OR (l.emailed_at IS NULL AND s.position = 1))")"""

@@ -93,10 +93,26 @@
   <h2>Upload a CSV</h2>
   <form method="post" action="/upload-form" enctype="multipart/form-data" class="toolbar">
     <input type="file" name="file" accept=".csv,text/csv" required>
+    <select name="kind">
+      <option value="call">a CALL list &mdash; needs company, phone, timezone/state</option>
+      <option value="email">an EMAIL list &mdash; needs company and email only</option>
+    </select>
+    {% if drips %}
+    <select name="drip_campaign_id">
+      <option value="">(email lists) no drip &mdash; just the pool</option>
+      {% for d in drips %}<option value="{{ d.campaign_id }}">put on {{ d.name }}</option>{% endfor %}
+    </select>
+    {% endif %}
     <button type="submit" class="ghost">Upload to the pool</button>
-    <span class="dim">Required: <code>company</code>, <code>phone</code>,
-      <code>timezone</code>. Optional: <code>city</code>, <code>state</code>,
-      <code>segment</code>, <code>external_ref</code>, <code>website</code>.
+    <span class="dim">You say which KIND of list it is &mdash; sniffing the
+      headers would mean a file missing its phone column by mistake silently
+      imports as email-only, and leads that should be dialed sit undialable.
+      <br><b>Call list:</b> <code>company</code>, <code>phone</code>, and
+      <code>timezone</code> or <code>state</code>.
+      <b>Email list:</b> <code>company</code>, <code>email</code>; optional
+      <code>website</code> (the domain check compares against it) and
+      <code>demands_per_month</code>. No phone, no timezone &mdash; such a lead
+      is <b>not dialable</b> until both are added by hand.
       <b>Upload lands leads in the POOL, not the queue</b> &mdash; select them
       below and add them to a campaign deliberately.</span>
   </form>

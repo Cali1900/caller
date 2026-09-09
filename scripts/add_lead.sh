@@ -17,7 +17,9 @@ docker compose exec -T caller-postgres psql -v ON_ERROR_STOP=1 \
   -U "$CALLER_DB_USER" -d "$CALLER_DB_NAME" <<SQL
 INSERT INTO leads (company, phone_e164, timezone, pool_status, status)
 VALUES ('$COMPANY', '$PHONE', '$TZ_NAME', 'active', 'new')
-ON CONFLICT (phone_e164) DO UPDATE
+-- leads_phone_uniq is PARTIAL since migration 038, and a partial index
+-- cannot arbitrate ON CONFLICT unless the statement repeats its WHERE.
+ON CONFLICT (phone_e164) WHERE phone_e164 IS NOT NULL DO UPDATE
    SET pool_status='active', status='new', next_attempt_at=now(),
        updated_at=now()
 RETURNING lead_id, company, phone_e164, pool_status, status;

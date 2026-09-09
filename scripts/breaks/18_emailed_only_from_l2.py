@@ -6,6 +6,6 @@
 TARGET = 'api/stages.py'
 EXPECT = 'test_clicking_twice_does_not_restamp_the_send_time'
 LABEL = 'let "I emailed them" fire twice and restamp the send time'
-OLD = """                    WHERE lead_id = %s AND has_confirmed_email
-                      AND emailed_at IS NULL"""
+OLD = """                    WHERE lead_id = %s AND emailed_at IS NULL
+                      AND (has_confirmed_email OR lead_source = 'import')"""
 NEW = """                    WHERE lead_id = %s"""

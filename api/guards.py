@@ -41,6 +41,35 @@ def assert_dialable(phone_e164: str, cfg) -> None:
         raise DialRefused(f'{phone_e164} not in dev allowlist')
 
 
+def assert_has_phone(lead) -> None:
+    """
+    Raises DialRefused when a lead has no number to dial.
+
+    ⚠️ THIS REPLACES A SCHEMA GUARANTEE. leads.phone_e164 was NOT NULL until
+    migration 038, so a lead without a number could not exist and therefore
+    could not be dialled. Email-only leads made it nullable, and from that
+    point only code stands between a phoneless lead and a call attempt.
+
+    IT REFUSES LOUDLY, and that is the point of it existing separately from the
+    selection filter. dialer.PHONE_REQUIRED already excludes these leads from
+    being CANDIDATES - silently, which is correct for a filter. But a lead that
+    reaches the dial path without a number is a DIFFERENT event: something put
+    it there, and 'nothing happened' is the worst possible report. This one
+    audits and prints, via the dialer's existing DialRefused handling.
+
+    Without it, in unrestricted mode a NULL sails through assert_dialable
+    (None is not in the allowlist, so allowlist mode refuses - but unrestricted
+    returns early) and reaches retell.create_phone_call(to_number=None), which
+    surfaces as a Retell API error and reads as a Retell problem rather than a
+    bad lead.
+    """
+    phone = (lead or {}).get('phone_e164')
+    if not (phone or '').strip():
+        raise DialRefused(
+            'no phone number on this lead - refusing. An email-only lead is '
+            'not dialable; add a number AND a timezone to make it one.')
+
+
 class EmailRefused(RuntimeError):
     """Raised when an email must not be sent. Never caught silently."""
 

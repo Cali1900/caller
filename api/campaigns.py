@@ -49,6 +49,9 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  # Email 1: manual or auto, and how long after the call.
                  # DEFAULTS TO MANUAL - see api/autosend.py.
                  'email_1_mode', 'email_1_delay_minutes',
+                 # Which DRIP campaign this call campaign's leads enter when
+                 # email 1 goes out. See drip.drip_for().
+                 'default_drip_id',
                  # Pipeline forecast. The probabilities are GUESSES and are
                  # per campaign, because two campaigns aimed at different
                  # segments will not convert alike.

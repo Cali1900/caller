@@ -203,13 +203,45 @@ def save_steps(campaign_id, rows):
 # entry: sending email 1 is the ONLY way in
 # ---------------------------------------------------------------------------
 
+def drip_for(campaign):
+    """
+    WHICH DRIP A CALL CAMPAIGN'S LEADS ENTER when email 1 is sent.
+
+    THE CAMPAIGN DECIDES (default_drip_id). A campaign already owns email 1's
+    copy, so owning what FOLLOWS email 1 is the same shape rather than a new
+    concept - and it is the only thing that survives a second drip existing.
+
+    ⚠️ only_drip() USED TO BE THE MECHANISM AND IT DOES NOT SCALE PAST ONE. It
+    assigns only when exactly ONE drip runs, so the moment there are two - a
+    call-sourced sequence and an imported one, for any reason at all - every
+    call-sourced lead that got email 1 joined NO DRIP: email 1 out, lead at
+    'emailed', nothing following up, and nothing saying so until somebody opened
+    that lead. It is a FALLBACK now, for the single-drip case where naming one
+    would be ceremony.
+
+    Returns a campaign row, or None. A None here is not silent: the lead shows
+    up in /today's needs-you queue as emailed and on no drip.
+    """
+    from api import campaigns
+    want = (campaign or {}).get('default_drip_id')
+    if want:
+        named = campaigns.get(want)
+        # Only if it is still a RUNNING drip. A campaign pointing at a stopped
+        # or deleted sequence must not silently fall back to whatever else is
+        # running - that is how a lead lands on the wrong copy.
+        if named and named['type'] == 'drip' and named['is_running']:
+            return named
+        return None
+    return only_drip()
+
+
 def only_drip():
     """
     The single running drip, or None when there is none or several.
 
-    AUTO-ASSIGN WHEN THERE IS EXACTLY ONE, ask only when there is a choice. No
-    picker for a list of one - that is a decision the operator would make the
-    same way every time.
+    A FALLBACK, not the mechanism - see drip_for(). Auto-assigning from a list
+    of one is a decision nobody would make differently; auto-assigning from a
+    list of two is a guess.
     """
     from api import campaigns
     running = campaigns.running_drips()
@@ -237,11 +269,35 @@ def enter(cur, lead_id, drip_campaign_id) -> bool:
         RETURNING lead_id""", (drip_campaign_id, lead_id))
     if cur.fetchone() is None:
         return False
+    # ⚠️ STEP 1 IS THE FIRST EMAIL, WHOEVER SENT IT.
+    #
+    # A call-sourced lead has already had email 1 - that send is what let it in
+    # here - and its email_sends row carries step_id NULL because no drip existed
+    # when it went. ALREADY_SENT_STOP matches on step_id, so without this the
+    # drip's step 1 (delay 0) would be unsent and due IMMEDIATELY: the firm gets
+    # the same opener twice, minutes apart.
+    #
+    # Linking email 1 to step 1 makes both entry paths agree:
+    #
+    #   call-sourced   email 1 IS step 1 -> next due is step 2, at its delay
+    #   imported       no email 1 -> step 1 is due now, and sending it stamps
+    #                  emailed_at (see DUE_NOW and send_step)
+    cur.execute(
+        """UPDATE email_sends es SET step_id = (
+                   SELECT s.step_id FROM drip_steps s
+                    WHERE s.campaign_id = %s AND s.deleted_at IS NULL
+                    ORDER BY s.position LIMIT 1)
+            WHERE es.lead_id = %s AND es.seq = 1 AND es.step_id IS NULL
+              AND es.sent_at IS NOT NULL""",
+        (drip_campaign_id, lead_id))
+    linked = cur.rowcount
     cur.execute(
         """INSERT INTO activity (lead_id, kind, summary, detail)
-           VALUES (%s, 'drip', 'entered the drip',
-                   'email 1 sent; the sequence is scheduled from that send')""",
-        (lead_id,))
+           VALUES (%s, 'drip', 'entered the drip', %s)""",
+        (lead_id,
+         'email 1 counts as step 1; the sequence is scheduled from that send'
+         if linked else
+         'no email has gone yet - step 1 is due now and will start the clock'))
     return True
 
 
@@ -306,7 +362,26 @@ DO_NOT_SEND_STOP = ('AND NOT EXISTS (SELECT 1 FROM email_do_not_send d '
 ALREADY_SENT_STOP = ('AND NOT EXISTS (SELECT 1 FROM email_sends es '
                      'WHERE es.lead_id = l.lead_id AND es.step_id = s.step_id)')
 # THE SCHEDULE. delay_days from emailed_at, never from the previous step.
-DUE_NOW = ("AND l.emailed_at + (s.delay_days || ' days')::interval <= now()")
+#
+# ⚠️ AN IMPORTED LEAD HAS NO emailed_at YET, and STEP 1 IS WHAT CREATES IT.
+#
+# A call-sourced lead reaches a drip by having email 1 sent, so emailed_at is
+# already stamped and every step measures from it. An email-only lead is added
+# to a drip DIRECTLY - there is no email 1 before the sequence, because step 1
+# IS email 1.
+#
+# So a lead on a drip with no emailed_at has step 1 due immediately, and sending
+# it stamps emailed_at through the same write-once path (stages.mark_emailed).
+# From that instant the lead is indistinguishable from a call-sourced one and
+# every later step anchors normally.
+#
+# ONE ANCHOR, not two. The alternative was a separate sequence_started_at
+# column, which would mean two columns that must agree forever; emailed_at
+# already means "when the sequence started" and keeps meaning exactly that.
+DUE_NOW = ("AND ((l.emailed_at IS NOT NULL"
+           "      AND l.emailed_at + (s.delay_days || ' days')::interval"
+           "          <= now())"
+           "  OR (l.emailed_at IS NULL AND s.position = 1))")
 
 SELECT_DUE = """
     SELECT l.lead_id, l.company, l.dm_email, l.dm_name, l.emailed_at,
@@ -317,7 +392,9 @@ SELECT_DUE = """
       JOIN campaign_configs c ON c.campaign_id = l.drip_campaign_id
       JOIN drip_steps s       ON s.campaign_id = c.campaign_id
                              AND s.deleted_at IS NULL
-     WHERE l.emailed_at IS NOT NULL
+     -- NOT "emailed_at IS NOT NULL": an imported lead is on a drip before any
+     -- email has gone out, and step 1 is the one that stamps it. See DUE_NOW.
+     WHERE true
        {running}
        {replied}
        {archived}
@@ -467,6 +544,24 @@ def send_step(cfg, row) -> dict:
         result = mail.send(cfg, to_email, subject, body,
                            sender_email=(camp or {}).get('sender_email'),
                            sender_name=(camp or {}).get('sender_name'))
+
+        # STEP 1 OF AN IMPORTED LEAD *IS* EMAIL 1, so it starts the clock.
+        # Stamped through stages.mark_emailed - the SAME write-once transition
+        # the button and the sender use, not a second implementation of it - so
+        # every later step anchors to it exactly as a call-sourced lead's does.
+        if result.get('ok') and lead.get('emailed_at') is None:
+            try:
+                stages.mark_emailed(lead_id,
+                                    emailed_by=f'auto:drip:{cfg.SENDER_DOMAIN}')
+            except stages.NotAtL2 as exc:
+                # The mail HAS gone. Losing the stamp would leave the sequence
+                # with no anchor and every later step permanently undue, so this
+                # is loud rather than swallowed.
+                print(f'[drip] SENT step 1 to {lead_id} but could not stamp '
+                      f'emailed_at: {exc}', flush=True)
+                with db.get_conn() as conn2:
+                    with conn2.cursor() as cur2:
+                        _audit(cur2, lead_id, to_email, 'stamp_failed', str(exc))
 
         with db.get_conn() as conn:
             with conn.cursor() as cur:

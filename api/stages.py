@@ -132,8 +132,13 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 """UPDATE leads
                       SET emailed_at = %s, emailed_by = %s,
                           updated_at = now()
-                    WHERE lead_id = %s AND has_confirmed_email
-                      AND emailed_at IS NULL
+                    -- SOURCE-AWARE, for the same reason autosend is: an
+                    -- IMPORTED lead owes a send because it is on a drip, not
+                    -- because an agent confirmed an address on a call. Setting
+                    -- has_confirmed_email on import would make that flag mean
+                    -- two different things depending on origin.
+                    WHERE lead_id = %s AND emailed_at IS NULL
+                      AND (has_confirmed_email OR lead_source = 'import')
                     RETURNING *""",
                 (when, emailed_by, lead_id))
             row = cur.fetchone()
@@ -185,9 +190,15 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
             # leads.campaign_id IS NOT TOUCHED - it stays the CALL campaign that
             # sourced the lead, because it is the daily cap's counting key and
             # the funnel's attribution key. See migration 036.
-            only = _drip.only_drip()
-            if only:
-                _drip.enter(cur, lead_id, only['campaign_id'])
+            # THE CALL CAMPAIGN DECIDES which sequence follows its email 1;
+            # only_drip() is the fallback when it has not said. See
+            # drip.drip_for() for why the fallback cannot be the mechanism.
+            from api import campaigns as _camps
+            src = (_camps.get(row['campaign_id'])
+                   if row.get('campaign_id') else None)
+            target = _drip.drip_for(src)
+            if target:
+                _drip.enter(cur, lead_id, target['campaign_id'])
 
             # The pipeline stage moves with the send, so the forecast reads
             # a real status instead of deriving one.
