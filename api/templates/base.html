@@ -133,6 +133,16 @@ form.inline{display:inline}
 .field label{display:block;font-size:12px;color:var(--fog);margin-bottom:4px;
   text-transform:uppercase;letter-spacing:.06em}
 .field input,.field select,.field textarea{width:100%}
+/* THE SEQUENCE EDITOR reuses .copy-split, .pv, .pv-label, .pv-subject and
+   .pv-body from the copy editor rather than defining its own - it is the same
+   thing per step, and a second set of preview styles would drift. Only the
+   between-steps delay is new. */
+.stepgap {
+  text-align:center; padding:8px 0; margin-left:18px;
+  border-left:2px dashed #444; color:#8a8a8a;
+}
+.pv-warn:empty { display:none }
+
 /* Prompt versions: seventeen and growing. Show five, scroll the rest - a list
    that fills the screen is harder to read, not easier. The browser scrolls a
    sized listbox to the selected row, so the LIVE version is always in view. */

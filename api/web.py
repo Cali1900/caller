@@ -1251,18 +1251,17 @@ def lead_drip_assign(lead_id: str, drip_campaign_id: str = Form(...)):
 @router.post('/campaign/{campaign_id}/steps/preview')
 async def campaign_step_preview(campaign_id: str, request: Request):
     """
-    Render the text CURRENTLY IN THE BOXES for one step, against a chosen lead.
+    Render EVERY step currently in the boxes, against a chosen lead.
 
-    SERVER-SIDE ON PURPOSE, and this is the whole reason the preview is worth
-    having: it goes through the SAME drafts.render() and drafts.values_for()
-    that the real sends use. A client-side preview would be a second
-    implementation of the substitution rules, and the first time they disagreed
-    the preview would be lying about what goes out - which is worse than no
-    preview, because it would be trusted.
+    THE SAME SHAPE AS /campaign/{id}/email/preview, deliberately. That endpoint
+    takes the whole form and returns every variant at once, and the copy editor
+    posts `new FormData(form)` at it from one delegated listener. Matching it
+    means the sequence editor needs no per-element wiring - which is also why a
+    cloned step previews correctly with no extra code.
 
-    Debounced from the browser rather than rendered on every keystroke: the
-    round trip is what buys the guarantee, and a few hundred milliseconds of
-    lag is a fair price for it.
+    SERVER-SIDE, through the same drafts.render() and values_for() the real sends
+    use. A second copy of the substitution rules in JS could drift from them, and
+    a preview that drifts is worse than none because it is trusted.
     """
     camp = campaigns.get(campaign_id)
     if camp is None:
@@ -1271,19 +1270,45 @@ async def campaign_step_preview(campaign_id: str, request: Request):
     lead = (drafts_mod.lead_for_preview(form.get('lead_id'))
             or drafts_mod.preview_lead(campaign_id)[0])
     vals = drafts_mod.values_for(lead, camp)
-    subject = drafts_mod.render(form.get('subject') or '', vals)
-    body = drafts_mod.render(form.get('body') or '', vals)
-    # UNRESOLVED PLACEHOLDERS ARE NAMED, not silently left as text. A typo like
-    # {{frist_name}} renders as itself and is easy to miss in prose; the real
-    # send would post it to a law firm verbatim.
+
     import re as _re
-    unknown = sorted(set(_re.findall(r'\{\{\s*([a-zA-Z_]+)\s*\}\}',
-                                    (subject or '') + ' ' + (body or ''))))
+    out = {}
+    for key in form.keys():
+        m = _re.fullmatch(r'body_(\d+)', key)
+        if not m:
+            continue
+        i = m.group(1)
+        subject = drafts_mod.render(form.get(f'subject_{i}') or '', vals)
+        body = drafts_mod.render(form.get(f'body_{i}') or '', vals)
+        # AN UNRESOLVED PLACEHOLDER IS NAMED. {{frist_name}} renders as itself
+        # and is easy to miss in prose; the real send would post it verbatim.
+        unknown = sorted(set(_re.findall(r'\{\{\s*([a-zA-Z_]+)\s*\}\}',
+                                       subject + ' ' + body)))
+        out[i] = {'subject': subject, 'body': body, 'unknown': unknown,
+                  'chars': len(body), 'words': len(body.split())}
     return JSONResponse({
-        'subject': subject, 'body': body,
-        'chars': len(body or ''), 'words': len((body or '').split()),
-        'unknown': unknown,
+        'steps': out,
         'lead': {'company': lead.get('company'), 'name': lead.get('dm_name')}})
+
+
+def _step_minutes(value, unit):
+    """
+    (number, 'm'|'h') -> minutes, or None when nothing was posted.
+
+    None means "not supplied", which drip.validate() reads as 0 for step 1 -
+    'immediately' is the sensible reading of a blank timing box on the FIRST
+    email. An unrecognised unit is treated as minutes rather than guessed at:
+    the smaller unit is the safer wrong answer, because it cannot silently turn
+    a 15-minute delay into 15 hours.
+    """
+    v = (value or '').strip()
+    if not v:
+        return None
+    try:
+        n = int(v)
+    except ValueError:
+        return v                      # let validate() refuse it, with its message
+    return n * 60 if (unit or 'm').strip().lower().startswith('h') else n
 
 
 @router.post('/campaign/{campaign_id}/steps')
@@ -1307,7 +1332,12 @@ async def campaign_steps_save(request: Request, campaign_id: str):
             # 'off' out loud rather than saying nothing.
             rows.append({'step_id': (form.get(f'step_id_{i}') or '').strip() or None,
                          'delay_days': form.get(f'delay_{i}'),
-                         'delay_minutes': form.get(f'minutes_{i}'),
+                         # STEP 1's timing is a NUMBER plus a UNIT, because
+                         # "after 2 hours" typed as 120 minutes is arithmetic the
+                         # operator should not be doing. Stored as minutes: one
+                         # column, one scale, and the unit is presentation.
+                         'delay_minutes': _step_minutes(
+                             form.get(f'every_{i}'), form.get(f'unit_{i}')),
                          'enabled': '1' if form.get(f'enabled_{i}') else '',
                          'subject': form.get(f'subject_{i}'),
                          'body': form.get(f'body_{i}')})

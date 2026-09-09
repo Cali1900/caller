@@ -37,5 +37,11 @@ if [[ -d .break_pass_state ]]; then
   echo "killed and may have left a guard removed in api/." >&2
   echo >&2
   echo "Run ./scripts/break_pass.sh --check to see, then --recover." >&2
+  echo >&2
+  echo "AND CHECK WHETHER YOUR EDITS SURVIVED. A pass restores its targets at" >&2
+  echo "every chunk boundary, so anything you changed while it ran was reverted" >&2
+  echo "SILENTLY - the files still parse and the suite still passes." >&2
+  echo "  git diff -- api/                        what actually changed" >&2
+  echo "  ./scripts/guard_break_pass.sh           is it safe to edit now?" >&2
   exit 1
 fi

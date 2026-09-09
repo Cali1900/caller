@@ -104,6 +104,26 @@ next run recovers and refuses to proceed until clean.
 ./scripts/break_pass.sh --only=19   # one break
 ```
 
+**⚠️ NEVER EDIT `api/` WHILE A BREAK PASS RUNS — IT REVERTS YOUR WORK SILENTLY.**
+A pass snapshots its targets at the start of each chunk and restores them at the
+end, so anything you change while it runs is gone at the next chunk boundary. On
+2026-09-09 that reverted a rewrite of `api/web.py` **and**
+`api/templates/campaign.html`, and the loss was invisible: the files still
+parsed, the full suite still passed, and a deploy shipped a page that had never
+contained the change. It was caught only because `git diff --stat` did not list a
+file that should have been in it.
+
+**Run `./scripts/guard_break_pass.sh` before editing.** It answers "is it safe
+right now", and — because a completed run that failed to restore leaves no state
+at all — it also runs the anchor check to prove `api/` is actually clean rather
+than merely unlocked.
+
+This is the THIRD distinct way this tool has cost real time: killed mid-run
+leaving a break live; `git add -A` during a pass committing a disabled guard; and
+now editing during a pass. The first two are intercepted by a state dir and a
+pre-commit hook. **An edit cannot be intercepted**, so this one is a check you
+run, and both `test.sh` and the pre-commit hook now point at it.
+
 **⚠️ NEVER RUN TWO BREAK PASSES, AND THE LOCK NOW ACTUALLY PREVENTS IT.**
 Until 2026-09-09 `preflight` ran BEFORE the lock, so a second invocation
 "recovered" from the RUNNING pass's state directory and deleted it. The running
@@ -201,6 +221,23 @@ api/
 migrations/      forward-only, applied by scripts/migrate.sh
 scripts/breaks/  115 break definitions, one per guard
 ```
+
+## ⚠️ A TEMPLATE IS NOT A PAGE
+
+**Never report a UI change without fetching the served page.** See the standing
+rule in `README.md` — three "fixed" reports in one session were false because a
+template was right and the page was not: a nested `<form>` the browser dropped, a
+rewrite silently reverted by a concurrent break pass, and a deploy that had not
+started while the containers still held the previous build.
+
+```bash
+./scripts/deploy.sh                 # and check `docker compose ps` says NEW
+curl -s localhost:4100/campaign/ID  # assert against THIS, not the template
+```
+
+Tests cannot replace it: one that asserts markup is PRESENT cannot tell you the
+browser will honour it, and a run against `tests/` says nothing about what a
+container is serving.
 
 ## Running it
 

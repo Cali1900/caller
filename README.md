@@ -210,6 +210,34 @@ Two rules that follow:
    somewhere else in the file first — that is how `guards.py` ended up with an
    `if` whose body was dedented.
 
+### ⚠️ STANDING RULE — never report a UI change without FETCHING THE SERVED PAGE
+
+**A template is not a page.** Between the two sit a deploy, a baked image, Jinja
+that can render valid-but-wrong markup, and a browser that silently drops things
+HTML forbids. Every one of those has produced a "fixed" report that was false:
+
+| what was claimed | what was actually true |
+|---|---|
+| the sequence editor works | its `<form>` was nested inside another form, so the browser dropped it and every save posted to the wrong handler — a **422** on the only button that mattered |
+| the editor was rebuilt | `api/web.py` **and** `api/templates/campaign.html` had been reverted by a concurrent break pass; the report described a page that never existed |
+| it's deployed | the suite was at 82% and the deploy had not started; the containers still held the previous build |
+
+In all three the *code* was right at some point and the *page* was not, and tests
+passed throughout — because a test that asserts markup is PRESENT cannot tell you
+the browser will honour it, and a test run against `tests/` says nothing about
+what a container is serving.
+
+**So the rule, and it is not "be more careful":**
+
+1. `./scripts/deploy.sh`, and confirm the containers are NEW (`docker compose ps`
+   — an old uptime means nothing you changed is running)
+2. `curl` the actual route and assert against the returned HTML
+3. Only then say it works
+
+Cheap, mechanical, and it caught what three rounds of care did not. The same
+shape as everything else in this file: prefer a check that reads the real artefact
+over a claim about the thing that produces it.
+
 ### ⚠️ STANDING RULE — a table designed to OUTLIVE A LEAD will outlive TEST ISOLATION
 
 `tests/conftest.py` truncates between tests, and `TRUNCATE ... CASCADE` only

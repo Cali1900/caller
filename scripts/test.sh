@@ -52,6 +52,10 @@ if [[ -z "${BREAK_PASS:-}" ]]; then
     echo >&2
     echo "  ./scripts/break_pass_all.sh --status   what it is doing" >&2
     echo "  ./scripts/break_pass.sh --check        is a break live right now?" >&2
+    echo "  ./scripts/guard_break_pass.sh          is it safe to EDIT api/?" >&2
+    echo >&2
+    echo "AND DO NOT EDIT api/ WHILE IT RUNS. The pass restores its targets at" >&2
+    echo "every chunk boundary, so an edit made now is reverted silently." >&2
     exit 1
   fi
 fi

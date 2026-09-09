@@ -597,9 +597,17 @@ def test_a_drip_page_hides_what_a_drip_does_not_have(db, dripc, client):
                  'Retry gaps'):
         assert f'<h2>{gone}</h2>' not in r.text, \
             f'a drip page still shows the {gone!r} section'
-    # It does own a sender, and it says what it lacks and why.
+    # It does own a sender, and that panel is CAMPAIGN identity - beside
+    # Identity at the top, not below a step.
     assert '<h2>Sender</h2>' in r.text
-    assert 'does not dial' in r.text
+    # ⚠️ AND IT DOES NOT EXPLAIN OUR SCHEMA BACK AT THE OPERATOR. Three panels
+    # justifying campaign_id, the daily cap and the funnel are HANDOFF material,
+    # not UI - nobody needs the app arguing its design while they write an email.
+    for lecture in ('What a drip does not have', 'chaining lets',
+                    'campaign_id</code> never moves', 'funnel honest'):
+        assert lecture not in r.text, f'the editor still lectures: {lecture!r}'
+    assert 'Every delay is measured from the <b>first send</b>' in r.text, \
+        'the one line that replaced those paragraphs is missing'
 
 
 def test_a_call_page_is_unchanged(db, client):
@@ -804,11 +812,12 @@ def test_the_preview_uses_the_same_render_the_real_sends_use(db, dripc, client):
     lead = _lead(db, days_ago=1, phone_e164='+15553339010',
                  company='Whitfield Law', dm_name='Timothy Ross')
     r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
-                    data={'subject': 'Following up, {{first_name}}',
-                          'body': 'Hi {{first_name}} at {{company}}.',
+                    data={'subject_0': 'Following up, {{first_name}}',
+                          'body_0': 'Hi {{first_name}} at {{company}}.',
                           'lead_id': str(lead)})
     assert r.status_code == 200
-    j = r.json()
+    # KEYED BY STEP INDEX, like /email/preview returns every variant at once.
+    j = r.json()['steps']['0']
     assert j['subject'] == 'Following up, Timothy'
     assert 'Hi Timothy at Whitfield Law.' == j['body']
 
@@ -828,9 +837,9 @@ def test_the_preview_names_an_unresolved_placeholder(db, dripc, client):
     """
     lead = _lead(db, days_ago=1, phone_e164='+15553339011')
     r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
-                    data={'subject': 'Hi {{frist_name}}', 'body': 'x',
+                    data={'subject_0': 'Hi {{frist_name}}', 'body_0': 'x',
                           'lead_id': str(lead)})
-    j = r.json()
+    j = r.json()['steps']['0']
     assert 'frist_name' in j['unknown']
     assert j['subject'] == 'Hi {{frist_name}}', \
         'an unknown placeholder must render as itself, not be blanked - blanking '\
@@ -840,9 +849,9 @@ def test_the_preview_names_an_unresolved_placeholder(db, dripc, client):
 def test_the_preview_reports_a_body_count(db, dripc, client):
     lead = _lead(db, days_ago=1, phone_e164='+15553339012')
     r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
-                    data={'subject': 's', 'body': 'one two three',
+                    data={'subject_0': 's', 'body_0': 'one two three',
                           'lead_id': str(lead)})
-    j = r.json()
+    j = r.json()['steps']['0']
     assert j['words'] == 3
     assert j['chars'] == len('one two three')
 
@@ -872,9 +881,9 @@ def test_the_editor_reads_top_to_bottom_and_gives_the_body_room(db, dripc, clien
     subj_at = r.text.index('name="subject_0"')
     assert subj_at < body_at, 'the subject renders below the body'
     import re
-    rows = re.search(r'id="bod0"[^>]*rows="(\d+)"', r.text)
-    assert rows and int(rows.group(1)) >= 12, \
-        'the body box is too short to judge copy in'
+    rows = re.search(r'name="body_0"[^>]*rows="(\d+)"', r.text)
+    assert rows and int(rows.group(1)) >= 16, \
+        'the body box is shorter than the copy editor\'s 16 rows'
 
 
 def test_each_step_collapses_and_the_delay_sits_between_them(db, dripc, client):
@@ -883,18 +892,25 @@ def test_each_step_collapses_and_the_delay_sits_between_them(db, dripc, client):
     is how the sequence's rhythm becomes visible."""
     r = client.get(f"/campaign/{dripc['campaign_id']}")
     assert '<details' in r.text, 'steps do not collapse'
-    assert 'days after the <b>first</b> send' in r.text, \
-        'the delay is not shown between the steps'
+    assert 'class="stepgap"' in r.text, \
+        'the delay is not its own element between the steps'
+    assert 'days after the first send' in r.text
 
 
 def test_step_1_is_not_offered_a_day_field(db, dripc, client):
     """It IS the first send. A day field on it read as a control and was not one."""
     r = client.get(f"/campaign/{dripc['campaign_id']}")
-    assert 'name="minutes_0"' in r.text, 'step 1 has no minute timing control'
+    # A NUMBER PLUS A UNIT - minutes or hours, per the spec. "after 2 hours"
+    # typed as 120 minutes is arithmetic the operator should not be doing.
+    assert 'name="every_0"' in r.text, 'step 1 has no timing control'
+    assert 'name="unit_0"' in r.text, 'step 1 cannot be set in hours'
+    assert '>minutes<' in r.text and '>hours<' in r.text
     assert 'name="delay_0"' not in r.text, \
         'step 1 is still offered a day field it cannot honour'
-    assert 'imported' in r.text.lower(), \
-        'the screen must say step 1 timing governs imported leads only'
+    # And no between-steps delay row may precede step 1 either.
+    first = r.text.index('<b>Step 1</b>')
+    assert 'class="stepgap"' not in r.text[:first], \
+        'a days row renders above step 1'
 
 
 def test_a_step_created_without_the_field_is_enabled(db):
@@ -931,3 +947,142 @@ def test_a_step_created_without_the_field_is_enabled(db):
          'subject': 'b', 'body': 'b', 'enabled': ''},
     ])
     assert [s['enabled'] for s in drip.steps(c)] == [True, False]
+
+
+# ==========================================================================
+# THE THREE FAULTS FOUND BY USING IT IN THE LIVE APP
+#
+# All three passed the previous tests, because those tests asserted the markup
+# was PRESENT and not that it WORKED. Rendering is not the same as functioning.
+# ==========================================================================
+
+def test_the_sequence_form_is_not_nested_inside_the_config_form(db, dripc, client):
+    """
+    ⚠️ THE BUG THAT MADE THE EDITOR UNUSABLE.
+
+    HTML FORMS CANNOT NEST. The sequence <form> sat inside the campaign-config
+    <form>, so the browser dropped the inner one and "Save the sequence"
+    submitted the OUTER form to /campaign/{id}/save - which requires
+    agent_l1_version, daily_cap, max_concurrent and the spacing fields. A drip
+    campaign has none of them, so it 422'd with a list of missing call-only
+    fields and no step could be added at all.
+
+    Every earlier test passed because they all asserted the markup was PRESENT.
+    Presence is not function, and this is the difference.
+    """
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    html = r.text
+    save_form = html.index('action="/campaign/%s/save"' % dripc['campaign_id'])
+    seq_form = html.index('action="/campaign/%s/steps"' % dripc['campaign_id'])
+    # The config form must be CLOSED before the sequence form opens.
+    closed_at = html.index('</form>', save_form)
+    assert closed_at < seq_form, (
+        'the sequence form is nested inside the config form - the browser will '
+        'drop it and the save will post to /save, which needs call-only fields')
+
+
+def test_saving_a_sequence_needs_no_call_only_fields(db, dripc, client):
+    """
+    The functional half: post ONLY what the sequence form posts and it must
+    work. No agent_l1_version, no daily_cap, no spacing.
+    """
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps", data={
+        'step_id_0': '', 'every_0': '15', 'unit_0': 'm', 'enabled_0': '1',
+        'subject_0': 'Opener', 'body_0': 'Hi {{first_name}}',
+        'delay_1': '4', 'enabled_1': '1',
+        'subject_1': 'Second', 'body_1': 'Following up',
+    }, follow_redirects=False)
+    assert r.status_code == 303, r.text[:300]
+    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    saved = drip.steps(dripc['campaign_id'])
+    assert [s['subject'] for s in saved] == ['Opener', 'Second']
+    assert saved[0]['delay_minutes'] == 15
+    assert saved[1]['delay_days'] == 4
+
+
+def test_the_preview_panel_is_beside_the_editor(db, dripc, client):
+    """
+    ⚠️ SECTION 1 OF THE SPEC, and it was the main thing asked for. A dropdown
+    naming the preview lead is not a preview: there has to be a PANEL holding
+    the rendered output, beside the box being typed in.
+
+    Asserts the panel exists, that it is inside the same split as the editor, and
+    that it arrives already rendered rather than blank until the first keystroke.
+    """
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    html = r.text
+    # ⚠️ THE COPY EDITOR'S CLASSES, not a second set. .copy-split / .pv /
+    # .pv-subject / .pv-body already existed and already worked; inventing
+    # .step-split alongside them meant two sets of preview styles that drift.
+    assert 'copy-split' in html, 'no side-by-side container'
+    assert 'id="pv-0"' in html, 'step 1 has no preview panel'
+    for invented in ('step-split', 'step-preview', 'step-edit'):
+        assert invented not in html, f'{invented} is a second pattern'
+    # The panel sits in the same split as the editor for that step.
+    split = html.index('class="copy-split"')
+    body = html.index('name="body_0"', split)
+    prev = html.index('id="pv-0"', split)
+    assert body < prev, 'the preview is not beside the editor'
+    assert 'Opener' in html or 'Following up' in html or 'One' in html
+
+
+def test_the_preview_panel_arrives_already_rendered(db, dripc, client):
+    """Blank until the first keystroke would mean the preview is wrong exactly
+    when the copy is being read for the first time."""
+    cid = dripc['campaign_id']
+    lead = _lead(db, days_ago=1, phone_e164='+15553339020',
+                 company='Whitfield Law', dm_name='Timothy Ross')
+    steps = drip.steps(cid)
+    drip.save_steps(cid, [
+        {'step_id': steps[0]['step_id'], 'delay_minutes': 0,
+         'subject': 'Hi {{first_name}}', 'body': 'At {{company}}.',
+         'enabled': '1'}])
+    r = client.get(f'/campaign/{cid}')
+
+    # ⚠️ ASSERT ON THE PANEL'S OWN CONTENTS, not on a global count. {{company}}
+    # legitimately appears elsewhere on the page - in the textarea, which IS the
+    # raw template, and in every placeholder menu - so a page-wide count says
+    # nothing about the panel. Same fault as matching 'Prompt version' against a
+    # CSS comment: assert the specific thing.
+    start = r.text.index('id="pv-0"')
+    panel = r.text[start:r.text.index('</div>', r.text.index('pv-warn', start))]
+    assert 'Whitfield Law' in panel, \
+        f'the panel is not rendered on load: {panel[:200]!r}'
+    assert 'Timothy' in panel, 'the panel did not render the contact name'
+    assert '{{company}}' not in panel and '{{first_name}}' not in panel, \
+        'the panel is showing the raw template rather than rendered output'
+
+
+def test_many_steps_can_be_added_without_a_reload(db, dripc, client):
+    """
+    "Add step 1" and nothing after meant one new step per save. There has to be
+    a clone source and an append target, or the sequence length is capped by the
+    number of blank rows the server happened to render.
+    """
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert '<template id="steptpl">' in r.text, 'no clone source for new steps'
+    assert 'id="newsteps"' in r.text, 'nowhere for a new step to be appended'
+    assert 'id="addstep"' in r.text, 'no add-another-step control'
+    assert '__I__' in r.text, 'the template has no index placeholder to substitute'
+
+
+def test_the_sender_belongs_to_the_campaign_not_to_a_step(db, dripc, client):
+    """
+    From-address, from-name and footer are CAMPAIGN identity. Rendering them
+    below step 1 read as though they were part of that step.
+
+    They belong in the config form beside Identity, and - crucially - INSIDE it,
+    because that is the form that saves them.
+    """
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    html = r.text
+    ident = html.index('<h2>Identity</h2>')
+    sender = html.index('<h2>Sender</h2>')
+    seq = html.index('The sequence')
+    assert ident < sender < seq, \
+        'the sender block is not with Identity above the sequence'
+    # And it is still inside the CONFIG form, or saving it would do nothing.
+    save_form = html.index('action="/campaign/%s/save"' % dripc['campaign_id'])
+    closed_at = html.index('</form>', save_form)
+    assert save_form < sender < closed_at, \
+        'the sender fields fell outside the form that saves them'

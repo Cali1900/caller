@@ -51,6 +51,7 @@
         <input id="nt" name="notes" value="{{ c.notes or '' }}"></div>
     </div>
 
+    {# BOTH TYPES have a sender: a drip mails as somebody too. #}
     {% if c.type == 'call' %}
     <div class="card">
       <h2>Daily cap</h2>
@@ -109,174 +110,44 @@
          them to open. Busy is shortest on purpose: a busy signal means a
          human is there.</p>
     </div>
-    {% else %}
-    <div class="card">
-      <h2>What a drip does not have</h2>
-      <p class="dim">No prompt version, no cap, no spacing and no calling
-         windows &mdash; a drip does not dial. Those belong to the <b>call</b>
-         campaign that sourced the lead, and it keeps them: a lead's
-         <code>campaign_id</code> never moves, which is what keeps the daily cap
-         counting correctly and the call campaign's funnel honest.</p>
-      <p class="dim" style="margin-bottom:0">What it does own is on the right:
-         the <b>sequence</b>, the sender identity, and what happens after the
-         last step.</p>
-    </div>
     {% endif %}
   </div>
 
   <div>
-    <div class="card" id="drip">
-      <h2>The sequence{% if c.type != 'drip' %} <span class="dim">&mdash; drip campaigns only</span>{% endif %}</h2>
-      {% if c.type != 'drip' %}
-        <p class="dim">This is a <b>call</b> campaign. A sequence belongs to a
-           <b>drip</b> campaign &mdash; create one on /campaigns, and sending
-           email&nbsp;1 puts the lead on it.</p>
-      {% else %}
-        <p class="dim">One row per step. <b>Step 1 is the first send</b>, timed
-           from when a lead joins the drip. <b>Every later step is measured from
-           that first send</b> (<code>emailed_at</code>), never from the step
-           before it &mdash; chaining lets a schedule drift, anchoring does not.
-           A step already sent is never re-sent and never re-dated, so editing
-           this is safe with leads mid-flight.</p>
-        <p class="dim"><b>Starting this campaign is the switch.</b> Steps do not
-           send while it is stopped.</p>
-
-        <div class="toolbar" style="margin:10px 0">
-          <label class="dim">Preview against
-            <select id="pv-lead">
-              {% for l in preview_candidates %}
-              <option value="{{ l.lead_id }}">{{ l.company }}{% if l.dm_name %} &mdash; {{ l.dm_name }}{% endif %}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <span class="dim">A <b>real</b> lead, rendered by the same
-            <code>render()</code> the real sends use &mdash; so the preview
-            cannot drift from what goes out.</span>
-        </div>
-
-        <form method="post" action="/campaign/{{ c.campaign_id }}/steps" id="seq">
-          {% for st in drip_steps %}
-          {%- set i = loop.index0 -%}
-          {# THE DELAY SITS BETWEEN STEPS, as its own element, because it is a
-             property of the GAP and not of the email. Reading "send in 8 days"
-             between two cards is how the sequence's rhythm becomes visible. #}
-          {% if not loop.first %}
-          <div class="dim" style="text-align:center;padding:6px 0;border-left:2px dashed #444;margin-left:18px">
-            &darr;&nbsp; send
-            <input type="number" name="delay_{{ i }}" min="1" max="365"
-                   value="{{ st.delay_days }}" style="width:4.5em">
-            days after the <b>first</b> send
-          </div>
-          {% endif %}
-
-          <details class="card" style="margin:6px 0;padding:10px" {% if loop.first or not st.enabled %}open{% endif %}>
-            <summary style="cursor:pointer">
-              <b>Step {{ loop.index }}</b>
-              {% if loop.first %}<span class="pill">first send</span>{% endif %}
-              {% if not st.enabled %}<span class="pill human_review">OFF</span>{% endif %}
-              <span class="dim">&mdash; {{ st.subject|truncate(52) }}</span>
-            </summary>
-
-            <input type="hidden" name="step_id_{{ i }}" value="{{ st.step_id }}">
-
-            <div class="toolbar" style="margin:8px 0">
-              <label class="dim">
-                <input type="checkbox" name="enabled_{{ i }}" value="1"
-                       {% if st.enabled %}checked{% endif %}> enabled
-              </label>
-              <label class="dim">
-                <input type="checkbox" name="delete_{{ i }}" value="1"> remove
-              </label>
-              <span class="dim">Turning a step <b>off</b> keeps its copy and its
-                send records; <b>remove</b> takes it out of the sequence.</span>
-            </div>
-
-            {% if loop.first %}
-            {# STEP 1 IS NOT ON THE DAY SCALE. It IS the first send, so it cannot
-               be N days from itself. #}
-            <div class="field">
-              <label>When step 1 sends</label>
-              <div class="toolbar">
-                <input type="number" name="minutes_{{ i }}" min="0" max="10080"
-                       value="{{ st.delay_minutes if st.delay_minutes is not none else 0 }}"
-                       style="width:6em"> <span class="dim">minutes after a lead joins the drip
-                       &mdash; <b>0 = immediately</b></span>
-              </div>
-              <span class="dim">⚠️ This governs <b>imported</b> leads only. A
-                call-sourced lead already had email&nbsp;1 sent by the call
-                campaign (its <i>email 1 delay</i>), and that send counts as
-                step&nbsp;1.</span>
-            </div>
+    <div class="card">
+      <h2>Sender</h2>
+      <div class="field"><label for="se">From address</label>
+        <select id="se" name="sender_email">
+          {% for o in sender_options %}
+          <option value="{{ o.email }}" {% if o.current %}selected{% endif %}>
+            {{ o.email }}{% if not o.verified %} — not verified in Brevo{% endif %}
+          </option>{% endfor %}
+        </select>
+        <p class="dim" style="margin:.4em 0 0">
+          Brevo only delivers from a verified sender, so this is a list, not a
+          text field.
+          {% if sender_error %}<br><span class="warn">&#9888; could not reach
+            Brevo ({{ sender_error }}) — the list may be stale.</span>
+          {% else %}
+            {% set unver = sender_options | rejectattr('verified') | list %}
+            {% if unver %}<br><span class="warn">&#9888;
+              {{ unver | map(attribute='email') | join(', ') }}
+              {{ 'is' if unver|length == 1 else 'are' }} not verified in Brevo yet.</span>
+              Fine for a draft you send by hand — the From: is just shown to you —
+              but the digest and anything that sends automatically will be refused.
             {% endif %}
-
-            {# ORDER: number, timing, SUBJECT, then BODY - the way an email
-               reads. Subject used to sit below the body, which read backwards. #}
-            <div class="field">
-              <label for="sub{{ i }}">Subject</label>
-              <input id="sub{{ i }}" type="text" name="subject_{{ i }}"
-                     value="{{ st.subject }}" data-pv="{{ i }}">
-            </div>
-            <div class="field">
-              <label for="bod{{ i }}">Body</label>
-              <div class="toolbar" style="margin-bottom:4px">
-                <select class="ph-pick" data-target="bod{{ i }}">
-                  <option value="">insert a placeholder&hellip;</option>
-                  {% for ph in placeholders %}<option value="{{ ph }}">{{ '{{' }}{{ ph }}{{ '}}' }}</option>{% endfor %}
-                </select>
-                <span class="dim" id="count{{ i }}"></span>
-              </div>
-              <textarea id="bod{{ i }}" name="body_{{ i }}" rows="18"
-                        data-pv="{{ i }}">{{ st.body }}</textarea>
-            </div>
-          </details>
-
-          {# THE PREVIEW, beside its step. Always visible, never a button. #}
-          <div class="card" style="margin:6px 0 14px;padding:10px;background:#161616"
-               id="pv{{ i }}">
-            <div class="dim">preview &mdash; step {{ loop.index }}</div>
-            <div><b class="pv-subject">{{ step_previews.get(st.position, {}).get('subject', '') }}</b></div>
-            <pre class="pv-body" style="white-space:pre-wrap;margin:6px 0 0">{{ step_previews.get(st.position, {}).get('body', '') }}</pre>
-            <div class="dim pv-warn" style="margin-top:6px"></div>
-          </div>
-          {% endfor %}
-
-          {# ONE blank row. Adding a step needs no javascript and no second round
-             trip; an empty row is simply not posted as a step. #}
-          {%- set n = drip_steps|length -%}
-          <details class="card" style="margin:6px 0;padding:10px;opacity:.9">
-            <summary style="cursor:pointer"><b>Add step {{ n + 1 }}</b></summary>
-            <div class="field">
-              <label>send after</label>
-              <div class="toolbar">
-                <input type="number" name="delay_{{ n }}" min="1" max="365"
-                       placeholder="{{ 4 * (n + 1) }}" style="width:4.5em">
-                <span class="dim">days after the first send</span>
-              </div>
-            </div>
-            <div class="field"><label>Subject</label>
-              <input type="text" name="subject_{{ n }}" placeholder="leave blank to skip"></div>
-            <div class="field"><label>Body</label>
-              <textarea name="body_{{ n }}" rows="12" placeholder="leave blank to skip"></textarea></div>
-            <input type="hidden" name="enabled_{{ n }}" value="1">
-          </details>
-
-          <div class="toolbar">
-            <button type="submit">Save the sequence</button>
-            <span class="dim">Refused whole if a delay repeats, goes backwards,
-              or a step has no subject or body. Ordering is checked across
-              <b>disabled</b> steps too, so re-enabling one can never produce a
-              backwards sequence.</span>
-          </div>
-        </form>
-
-        <h2>After the last step</h2>
-        <p class="dim">Currently <b>{{ c.after_last_step }}</b>.
-           <code>archive</code> archives as <b>no_reply</b>, which keeps the
-           &ldquo;everything terminates&rdquo; property. <code>hold</code> leaves
-           it for a person. A <b>disabled</b> tail step does not count as
-           outstanding, or the sequence would never finish.</p>
-      {% endif %}
+          {% endif %}
+        </p></div>
+      <div class="fields-2">
+        <div class="field"><label for="sn">From name</label>
+          <input id="sn" type="text" name="sender_name" value="{{ c.sender_name }}"></div>
+        <div class="field"><label for="sc">Footer line</label>
+          <input id="sc" type="text" name="sender_company_line"
+                 value="{{ c.sender_company_line }}"></div>
+      </div>
+      <p class="dim" style="margin-bottom:0">Used in this campaign's draft emails.</p>
     </div>
+
 
     {% if c.type == 'call' %}
     <div class="card">
@@ -317,45 +188,149 @@
     </div>
     {% endif %}
 
-    {# BOTH TYPES have a sender: a drip mails as somebody too. #}
-    <div class="card">
-      <h2>Sender</h2>
-      <div class="field"><label for="se">From address</label>
-        <select id="se" name="sender_email">
-          {% for o in sender_options %}
-          <option value="{{ o.email }}" {% if o.current %}selected{% endif %}>
-            {{ o.email }}{% if not o.verified %} — not verified in Brevo{% endif %}
-          </option>{% endfor %}
-        </select>
-        <p class="dim" style="margin:.4em 0 0">
-          Brevo only delivers from a verified sender, so this is a list, not a
-          text field.
-          {% if sender_error %}<br><span class="warn">&#9888; could not reach
-            Brevo ({{ sender_error }}) — the list may be stale.</span>
-          {% else %}
-            {% set unver = sender_options | rejectattr('verified') | list %}
-            {% if unver %}<br><span class="warn">&#9888;
-              {{ unver | map(attribute='email') | join(', ') }}
-              {{ 'is' if unver|length == 1 else 'are' }} not verified in Brevo yet.</span>
-              Fine for a draft you send by hand — the From: is just shown to you —
-              but the digest and anything that sends automatically will be refused.
-            {% endif %}
-          {% endif %}
-        </p></div>
-      <div class="fields-2">
-        <div class="field"><label for="sn">From name</label>
-          <input id="sn" type="text" name="sender_name" value="{{ c.sender_name }}"></div>
-        <div class="field"><label for="sc">Footer line</label>
-          <input id="sc" type="text" name="sender_company_line"
-                 value="{{ c.sender_company_line }}"></div>
-      </div>
-      <p class="dim" style="margin-bottom:0">Used in this campaign's draft emails.</p>
-    </div>
   </div>
 </div>
 <p><button type="submit" class="gold">Save campaign</button>
    <span class="dim">Config only &mdash; saving never starts or stops anything.</span></p>
 </form>
+
+  <div class="card" id="drip">
+  <h2>The sequence{% if c.type != 'drip' %} <span class="dim">&mdash; drip campaigns only</span>{% endif %}</h2>
+  {% if c.type != 'drip' %}
+    <p class="dim">This is a <b>call</b> campaign. A sequence belongs to a
+       <b>drip</b> campaign &mdash; create one on /campaigns.</p>
+  {% else %}
+    <p class="dim">Every delay is measured from the <b>first send</b>. Starting
+       this campaign is the switch &mdash; steps do not send while it is stopped.</p>
+
+    <p class="ph-list">Placeholders:
+      {% for ph in placeholders %}<code class="ph">&#123;&#123;{{ ph }}&#125;&#125;</code>{% endfor %}
+      <span class="dim">&mdash; type them, or click one to insert it at the
+        cursor. An unknown placeholder is left visible rather than blanked, so a
+        typo shows up in the preview instead of shipping a hole in a sentence.</span></p>
+
+    <form method="post" action="/campaign/{{ c.campaign_id }}/steps" id="seqform">
+    <div class="preview-head">
+      <label class="dim">Preview against
+        <select name="lead_id" id="pv-lead">
+          {% for l in preview_candidates %}
+          <option value="{{ l.lead_id }}">{{ l.company }}{% if l.dm_name %} &mdash; {{ l.dm_name }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <span class="dim">A real lead, rendered by the same <code>render()</code>
+        the real sends use.</span>
+    </div>
+
+    {% for st in drip_steps %}
+    {%- set i = loop.index0 -%}
+    {% if not loop.first %}
+    <div class="stepgap">
+      &darr;&nbsp; send
+      <input type="number" name="delay_{{ i }}" min="1" max="365"
+             value="{{ st.delay_days }}" style="width:4.5em">
+      days after the first send
+    </div>
+    {% endif %}
+
+    <details class="card step" style="margin:6px 0;padding:10px" {% if loop.first or not st.enabled %}open{% endif %}>
+      <summary style="cursor:pointer">
+        <b>Step {{ loop.index }}</b>
+        {% if loop.first %}<span class="pill">first send</span>{% endif %}
+        {% if not st.enabled %}<span class="pill human_review">OFF</span>{% endif %}
+        <span class="dim">&mdash; {{ st.subject|truncate(52) }}</span>
+      </summary>
+
+      <div class="copy-split">
+        <div>
+          <input type="hidden" name="step_id_{{ i }}" value="{{ st.step_id }}">
+          <div class="toolbar" style="margin:6px 0">
+            <label class="dim"><input type="checkbox" name="enabled_{{ i }}"
+                   value="1" {% if st.enabled %}checked{% endif %}> enabled</label>
+            <label class="dim"><input type="checkbox" name="delete_{{ i }}"
+                   value="1"> remove</label>
+          </div>
+
+          {% if loop.first %}
+          {# STEP 1 IS THE FIRST SEND. Minutes or hours after joining the drip -
+             it cannot be N days after itself, so it gets no day field at all. #}
+          <div class="field">
+            <label>Sends</label>
+            <div class="toolbar">
+              <input type="number" name="every_{{ i }}" min="0" max="168"
+                     value="{{ st.delay_minutes // 60 if st.delay_minutes and st.delay_minutes % 60 == 0 else st.delay_minutes or 0 }}"
+                     style="width:5em">
+              <select name="unit_{{ i }}">
+                <option value="m" {% if not (st.delay_minutes and st.delay_minutes % 60 == 0) %}selected{% endif %}>minutes</option>
+                <option value="h" {% if st.delay_minutes and st.delay_minutes % 60 == 0 and st.delay_minutes > 0 %}selected{% endif %}>hours</option>
+              </select>
+              <span class="dim">after a lead joins the drip &mdash; 0 = immediately</span>
+            </div>
+          </div>
+          {% endif %}
+
+          <div class="field"><label>Subject</label>
+            <input name="subject_{{ i }}" value="{{ st.subject }}"></div>
+          <div class="field"><label>Body</label>
+            <textarea name="body_{{ i }}" rows="16">{{ st.body }}</textarea>
+            <span class="dim" data-count="{{ i }}"></span></div>
+        </div>
+
+        <div>
+          <div class="pv" id="pv-{{ i }}">
+            <div class="pv-label">Step {{ loop.index }}</div>
+            <div class="pv-subject" data-f="subject">{{ step_previews.get(st.position, {}).get('subject', '') }}</div>
+            <pre class="pv-body" data-f="body">{{ step_previews.get(st.position, {}).get('body', '') }}</pre>
+            <div class="dim pv-warn" data-f="warn"></div>
+          </div>
+        </div>
+      </div>
+    </details>
+    {% endfor %}
+
+    <div id="newsteps"></div>
+    <div class="toolbar" style="margin:10px 0">
+      <button type="button" id="addstep" class="ghost">+ Add another step</button>
+      <span class="dim">A blank step is not saved.</span>
+    </div>
+
+    <template id="steptpl">
+      <div class="stepgap">
+        &darr;&nbsp; send
+        <input type="number" name="delay___I__" min="1" max="365" style="width:4.5em">
+        days after the first send
+      </div>
+      <details class="card step" style="margin:6px 0;padding:10px" open>
+        <summary style="cursor:pointer"><b>New step</b></summary>
+        <div class="copy-split">
+          <div>
+            <input type="hidden" name="enabled___I__" value="1">
+            <div class="field"><label>Subject</label>
+              <input name="subject___I__" placeholder="leave blank to skip"></div>
+            <div class="field"><label>Body</label>
+              <textarea name="body___I__" rows="16" placeholder="leave blank to skip"></textarea>
+              <span class="dim" data-count="__I__"></span></div>
+          </div>
+          <div>
+            <div class="pv" id="pv-__I__">
+              <div class="pv-label">New step</div>
+              <div class="pv-subject" data-f="subject"></div>
+              <pre class="pv-body" data-f="body"></pre>
+              <div class="dim pv-warn" data-f="warn"></div>
+            </div>
+          </div>
+        </div>
+      </details>
+    </template>
+
+    <p><button type="submit" class="gold">Save the sequence</button>
+       <span class="dim">Refused whole if a delay repeats or goes backwards, or a
+         step has no subject or body.</span></p>
+    </form>
+
+    <p class="dim">After the last step: <b>{{ c.after_last_step }}</b>.</p>
+  {% endif %}
+</div>
 
 {% if c.type == 'call' %}
 <div class="card">
@@ -438,106 +413,98 @@
 {% endif %}
 
 <script>
-/* ==========================================================================
-   THE SEQUENCE EDITOR
-   ==========================================================================
-   THE PREVIEW IS RENDERED ON THE SERVER, and that is the point of it. It posts
-   the text currently in the boxes to /campaign/{id}/steps/preview, which runs the
-   SAME drafts.render() and drafts.values_for() the real sends use. A client-side
-   substitution would be a second implementation of the rules, and the first time
-   the two disagreed the preview would be lying about what goes out - worse than
-   no preview, because it would be trusted.
-
-   Debounced rather than per-keystroke: the round trip is what buys the
-   guarantee, and 250ms of lag is a fair price for it.
-   ========================================================================== */
+/* THE SEQUENCE EDITOR - the SAME PATTERN as the copy editor below, deliberately.
+ *
+ * One delegated 'input' listener on the form, new FormData(form) posted to the
+ * server, an AbortController to drop a stale request, paint() writing into
+ * [data-f=...]. Nothing is bound per element, which is why a step cloned by
+ * "add another step" previews with no extra wiring - the version this replaces
+ * needed a wire() call for every new row, which was one more thing to get wrong.
+ *
+ * Rendered by the SERVER, through the same drafts.render() that builds real
+ * drafts. A second copy of the substitution rules in JS could drift from them.
+ */
 (function () {
-  var form = document.getElementById('seq');
-  if (!form) return;                      // a call campaign has no sequence
-  var picker = document.getElementById('pv-lead');
-  var timers = {};
+  var form = document.getElementById('seqform');
+  if (!form) return;
+  var timer = null, inflight = null;
 
-  function count(i) {
-    var body = document.getElementById('bod' + i);
-    var el = document.getElementById('count' + i);
-    if (!body || !el) return;
-    var chars = body.value.length;
-    var words = body.value.trim() ? body.value.trim().split(/\s+/).length : 0;
-    el.textContent = chars + ' characters \u00b7 ' + words + ' words';
+  function paint(data) {
+    Object.keys(data.steps || {}).forEach(function (i) {
+      var box = document.getElementById('pv-' + i);
+      if (!box) return;
+      var d = data.steps[i];
+      box.querySelector('[data-f=subject]').textContent = d.subject;
+      box.querySelector('[data-f=body]').textContent = d.body;
+      var w = box.querySelector('[data-f=warn]');
+      if (w) {
+        w.textContent = d.unknown && d.unknown.length
+          ? '⚠ not a placeholder: ' + d.unknown.map(function (u) {
+              return '{{' + u + '}}'; }).join(', ') + ' — sends as literal text'
+          : '';
+      }
+      var c = form.querySelector('[data-count="' + i + '"]');
+      if (c) c.textContent = d.chars + ' characters · ' + d.words + ' words';
+    });
   }
 
-  function render(i) {
-    var pv = document.getElementById('pv' + i);
-    var sub = document.getElementById('sub' + i);
-    var bod = document.getElementById('bod' + i);
-    if (!pv || !bod) return;
-    var d = new FormData();
-    d.append('subject', sub ? sub.value : '');
-    d.append('body', bod.value);
-    if (picker) d.append('lead_id', picker.value);
-    fetch('/campaign/{{ c.campaign_id }}/steps/preview',
-          {method: 'POST', body: d})
+  function refresh() {
+    if (inflight) inflight.abort();
+    inflight = new AbortController();
+    fetch(form.action + '/preview',
+          {method: 'POST', body: new FormData(form), signal: inflight.signal})
       .then(function (r) { return r.json(); })
-      .then(function (j) {
-        pv.querySelector('.pv-subject').textContent = j.subject || '';
-        pv.querySelector('.pv-body').textContent = j.body || '';
-        var w = pv.querySelector('.pv-warn');
-        /* AN UNRESOLVED PLACEHOLDER IS NAMED. {{frist_name}} renders as itself
-           and is easy to miss in prose - the real send would post it to a law
-           firm verbatim. */
-        if (j.unknown && j.unknown.length) {
-          w.textContent = '\u26a0 not a placeholder: ' +
-            j.unknown.map(function (u) { return '{{' + u + '}}'; }).join(', ') +
-            ' \u2014 this would send as literal text';
-          w.classList.add('warn');
-        } else {
-          w.textContent = ''; w.classList.remove('warn');
-        }
-      })
-      .catch(function () { /* a preview failure must never block editing */ });
+      .then(paint)
+      .catch(function () {});   /* a preview failure must never block editing */
   }
 
-  function schedule(i) {
-    count(i);
-    clearTimeout(timers[i]);
-    timers[i] = setTimeout(function () { render(i); }, 250);
-  }
-
-  form.querySelectorAll('[data-pv]').forEach(function (el) {
-    var i = el.getAttribute('data-pv');
-    el.addEventListener('input', function () { schedule(i); });
-    count(i);
+  form.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(refresh, 250);
+  });
+  form.addEventListener('change', function () {
+    clearTimeout(timer);
+    timer = setTimeout(refresh, 250);
   });
 
-  /* Re-render every step when the preview lead changes: copy that reads well
-     for one firm can read badly for another, which is the reason this is a
-     dropdown rather than one automatic choice. */
-  if (picker) {
-    picker.addEventListener('change', function () {
-      form.querySelectorAll('textarea[data-pv]').forEach(function (el) {
-        render(el.getAttribute('data-pv'));
-      });
+  /* ADD ANOTHER STEP. No cap: one blank row per page load meant one new step
+     per save. The delegated listener above means the clone needs no wiring. */
+  var addBtn = document.getElementById('addstep');
+  var tpl = document.getElementById('steptpl');
+  var host = document.getElementById('newsteps');
+  var next = {{ drip_steps|length }};
+  if (addBtn && tpl && host) {
+    addBtn.addEventListener('click', function () {
+      var i = next++;
+      var box = document.createElement('div');
+      box.innerHTML = tpl.innerHTML.split('__I__').join(String(i));
+      while (box.firstChild) host.appendChild(box.firstChild);
+      var f = host.querySelector('[name="subject_' + i + '"]');
+      if (f) f.focus();
     });
   }
 
-  /* PLACEHOLDER INSERTION AT THE CURSOR. Typing them from memory means a typo
-     renders as literal text in a cold email, which is the failure this removes.
-     Plain textarea on purpose - rich text is wrong for cold email. */
-  form.querySelectorAll('.ph-pick').forEach(function (sel) {
-    sel.addEventListener('change', function () {
-      if (!sel.value) return;
-      var ta = document.getElementById(sel.getAttribute('data-target'));
-      var tok = '{{' + sel.value + '}}';
-      var at = ta.selectionStart === null ? ta.value.length : ta.selectionStart;
-      var to = ta.selectionEnd === null ? at : ta.selectionEnd;
-      ta.value = ta.value.slice(0, at) + tok + ta.value.slice(to);
-      var pos = at + tok.length;
-      ta.focus();
-      ta.setSelectionRange(pos, pos);
-      sel.value = '';
-      schedule(ta.getAttribute('data-pv'));
+  /* PLACEHOLDER CHIPS insert at the cursor. OPTIONAL - typing them works and is
+     the normal path, and pasted copy must survive untouched. The chips exist
+     because a typo renders as literal text, not because typing is discouraged. */
+  document.querySelectorAll('#drip .ph').forEach(function (chip) {
+    chip.style.cursor = 'pointer';
+    chip.title = 'click to insert at the cursor';
+    chip.addEventListener('click', function () {
+      var el = document.activeElement;
+      if (!el || !form.contains(el) ||
+          (el.tagName !== 'TEXTAREA' && el.tagName !== 'INPUT')) return;
+      var tok = chip.textContent.trim();
+      var at = el.selectionStart, to = el.selectionEnd;
+      if (at === null) return;
+      el.value = el.value.slice(0, at) + tok + el.value.slice(to);
+      el.setSelectionRange(at + tok.length, at + tok.length);
+      el.focus();
+      clearTimeout(timer); timer = setTimeout(refresh, 250);
     });
   });
+
+  refresh();        /* correct before the first keystroke, not blank */
 })();
 </script>
 <script>
