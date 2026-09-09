@@ -5,7 +5,15 @@ is retained commented-out in `BACKLOG.md` as history. That model could not
 express many drips and tied a lead's sequence to whichever call campaign
 sourced it.
 
-**Status: SPECIFIED, NOT BUILT.** Nothing below exists yet.
+**Status: PARKED 2026-09-09.** Sean reads every reply himself at this volume;
+the drip is not worth building until that stops being true. Nothing below
+exists, and reply ingest was reverted rather than left half-built - an applied
+migration that is not in git makes dev and a fresh database disagree.
+
+**Groundwork that IS being built now, because it is cheap today and a
+migration against live campaigns later:** campaign type, and archive. Read the
+archive section before touching it - the rest of this design assumes that
+shape.
 
 ---
 
