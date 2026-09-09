@@ -14,8 +14,8 @@ Last updated 2026-09-09. Every number in the table below was read from
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260909_039_timezone_may_be_absent.sql` |
-| Tests | 675 passed, 1 skipped |
+| Last migration | `20260909_040_step_editor.sql` |
+| Tests | 692 passed, 1 skipped |
 | Break pass | **103 definitions** (97–104 added for the drip). Full pass GREEN across all 103 at 2026-09-09T17:23Z, suite 632. The FIRST run of that pass FAILED — break 100 reported GREEN because a drip test was passing with zero clicks; see masked-guard row 12 in README.md |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
@@ -199,7 +199,7 @@ api/
   why.py         "why is it here", assembled from existing state
   funnel.py      / forecast.py / volume.py  the numbers screens
 migrations/      forward-only, applied by scripts/migrate.sh
-scripts/breaks/  111 break definitions, one per guard
+scripts/breaks/  115 break definitions, one per guard
 ```
 
 ## Running it
@@ -233,6 +233,75 @@ version. It now reads the lead's own `campaign_id` from the database inside the
 transaction, with no fallback to `running()`.
 
 ---
+
+## The sequence editor
+
+Rebuilt 2026-09-09 against Apollo's shape, on `/campaign/{id}#drip`.
+
+**Side-by-side live preview, and it CANNOT DRIFT.** The editor posts the text
+currently in the boxes to `/campaign/{id}/steps/preview`, which runs the **same
+`drafts.render()` and `values_for()` the real sends use**. A client-side preview
+would be a second implementation of the substitution rules, and the first time
+they disagreed it would be lying about what goes out — worse than no preview,
+because a preview is what the copy gets judged on. Break 115. Debounced 250ms:
+the round trip is what buys the guarantee.
+
+It renders against a **real lead chosen from a dropdown**, so you read "Hi
+Timothy" and the actual firm name. A dropdown rather than one automatic choice
+because copy that reads well for one firm can read badly for another, and one
+lead cannot show you that.
+
+**Unresolved placeholders are NAMED** in the preview. `{{frist_name}}` renders as
+itself and is easy to miss in prose — the real send would post it to a law firm
+verbatim. The placeholder **menu** (every name from `drafts.PLACEHOLDERS`,
+inserted at the cursor) is what removes the need to type them at all.
+
+### ⚠️ STEP 1 IS NOT ON THE DAY SCALE
+
+Step 1 **is** the first send, so it cannot be N days from itself — a day field on
+it read as a control and was not one. It is timed in **minutes from
+`leads.drip_entered_at`**:
+
+| | anchored to | for |
+|---|---|---|
+| step 1 | `drip_entered_at + delay_minutes` | when the first send fires |
+| steps 2+ | `emailed_at + delay_days` | and step 1 is what CREATES `emailed_at` |
+
+**That is not the duplicate-anchor fault** rejected when the import was designed.
+A `sequence_started_at` would have duplicated `emailed_at` for the *same* event;
+these measure different events, and at the moment step 1 is due the other does
+not exist yet. Break 114.
+
+**Step 1's timing governs IMPORTED leads only**, and the screen says so. A
+call-sourced lead already had email 1 sent by its call campaign (that campaign's
+`email_1_delay_minutes` from `last_called_at`), and `enter()` links that send to
+step 1. Saying nothing would leave an editable control that does nothing for half
+the leads.
+
+### Per-step enable, and the two things it changed
+
+`drip_steps.enabled` — off keeps the copy and the send records; **remove** takes
+the step out of the sequence (soft-deleted). Break 113 stops the toggle being
+decoration: the screen saying a step is off while the sender mails it anyway is
+worse than having no toggle.
+
+Two consequences that are not obvious:
+
+* **`_maybe_finish` counts ENABLED steps only.** A disabled tail step would
+  otherwise never be "done", so the sequence would never terminate and the lead
+  would sit in the drip forever — the limbo the model refuses.
+* **Delay ordering is validated ACROSS disabled steps.** Re-enabling one is a
+  single checkbox with no validation of its own, so a sequence that would be
+  backwards once re-enabled is refused at save time instead.
+
+### Layout
+
+Number → timing → **subject** → body, the way an email reads; subject used to sit
+below the body, which read backwards. Body is 18 rows — four lines is too small to
+judge copy on. Steps collapse (`<details>`, no JS), and **the delay sits BETWEEN
+steps as its own element** ("send in 8 days"), because it is a property of the gap
+rather than of the email — which is what makes the sequence's rhythm visible.
+Live character and word count on each body. Plain text throughout, deliberately.
 
 ## Email-only leads: a list of firms, no calls involved
 

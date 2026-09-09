@@ -52,6 +52,48 @@ MAX_STEPS = 20
 PARK_OFFSET = 10000
 
 
+def _flag(v, default: bool = True) -> bool:
+    """
+    ⚠️ AN ABSENT FIELD IS NOT A FIELD SET TO FALSE.
+
+    An unchecked HTML checkbox posts NOTHING, so from a form 'absent' does mean
+    off - and the web handler therefore ALWAYS supplies this key explicitly. But
+    a programmatic caller (a test, a seed, a script) passes rows without it and
+    means 'a normal enabled step'. Treating those two the same way silently
+    disabled every step created outside the form.
+
+    Same fault the retry ladder hit: an absent ladder field is not a ladder set
+    to empty, and collapsing them made every older form post reject a save.
+    """
+    if v is None:
+        return default
+    return str(v).strip().lower() in ('1', 'true', 'on', 'yes')
+
+
+def _minutes(raw, i) -> int:
+    """
+    Step 1's delay, in minutes from entering the drip. 0 = immediately.
+
+    Blank reads as 0 rather than raising: 'immediately' is the sensible reading
+    of an empty timing box on the FIRST email, and it is what position=1 meant
+    before this field existed.
+    """
+    v = ('' if raw is None else str(raw)).strip()
+    if not v:
+        return 0
+    try:
+        m = int(v)
+    except ValueError:
+        raise BadSequence(f'step {i}: {raw!r} is not a number of minutes.')
+    if m < 0:
+        raise BadSequence(f'step {i}: a delay cannot be negative.')
+    if m > 10080:
+        raise BadSequence(
+            f'step {i}: {m} minutes is over a week. Use a day-based step '
+            f'instead - this control is for the first send.')
+    return m
+
+
 class BadSequence(ValueError):
     """The sequence is refused. Never saved half-valid."""
 
@@ -60,13 +102,21 @@ class BadSequence(ValueError):
 # the sequence
 # ---------------------------------------------------------------------------
 
-def steps(campaign_id):
-    """Live steps, in order. Soft-deleted ones are history, not sequence."""
+def steps(campaign_id, enabled_only: bool = False):
+    """
+    Steps in order. Soft-deleted ones are history, not sequence.
+
+    DISABLED STEPS ARE INCLUDED BY DEFAULT, because the EDITOR has to show them
+    - a step you cannot see is a step you cannot turn back on. due() applies
+    ENABLED_STOP in SQL rather than calling this, so the two cannot disagree
+    about what is live.
+    """
+    extra = ' AND enabled' if enabled_only else ''
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT * FROM drip_steps
-                            WHERE campaign_id = %s AND deleted_at IS NULL
-                            ORDER BY position""", (campaign_id,))
+            cur.execute(f"""SELECT * FROM drip_steps
+                             WHERE campaign_id = %s AND deleted_at IS NULL{extra}
+                             ORDER BY position""", (campaign_id,))
             return cur.fetchall()
 
 
@@ -96,22 +146,40 @@ def validate(rows) -> list:
     for i, r in enumerate(rows or [], start=1):
         subject = (r.get('subject') or '').strip()
         body = (r.get('body') or '').strip()
-        raw = r.get('delay_days')
         if not subject:
             raise BadSequence(f'step {i} has no subject - it would send blank.')
         if not body:
             raise BadSequence(f'step {i} has no body - it would send blank.')
+
+        # ⚠️ STEP 1 IS TIMED IN MINUTES FROM ENTERING THE DRIP; STEPS 2+ IN
+        # DAYS FROM emailed_at. Step 1 IS the first send, so it cannot be N
+        # days from itself - a day field on it read as a control and was not
+        # one. delay_days is still carried on step 1 (as 0) so the ordering
+        # check below has one scale to compare on.
+        if i == 1:
+            mins = _minutes(r.get('delay_minutes'), i)
+            clean.append({'position': i, 'delay_days': 0,
+                          'delay_minutes': mins, 'subject': subject,
+                          'body': body, 'enabled': _flag(r.get('enabled')),
+                          'step_id': r.get('step_id') or None})
+            continue
+
+        raw = r.get('delay_days')
         try:
             delay = int(raw)
         except (TypeError, ValueError):
             raise BadSequence(
                 f'step {i}: {raw!r} is not a number of days.')
-        if delay < 0:
-            raise BadSequence(f'step {i}: a delay cannot be negative.')
+        if delay < 1:
+            raise BadSequence(
+                f'step {i}: it must be at least a day after the first send - '
+                f'day 0 is step 1, and two emails in one minute reads as a '
+                f'malfunction.')
         if delay > 365:
             raise BadSequence(f'step {i}: {delay} days is over a year out.')
         clean.append({'position': i, 'delay_days': delay,
-                      'subject': subject, 'body': body,
+                      'delay_minutes': None, 'subject': subject,
+                      'body': body, 'enabled': _flag(r.get('enabled')),
                       'step_id': r.get('step_id') or None})
 
     if not clean:
@@ -121,8 +189,16 @@ def validate(rows) -> list:
     if len(clean) > MAX_STEPS:
         raise BadSequence(f'{len(clean)} steps is more than {MAX_STEPS}.')
 
+    # ⚠️ ORDERING IS CHECKED ACROSS DISABLED STEPS TOO. A disabled step keeps
+    # its delay, so skipping it here would let a sequence be saved that becomes
+    # BACKWARDS the moment somebody re-enables it - and the re-enable is a
+    # single checkbox with no validation of its own.
+    #
+    # Step 1 is excluded because it is not on this scale at all: its timing is
+    # minutes from entering the drip, and it always precedes every day-based
+    # step by construction.
     prev = None
-    for r in clean:
+    for r in clean[1:]:
         if prev is not None and r['delay_days'] == prev:
             raise BadSequence(
                 f'step {r["position"]} falls due on day {r["delay_days"]}, the '
@@ -177,12 +253,14 @@ def save_steps(campaign_id, rows):
                 if r['step_id']:
                     cur.execute(
                         """UPDATE drip_steps
-                              SET position = %s, delay_days = %s, subject = %s,
-                                  body = %s, updated_at = now()
+                              SET position = %s, delay_days = %s,
+                                  delay_minutes = %s, subject = %s,
+                                  body = %s, enabled = %s, updated_at = now()
                             WHERE step_id = %s AND campaign_id = %s
                         RETURNING *""",
-                        (r['position'], r['delay_days'], r['subject'],
-                         r['body'], r['step_id'], campaign_id))
+                        (r['position'], r['delay_days'], r['delay_minutes'],
+                         r['subject'], r['body'], r['enabled'],
+                         r['step_id'], campaign_id))
                     row = cur.fetchone()
                     if row is None:
                         raise BadSequence(
@@ -190,10 +268,12 @@ def save_steps(campaign_id, rows):
                 else:
                     cur.execute(
                         """INSERT INTO drip_steps
-                               (campaign_id, position, delay_days, subject, body)
-                           VALUES (%s,%s,%s,%s,%s) RETURNING *""",
+                               (campaign_id, position, delay_days,
+                                delay_minutes, subject, body, enabled)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                         (campaign_id, r['position'], r['delay_days'],
-                         r['subject'], r['body']))
+                         r['delay_minutes'], r['subject'], r['body'],
+                         r['enabled']))
                     row = cur.fetchone()
                 out.append(row)
             return out
@@ -263,8 +343,11 @@ def enter(cur, lead_id, drip_campaign_id) -> bool:
     """
     if not drip_campaign_id:
         return False
+    # STAMP WHEN IT ENTERED. Step 1's delay is measured from here, so without
+    # this a 15-minute step 1 would have nothing to count from.
     cur.execute(
-        """UPDATE leads SET drip_campaign_id = %s, updated_at = now()
+        """UPDATE leads SET drip_campaign_id = %s,
+                          drip_entered_at = now(), updated_at = now()
             WHERE lead_id = %s AND drip_campaign_id IS NULL
         RETURNING lead_id""", (drip_campaign_id, lead_id))
     if cur.fetchone() is None:
@@ -345,6 +428,12 @@ def sends(lead_id):
 # stopping on one would silence the sequence exactly when it is working.
 # ---------------------------------------------------------------------------
 
+# A DISABLED STEP IS SKIPPED, and it keeps its copy and its send records.
+# Distinct from deleted_at: turning a step off is 'try the sequence without
+# step 3', deleting it is 'that step is gone'. Without this the only way to
+# test a sequence without one step was to delete it and retype the copy.
+ENABLED_STOP = 'AND s.enabled'
+
 REPLIED_STOP = 'AND l.replied_at IS NULL'
 ARCHIVED_STOP = "AND l.status <> 'archived'"
 # A drip only sends while ITS campaign is running. is_running is the switch,
@@ -378,10 +467,21 @@ ALREADY_SENT_STOP = ('AND NOT EXISTS (SELECT 1 FROM email_sends es '
 # ONE ANCHOR, not two. The alternative was a separate sequence_started_at
 # column, which would mean two columns that must agree forever; emailed_at
 # already means "when the sequence started" and keeps meaning exactly that.
+# STEP 1's clock runs from drip_entered_at, NOT from emailed_at - emailed_at
+# does not exist yet, because step 1 is what creates it. Steps 2+ run from
+# emailed_at. Different events, so different anchors; see migration 040 for why
+# that is not the duplicate-anchor fault rejected when the import was designed.
+#
+# coalesce on drip_entered_at so a lead that predates the column still works:
+# an absent entry time reads as "already elapsed", never as "never due", which
+# is the direction that fails loudly rather than silently.
 DUE_NOW = ("AND ((l.emailed_at IS NOT NULL"
            "      AND l.emailed_at + (s.delay_days || ' days')::interval"
            "          <= now())"
-           "  OR (l.emailed_at IS NULL AND s.position = 1))")
+           "  OR (l.emailed_at IS NULL AND s.position = 1"
+           "      AND coalesce(l.drip_entered_at, 'epoch'::timestamptz)"
+           "          + (coalesce(s.delay_minutes, 0) || ' minutes')::interval"
+           "          <= now()))")
 
 SELECT_DUE = """
     SELECT l.lead_id, l.company, l.dm_email, l.dm_name, l.emailed_at,
@@ -400,6 +500,7 @@ SELECT_DUE = """
        {archived}
        {terminal}
        {do_not_send}
+       {enabled}
        {already_sent}
        {due_now}
      -- The EARLIEST unsent due step for each lead, so a sequence cannot skip
@@ -412,6 +513,7 @@ def _build_select(due_clause=DUE_NOW):
     return SELECT_DUE.format(
         running=RUNNING_STOP, replied=REPLIED_STOP, archived=ARCHIVED_STOP,
         terminal=TERMINAL_STOP, do_not_send=DO_NOT_SEND_STOP,
+        enabled=ENABLED_STOP,
         already_sent=ALREADY_SENT_STOP, due_now=due_clause)
 
 
@@ -619,14 +721,21 @@ def _maybe_finish(cfg, lead_id) -> bool:
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT l.drip_campaign_id,
+                                  -- ENABLED ONLY. A disabled tail step would
+                                  -- otherwise never be 'done', so the sequence
+                                  -- would never terminate and the lead would
+                                  -- sit in the drip forever - the limbo the
+                                  -- whole model refuses.
                                   (SELECT count(*) FROM drip_steps s
                                     WHERE s.campaign_id = l.drip_campaign_id
-                                      AND s.deleted_at IS NULL)  AS total,
+                                      AND s.deleted_at IS NULL
+                                      AND s.enabled)             AS total,
                                   (SELECT count(*) FROM email_sends es
                                     JOIN drip_steps s2 ON s2.step_id = es.step_id
                                    WHERE es.lead_id = l.lead_id
                                      AND s2.campaign_id = l.drip_campaign_id
-                                     AND s2.deleted_at IS NULL) AS done
+                                     AND s2.deleted_at IS NULL
+                                     AND s2.enabled)            AS done
                              FROM leads l WHERE l.lead_id = %s""", (lead_id,))
             r = cur.fetchone()
     if not r or not r['drip_campaign_id'] or r['done'] < r['total']:
@@ -686,8 +795,11 @@ def stop(lead_id, reason: str, by: str = 'operator') -> bool:
             row = cur.fetchone()
             if row is None:
                 return False
+            # drip_entered_at goes with it: if this lead is ever put on a drip
+            # again, step 1 must be timed from THAT entry, not the old one.
             cur.execute(
-                """UPDATE leads SET drip_campaign_id = NULL, updated_at = now()
+                """UPDATE leads SET drip_campaign_id = NULL,
+                          drip_entered_at = NULL, updated_at = now()
                     WHERE lead_id = %s""", (lead_id,))
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, summary, detail)

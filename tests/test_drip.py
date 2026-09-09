@@ -114,11 +114,30 @@ def test_a_backwards_delay_is_refused(db):
 
 
 def test_a_duplicate_delay_is_refused(db):
-    """Two steps due the same day means two emails at once."""
+    """
+    Two steps due the same day means two emails at once.
+
+    Needs THREE steps now: step 1 is timed in MINUTES from entering the drip, not
+    in days, so it is not on the scale this rule compares - it is the first send
+    and cannot be N days from itself. The duplicate has to be between two LATER
+    steps.
+    """
     c = campaigns.create('DRIP-D', campaign_type='drip')['campaign_id']
-    with pytest.raises(drip.BadSequence):
-        drip.save_steps(c, [{'delay_days': 4, 'subject': 'a', 'body': 'a'},
-                            {'delay_days': 4, 'subject': 'b', 'body': 'b'}])
+    with pytest.raises(drip.BadSequence) as e:
+        drip.save_steps(c, [{'delay_minutes': 0, 'subject': 'a', 'body': 'a'},
+                            {'delay_days': 4, 'subject': 'b', 'body': 'b'},
+                            {'delay_days': 4, 'subject': 'c', 'body': 'c'}])
+    assert 'same day' in str(e.value)
+
+
+def test_a_later_step_may_not_land_on_day_zero(db):
+    """Day 0 is step 1. A second email in the same minute reads as a
+    malfunction, and is the fastest way to get a sending domain blocked."""
+    c = campaigns.create('DRIP-Z', campaign_type='drip')['campaign_id']
+    with pytest.raises(drip.BadSequence) as e:
+        drip.save_steps(c, [{'delay_minutes': 0, 'subject': 'a', 'body': 'a'},
+                            {'delay_days': 0, 'subject': 'b', 'body': 'b'}])
+    assert 'at least a day' in str(e.value)
 
 
 def test_a_step_with_no_body_is_refused(db):
@@ -593,3 +612,322 @@ def test_a_call_page_is_unchanged(db, client):
         assert f'<h2>{kept}</h2>' in r.text, f'a call page lost {kept!r}'
     assert 'Save the sequence' not in r.text, \
         'a call campaign was offered a sequence editor it cannot use'
+
+
+# ==========================================================================
+# THE SEQUENCE EDITOR
+#
+# Every one of these guards something that can be DECORATION: a toggle the
+# sender ignores, a delay that does not delay, a preview that disagrees with
+# what goes out. A control the screen promises and the code does not honour is
+# worse than no control.
+# ==========================================================================
+
+def test_a_disabled_step_is_never_sent(db, dripc):
+    """
+    ⚠️ THE TOGGLE MUST NOT BE DECORATION. The screen says the step is off; if the
+    sender mails it anyway that is worse than having no toggle, because the
+    operator has been TOLD it will not happen.
+    """
+    lid = _lead(db, days_ago=40)
+    cid = dripc['campaign_id']
+    _join(db, lid, cid, sent_steps=1)
+    steps = drip.steps(cid)
+
+    # Premise: step 2 is due.
+    mine = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert [r['position'] for r in mine] == [2], 'premise'
+
+    drip.save_steps(cid, [
+        {'step_id': steps[0]['step_id'], 'delay_minutes': 0,
+         'subject': 'a', 'body': 'a', 'enabled': '1'},
+        {'step_id': steps[1]['step_id'], 'delay_days': 4,
+         'subject': 'b', 'body': 'b', 'enabled': ''},        # OFF
+        {'step_id': steps[2]['step_id'], 'delay_days': 10,
+         'subject': 'c', 'body': 'c', 'enabled': '1'},
+        {'step_id': steps[3]['step_id'], 'delay_days': 21,
+         'subject': 'd', 'body': 'd', 'enabled': '1'},
+    ])
+    mine = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert [r['position'] for r in mine] == [3], \
+        'a disabled step was still selected, or it blocked the sequence'
+
+
+def test_a_disabled_step_keeps_its_copy_and_its_sends(db, dripc):
+    """Disabling is not deleting. Re-enabling must restore the same step, and a
+    lead that already had it must not receive it twice."""
+    lid = _lead(db, days_ago=40)
+    cid = dripc['campaign_id']
+    _join(db, lid, cid, sent_steps=2)
+    steps = drip.steps(cid)
+    rows = [{'step_id': s['step_id'],
+             'delay_minutes': 0 if s['position'] == 1 else None,
+             'delay_days': s['delay_days'],
+             'subject': s['subject'], 'body': s['body'],
+             'enabled': '' if s['position'] == 2 else '1'} for s in steps]
+    drip.save_steps(cid, rows)
+    off = [s for s in drip.steps(cid) if s['position'] == 2][0]
+    assert off['enabled'] is False
+    assert off['subject'] == 'Second', 'the copy was lost'
+    assert off['deleted_at'] is None, 'disabling soft-deleted it'
+    assert len(drip.sends(lid)) == 2, 'the send records were lost'
+
+    # Re-enable: still not re-sent, because the send record stands.
+    for r in rows:
+        r['enabled'] = '1'
+    drip.save_steps(cid, rows)
+    mine = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert 2 not in [r['position'] for r in mine], \
+        're-enabling a step re-sent it to a lead that already had it'
+
+
+def test_the_ordering_check_spans_disabled_steps(db):
+    """
+    A disabled step keeps its delay, and re-enabling it is a single checkbox with
+    no validation of its own. So a sequence that would be BACKWARDS once
+    re-enabled must be refused at save time, not at re-enable time.
+    """
+    c = campaigns.create('DRIP-ORD', campaign_type='drip')['campaign_id']
+    with pytest.raises(drip.BadSequence):
+        drip.save_steps(c, [
+            {'delay_minutes': 0, 'subject': 'a', 'body': 'a', 'enabled': '1'},
+            {'delay_days': 10, 'subject': 'b', 'body': 'b', 'enabled': ''},
+            {'delay_days': 4, 'subject': 'c', 'body': 'c', 'enabled': '1'},
+        ])
+
+
+def test_step_1_is_timed_in_minutes_from_entering_the_drip(db, dripc):
+    """
+    STEP 1 IS THE FIRST SEND, so it cannot be N days from itself. Its clock runs
+    from leads.drip_entered_at, which is why that column exists.
+    """
+    cid = dripc['campaign_id']
+    steps = drip.steps(cid)
+    assert steps[0]['delay_minutes'] is not None, 'step 1 has no minute timing'
+    assert steps[0]['delay_days'] == 0, 'step 1 must not be on the day scale'
+    for s in steps[1:]:
+        assert s['delay_minutes'] is None, 'a later step got minute timing'
+        assert s['delay_days'] >= 1
+
+
+def test_step_1_waits_for_its_delay_before_sending(db, dripc):
+    """
+    ⚠️ A DELAY THAT DOES NOT DELAY IS THE WORST KIND OF CONTROL.
+
+    "after 15 minutes" sending instantly means an imported batch of 500 firms is
+    mailed the second it is uploaded - and upload is the moment a mistake is most
+    likely. Those minutes are the window in which it can still be stopped.
+    """
+    cid = dripc['campaign_id']
+    steps = drip.steps(cid)
+    drip.save_steps(cid, [
+        {'step_id': steps[0]['step_id'], 'delay_minutes': 30,
+         'subject': 'a', 'body': 'a', 'enabled': '1'},
+    ] + [{'step_id': s['step_id'], 'delay_days': s['delay_days'],
+          'subject': s['subject'], 'body': s['body'], 'enabled': '1'}
+         for s in steps[1:]])
+
+    # An imported lead: on the drip, no emailed_at, entered just now.
+    lid = _lead(db, days_ago=0, phone_e164='+15553339001',
+                lead_source='import')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE leads SET emailed_at = NULL, emailed_by = NULL,
+                                  drip_campaign_id = %s, drip_entered_at = now()
+                            WHERE lead_id = %s""", (cid, lid))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'step 1 sent immediately despite a 30-minute delay'
+
+    # Move the DATA, not the clock.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE leads
+                              SET drip_entered_at = now() - interval '31 minutes'
+                            WHERE lead_id = %s""", (lid,))
+    mine = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert [r['position'] for r in mine] == [1], 'step 1 never became due'
+
+
+def test_entering_a_drip_stamps_when(db, dripc):
+    """Step 1's delay has nothing to count from otherwise."""
+    lid = _lead(db, days_ago=0, phone_e164='+15553339002')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            assert drip.enter(cur, lid, dripc['campaign_id']) is True
+    assert _get_lead(db, lid)['drip_entered_at'] is not None
+
+
+def test_stopping_a_drip_clears_the_entry_time(db, dripc):
+    """If this lead is ever put on a drip again, step 1 must be timed from THAT
+    entry, not the old one."""
+    lid = _lead(db, days_ago=0, phone_e164='+15553339003')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            drip.enter(cur, lid, dripc['campaign_id'])
+    drip.stop(lid, 'by_hand', by='test')
+    row = _get_lead(db, lid)
+    assert row['drip_campaign_id'] is None
+    assert row['drip_entered_at'] is None
+
+
+def test_a_disabled_tail_step_does_not_block_finishing(db, dripc):
+    """
+    Otherwise the sequence never terminates and the lead sits in the drip
+    forever - the limbo the whole model refuses.
+    """
+    cid = dripc['campaign_id']
+    steps = drip.steps(cid)
+    rows = [{'step_id': s['step_id'],
+             'delay_minutes': 0 if s['position'] == 1 else None,
+             'delay_days': s['delay_days'], 'subject': s['subject'],
+             'body': s['body'],
+             'enabled': '' if s['position'] == 4 else '1'} for s in steps]
+    drip.save_steps(cid, rows)
+
+    lid = _lead(db, days_ago=40, phone_e164='+15553339004')
+    _join(db, lid, cid, sent_steps=3)
+    assert drip._maybe_finish(None, lid) is True, \
+        'three of three ENABLED steps sent, and it did not finish'
+    assert _get_lead(db, lid)['status'] == 'archived'
+
+
+def test_the_preview_uses_the_same_render_the_real_sends_use(db, dripc, client):
+    """
+    ⚠️ THE WHOLE VALUE OF THE PREVIEW IS THAT IT CANNOT DRIFT.
+
+    A client-side preview would be a second implementation of the substitution
+    rules, and the first time the two disagreed it would be LYING about what goes
+    out - worse than no preview, because it would be trusted. So it posts to the
+    server and comes back through drafts.render() / values_for().
+    """
+    from api import drafts
+    lead = _lead(db, days_ago=1, phone_e164='+15553339010',
+                 company='Whitfield Law', dm_name='Timothy Ross')
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
+                    data={'subject': 'Following up, {{first_name}}',
+                          'body': 'Hi {{first_name}} at {{company}}.',
+                          'lead_id': str(lead)})
+    assert r.status_code == 200
+    j = r.json()
+    assert j['subject'] == 'Following up, Timothy'
+    assert 'Hi Timothy at Whitfield Law.' == j['body']
+
+    # Byte-identical to what the real path produces for the same input.
+    from api import campaigns as _c
+    camp = _c.get(dripc['campaign_id'])
+    lead_row = drafts.lead_for_preview(lead)
+    vals = drafts.values_for(lead_row, camp)
+    assert j['body'] == drafts.render('Hi {{first_name}} at {{company}}.', vals)
+
+
+def test_the_preview_names_an_unresolved_placeholder(db, dripc, client):
+    """
+    A typo renders as ITSELF and is easy to miss in prose - the real send would
+    post {{frist_name}} to a law firm verbatim. That is the failure the
+    placeholder menu removes and this catches when somebody types anyway.
+    """
+    lead = _lead(db, days_ago=1, phone_e164='+15553339011')
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
+                    data={'subject': 'Hi {{frist_name}}', 'body': 'x',
+                          'lead_id': str(lead)})
+    j = r.json()
+    assert 'frist_name' in j['unknown']
+    assert j['subject'] == 'Hi {{frist_name}}', \
+        'an unknown placeholder must render as itself, not be blanked - blanking '\
+        'hides the typo instead of showing it'
+
+
+def test_the_preview_reports_a_body_count(db, dripc, client):
+    lead = _lead(db, days_ago=1, phone_e164='+15553339012')
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps/preview",
+                    data={'subject': 's', 'body': 'one two three',
+                          'lead_id': str(lead)})
+    j = r.json()
+    assert j['words'] == 3
+    assert j['chars'] == len('one two three')
+
+
+def test_the_editor_offers_real_leads_and_every_placeholder(db, dripc, client):
+    _lead(db, days_ago=1, phone_e164='+15553339013', company='Bergman & Co',
+          dm_name='Ada Bergman')
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert r.status_code == 200, r.text[:400]
+    # A real lead to render against, by name - not {{first_name}}.
+    assert 'Bergman &amp; Co' in r.text or 'Bergman & Co' in r.text
+    assert 'pv-lead' in r.text, 'no preview-lead dropdown'
+    # Every placeholder is offered, so none has to be typed from memory.
+    from api import drafts
+    for ph in drafts.PLACEHOLDERS:
+        assert ph in r.text, f'{ph} is not offered in the placeholder menu'
+
+
+def test_the_editor_reads_top_to_bottom_and_gives_the_body_room(db, dripc, client):
+    """
+    SUBJECT ABOVE BODY, the way an email reads - it used to sit below, which read
+    backwards. And the body needs real height: four lines is too small to judge
+    copy on.
+    """
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    body_at = r.text.index('name="body_0"')
+    subj_at = r.text.index('name="subject_0"')
+    assert subj_at < body_at, 'the subject renders below the body'
+    import re
+    rows = re.search(r'id="bod0"[^>]*rows="(\d+)"', r.text)
+    assert rows and int(rows.group(1)) >= 12, \
+        'the body box is too short to judge copy in'
+
+
+def test_each_step_collapses_and_the_delay_sits_between_them(db, dripc, client):
+    """A four-step sequence has to fit on screen, and the delay is a property of
+    the GAP rather than of the email - reading "send in 8 days" between two cards
+    is how the sequence's rhythm becomes visible."""
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert '<details' in r.text, 'steps do not collapse'
+    assert 'days after the <b>first</b> send' in r.text, \
+        'the delay is not shown between the steps'
+
+
+def test_step_1_is_not_offered_a_day_field(db, dripc, client):
+    """It IS the first send. A day field on it read as a control and was not one."""
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert 'name="minutes_0"' in r.text, 'step 1 has no minute timing control'
+    assert 'name="delay_0"' not in r.text, \
+        'step 1 is still offered a day field it cannot honour'
+    assert 'imported' in r.text.lower(), \
+        'the screen must say step 1 timing governs imported leads only'
+
+
+def test_a_step_created_without_the_field_is_enabled(db):
+    """
+    ⚠️ ISOLATES THE DEFAULT, which nothing else does: every other test here
+    passes `enabled` explicitly, so drip._flag() never sees None and the default
+    is never exercised.
+
+    An unchecked checkbox posts nothing, so from a FORM absent means off - the web
+    handler therefore always supplies the key. A programmatic caller (a test, a
+    seed, a script) passes rows without it and means "a normal enabled step".
+    Collapsing those two silently disabled every step created outside the form,
+    and a seeded sequence that quietly never sends is the unlucky version of that.
+
+    Third time this shape has bitten: an absent retry ladder is not an empty one,
+    an absent campaign type is not 'call', and now this.
+    """
+    c = campaigns.create('DRIP-DEF', campaign_type='drip')['campaign_id']
+    saved = drip.save_steps(c, [
+        {'delay_minutes': 0, 'subject': 'a', 'body': 'a'},      # no 'enabled'
+        {'delay_days': 4, 'subject': 'b', 'body': 'b'},         # no 'enabled'
+    ])
+    assert all(s['enabled'] is True for s in saved), \
+        'a step created without the field came out DISABLED - it would never send'
+    assert all(s['enabled'] is True for s in drip.steps(c))
+
+    # And the form's explicit 'off' still works, or the default would be
+    # overriding a real choice.
+    steps = drip.steps(c)
+    drip.save_steps(c, [
+        {'step_id': steps[0]['step_id'], 'delay_minutes': 0,
+         'subject': 'a', 'body': 'a', 'enabled': '1'},
+        {'step_id': steps[1]['step_id'], 'delay_days': 4,
+         'subject': 'b', 'body': 'b', 'enabled': ''},
+    ])
+    assert [s['enabled'] for s in drip.steps(c)] == [True, False]

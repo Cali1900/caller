@@ -1248,6 +1248,44 @@ def lead_drip_assign(lead_id: str, drip_campaign_id: str = Form(...)):
         f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
 
 
+@router.post('/campaign/{campaign_id}/steps/preview')
+async def campaign_step_preview(campaign_id: str, request: Request):
+    """
+    Render the text CURRENTLY IN THE BOXES for one step, against a chosen lead.
+
+    SERVER-SIDE ON PURPOSE, and this is the whole reason the preview is worth
+    having: it goes through the SAME drafts.render() and drafts.values_for()
+    that the real sends use. A client-side preview would be a second
+    implementation of the substitution rules, and the first time they disagreed
+    the preview would be lying about what goes out - which is worse than no
+    preview, because it would be trusted.
+
+    Debounced from the browser rather than rendered on every keystroke: the
+    round trip is what buys the guarantee, and a few hundred milliseconds of
+    lag is a fair price for it.
+    """
+    camp = campaigns.get(campaign_id)
+    if camp is None:
+        return JSONResponse({'error': 'no such campaign'}, status_code=404)
+    form = await request.form()
+    lead = (drafts_mod.lead_for_preview(form.get('lead_id'))
+            or drafts_mod.preview_lead(campaign_id)[0])
+    vals = drafts_mod.values_for(lead, camp)
+    subject = drafts_mod.render(form.get('subject') or '', vals)
+    body = drafts_mod.render(form.get('body') or '', vals)
+    # UNRESOLVED PLACEHOLDERS ARE NAMED, not silently left as text. A typo like
+    # {{frist_name}} renders as itself and is easy to miss in prose; the real
+    # send would post it to a law firm verbatim.
+    import re as _re
+    unknown = sorted(set(_re.findall(r'\{\{\s*([a-zA-Z_]+)\s*\}\}',
+                                    (subject or '') + ' ' + (body or ''))))
+    return JSONResponse({
+        'subject': subject, 'body': body,
+        'chars': len(body or ''), 'words': len((body or '').split()),
+        'unknown': unknown,
+        'lead': {'company': lead.get('company'), 'name': lead.get('dm_name')}})
+
+
 @router.post('/campaign/{campaign_id}/steps')
 async def campaign_steps_save(request: Request, campaign_id: str):
     """
@@ -1263,8 +1301,14 @@ async def campaign_steps_save(request: Request, campaign_id: str):
     i = 0
     while f'subject_{i}' in form or f'body_{i}' in form:
         if (form.get(f'delete_{i}') or '') != '1':
+            # `enabled` is supplied EXPLICITLY, always. An unchecked checkbox
+            # posts nothing, and drip._flag() defaults absent to TRUE so a
+            # programmatic caller gets a normal step - so the form has to say
+            # 'off' out loud rather than saying nothing.
             rows.append({'step_id': (form.get(f'step_id_{i}') or '').strip() or None,
                          'delay_days': form.get(f'delay_{i}'),
+                         'delay_minutes': form.get(f'minutes_{i}'),
+                         'enabled': '1' if form.get(f'enabled_{i}') else '',
                          'subject': form.get(f'subject_{i}'),
                          'body': form.get(f'body_{i}')})
         i += 1
@@ -1306,13 +1350,17 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
         # same sample lead the email-1 preview uses - so what you see is what
         # drafts.render() will actually produce.
         'drip_steps': _drip_mod.steps(campaign_id),
-        'step_previews': [
-            {'position': st['position'],
-             'subject': drafts_mod.render(st['subject'],
-                                          drafts_mod.values_for(pv_lead, camp)),
-             'body': drafts_mod.render(st['body'],
-                                       drafts_mod.values_for(pv_lead, camp))}
-            for st in _drip_mod.steps(campaign_id)],
+        # RENDERED ON LOAD as well as on every edit, so the preview is correct
+        # before anything is typed rather than empty until the first keystroke.
+        'step_previews': {
+            st['position']: {
+                'subject': drafts_mod.render(
+                    st['subject'], drafts_mod.values_for(pv_lead, camp)),
+                'body': drafts_mod.render(
+                    st['body'], drafts_mod.values_for(pv_lead, camp))}
+            for st in _drip_mod.steps(campaign_id)},
+        'preview_candidates': drafts_mod.preview_candidates(campaign_id),
+        'placeholders': drafts_mod.PLACEHOLDERS,
         'reachable': {o: _rl.reachable(camp[f'retry_{o}'], camp['max_attempts'])
                       for o in _rl.COLUMNS},
         'hours_left': round(remaining / per_hour, 1) if per_hour else 0,

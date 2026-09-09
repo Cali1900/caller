@@ -130,6 +130,20 @@ happen.
 
 Note #5: the *test* was wrong, not the code. That is the usual shape.
 
+**A THIRD INSTANCE OF "AN ABSENT FIELD IS NOT A FIELD SET TO EMPTY"**, found
+2026-09-09 while adding the per-step enable toggle. An unchecked HTML checkbox
+posts NOTHING, so from a form absent means off — but a programmatic caller (a
+test, a seed, a script) passes rows without the key and means "a normal enabled
+step". Collapsing those two silently disabled every step created outside the
+form. The lucky version is what happened: every drip test went red at once. The
+unlucky version is a seeded sequence that quietly never sends.
+
+The previous two: an absent retry ladder is not a ladder set to empty (which made
+every older form post reject a whole save), and an absent campaign `type` is not
+`'call'` (which would have created every drip as a call campaign). **When a form
+field can be legitimately absent, the handler supplies it explicitly and the
+validator defaults it to the safe-for-code value, not the safe-for-forms one.**
+
 Note #13 is the one to internalise: **a concurrency guard checked after the
 thing it guards is not a guard**, and **"verified" against a snapshot you took
 of a broken state verifies nothing.** Every report in that chain was truthful

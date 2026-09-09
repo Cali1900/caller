@@ -283,6 +283,45 @@ SAMPLE_LEAD = {
 }
 
 
+def preview_candidates(campaign_id=None, limit: int = 30):
+    """
+    Real leads the operator can render a step against, newest contact first.
+
+    A DROPDOWN, not one automatic choice: '{{first_name}}' tells you nothing
+    about whether the copy reads well, and neither does one lead if that lead
+    happens to have a short firm name and no gatekeeper. Seeing it against
+    several real firms is how you catch copy that only works for one.
+
+    Prefers leads ON this campaign (a drip's own leads), then any lead with a
+    contact name, then anything with an email. Only leads with a NAME are
+    offered where possible, because the with-name variant is the one most copy
+    is written for.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT lead_id, company, dm_name, dm_email
+                             FROM leads
+                            WHERE dm_email IS NOT NULL
+                            ORDER BY (drip_campaign_id = %s) DESC NULLS LAST,
+                                     (campaign_id = %s) DESC NULLS LAST,
+                                     (dm_name IS NOT NULL) DESC,
+                                     updated_at DESC
+                            LIMIT %s""",
+                        (campaign_id, campaign_id, limit))
+            return cur.fetchall()
+
+
+def lead_for_preview(lead_id):
+    """One named lead, or None. Used when the operator picks from the
+    dropdown rather than taking the default."""
+    if not lead_id:
+        return None
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT * FROM leads WHERE lead_id = %s', (lead_id,))
+            return cur.fetchone()
+
+
 def preview_lead(campaign_id=None):
     """
     A REAL lead to render the template against, so the preview shows the copy
