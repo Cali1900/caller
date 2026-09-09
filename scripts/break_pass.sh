@@ -51,6 +51,11 @@ ORIG="$STATE/originals"
 MANIFEST="$STATE/MANIFEST"
 ACTIVE="$STATE/ACTIVE"
 
+# The suite must not silently shrink. A collection error takes out a whole
+# file, exits 0 on what remains, and reads as green - so a floor, well under
+# the current count, turns that into a failure. Raise it as the suite grows.
+MIN_TESTS=400
+
 MODE=run
 FULL=0
 ONLY=""
@@ -365,7 +370,26 @@ fi
 
 echo "  running FULL suite, expecting GREEN ..."
 if ./scripts/test.sh -q > /tmp/bp_out 2>&1; then
-  echo "  RESULT: GREEN ✓ ($(grep -E '^=+ .*(passed|failed)' /tmp/bp_out | tail -1))"
+  # MATCH BOTH FORMS. pytest prints "==== 598 passed ====" on a terminal and a
+  # bare "598 passed, 1 skipped in 278s" under -q with no tty - which is what
+  # runs here, so the count was ALWAYS blank and "GREEN ()" was the only
+  # output. A green with no number cannot tell a full suite from a collection
+  # error that ran three tests, which is the whole thing this line is for.
+  summary=$(grep -E '^(=+ .*)?[0-9]+ (passed|failed)' /tmp/bp_out | tail -1)
+  count=$(grep -oE '[0-9]+ passed' <<<"$summary" | head -1 | cut -d' ' -f1)
+  if [[ -z "$count" ]]; then
+    echo "  RESULT: UNVERIFIABLE <-- the suite exited 0 but printed no test"
+    echo "          count. That is not a green; it is a result nobody read."
+    tail -5 /tmp/bp_out
+    fail=1
+  elif [[ "$count" -lt "$MIN_TESTS" ]]; then
+    echo "  RESULT: TOO FEW TESTS <-- $count passed, expected at least"
+    echo "          $MIN_TESTS. A suite that collapsed to a handful of tests"
+    echo "          exits 0 and reads as green."
+    fail=1
+  else
+    echo "  RESULT: GREEN ✓ ($summary)"
+  fi
 else
   echo "  RESULT: RED <-- the code is not back to where it started"
   tail -12 /tmp/bp_out
