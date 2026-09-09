@@ -272,14 +272,19 @@ def test_a_reply_outranks_a_send(db):
     assert _state_of(lid) == 'replied'
 
 
-def test_reply_detection_is_not_wired_up_yet(db):
+def test_replied_at_has_a_writer_now_and_it_is_the_manual_checkbox(db):
     """
-    Guards the claim that 'replied' is INERT.
+    THIS TEST FIRED EXACTLY WHEN IT WAS BUILT TO.
 
-    stages.record_reply() DOES exist - it is a deliberate seam so the dialer's
-    replied_at guard has a matching writer. What does not exist is anything
-    that DETECTS a reply and calls it. When that lands, this test is what says
-    so, instead of the column quietly starting to mean something.
+    It used to assert that NOTHING called stages.record_reply() - the seam was
+    deliberately unwired, so "replied" on the leads list was inert. The "I got
+    a reply" checkbox is now its caller, and Sean reading his own inbox is the
+    detector.
+
+    What it guards now is the SHAPE: one field, one function, many writers.
+    Automatic ingest, when it is eventually built, becomes a second caller of
+    the same function rather than a parallel path - so the dialer's guard, the
+    auto-send gate and the drip keep reading one fact from one place.
     """
     import glob
     import re
@@ -290,11 +295,10 @@ def test_reply_detection_is_not_wired_up_yet(db):
             line = src[:m.start()].count('\n') + 1
             if 'def record_reply' in src.splitlines()[line - 1]:
                 continue
-            callers.append(f'{path}:{line}')
-    assert not callers, (
-        f'something now calls record_reply(): {callers}. Reply detection is '
-        f'live, so "replied" is no longer inert - update the UI copy and this '
-        f'test.')
+            callers.append(path.split('/')[-1])
+    assert 'web.py' in callers, (
+        'the manual "I got a reply" checkbox must call record_reply - it is '
+        'the guard the drip reads')
 
 
 @pytest.mark.parametrize('state', ['draft_ready', 'sent', 'replied', 'none'])

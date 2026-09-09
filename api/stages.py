@@ -134,26 +134,72 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
             return row
 
 
-def record_reply(lead_id, when=None):
+def record_reply(lead_id, when=None, note: str = '', by: str = 'operator'):
     """
-    They replied. STOP CALLING.
+    THEY REPLIED. Stop calling, stop sending.
 
-    Not wired to anything yet - the sender owns reply detection. It exists so
-    the stop path is one call rather than something invented later under
-    pressure, and so the dialer's guard has a matching writer.
+    Today's caller is a person ticking "I got a reply" on the lead - Sean reads
+    every reply at this volume, and a human who has read it is a better
+    detector than anything automatic. When ingest is eventually built it calls
+    THIS, as a second writer to the same field: the auto-send gate, the
+    dialer's guard and the drip all keep reading one fact from one place.
+
+    WRITE-ONCE, like emailed_at. A second call is a no-op rather than a
+    restamp: the FIRST reply is when they answered, and moving that timestamp
+    would rewrite the history every "N days after" measurement rests on. Undo
+    is a separate, explicit, audited operation - see clear_reply().
     """
     when = when or datetime.datetime.now(datetime.UTC)
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """UPDATE leads SET replied_at = %s, status = 'engaged',
+                          reply_note = NULLIF(%s,''), replied_by = %s,
                           updated_at = now()
                     WHERE lead_id = %s AND replied_at IS NULL
-                    RETURNING lead_id""", (when, lead_id))
+                    RETURNING lead_id""",
+                (when, (note or '').strip(), by, lead_id))
             if cur.fetchone() is None:
                 return False
+            detail = f'recorded by {by}'
+            if (note or '').strip():
+                detail += f' \u2014 "{note.strip()[:400]}"'
             cur.execute(
-                """INSERT INTO activity (lead_id, kind, summary)
-                   VALUES (%s, 'note', 'they replied to the email - follow-up call cancelled')""",
-                (lead_id,))
+                """INSERT INTO activity (lead_id, kind, summary, detail)
+                   VALUES (%s, 'reply', 'THEY REPLIED - recorded BY HAND', %s)""",
+                (lead_id, detail))
+            return True
+
+
+def clear_reply(lead_id, by: str = 'operator') -> bool:
+    """
+    Untick it. A misclick must be undoable.
+
+    Deliberately NOT a silent revert: it writes to the timeline exactly as the
+    tick did, so the record shows a reply was recorded and then WITHDRAWN
+    rather than showing nothing at all. A lead whose reply quietly vanished is
+    one somebody emails again without knowing why they should not.
+
+    Status is NOT moved back automatically. `engaged` may have been reached by
+    a click as well, and guessing which is wrong more often than leaving it -
+    the status dropdown is right there.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT replied_at FROM leads WHERE lead_id = %s',
+                        (lead_id,))
+            row = cur.fetchone()
+            if row is None or row['replied_at'] is None:
+                return False
+            cur.execute(
+                """UPDATE leads SET replied_at = NULL, reply_note = NULL,
+                          replied_by = NULL, updated_at = now()
+                    WHERE lead_id = %s""", (lead_id,))
+            cur.execute(
+                """INSERT INTO activity (lead_id, kind, summary, detail)
+                   VALUES (%s, 'reply', 'reply record WITHDRAWN by hand', %s)""",
+                (lead_id,
+                 f'was recorded {row["replied_at"]:%Y-%m-%d %H:%M} UTC; '
+                 f'withdrawn by {by}. Status left as it is - a click can also '
+                 f'have made this lead engaged.'))
             return True

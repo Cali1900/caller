@@ -73,6 +73,31 @@
       <b>unconfirmed</b> &mdash; confirm it above and the ladder advances.{% endif %}</p>
     {% endif %}
 
+    <h2>Reply</h2>
+    {% if lead.replied_at %}
+      <p class="sentbar"><b>&#10003; They replied</b>
+         {{ lead.replied_at.strftime('%b %-d, %H:%M') }} UTC
+         &middot; recorded by {{ lead.replied_by or 'operator' }}.<br>
+         <span class="dim">Nothing will auto-contact this lead again &mdash;
+         the dialer skips it and auto-send refuses it.</span>
+         {% if lead.reply_note %}<br><b>They said:</b>
+           &ldquo;{{ lead.reply_note }}&rdquo;{% endif %}</p>
+      <form method="post" action="/leads/{{ lead.lead_id }}/reply/undo"
+            onsubmit="return confirm('Withdraw the reply record?\n\nIt stays on the timeline as withdrawn, and the status is left as it is — a click can also have made this lead engaged.')">
+        <button type="submit" class="ghost">Untick &mdash; I got this wrong</button>
+      </form>
+    {% else %}
+      <form method="post" action="/leads/{{ lead.lead_id }}/reply">
+        <p><label><input type="checkbox" name="got" value="1" required>
+           <b>I got a reply</b></label>
+           <span class="dim">&mdash; stops every automatic contact for this
+             lead, permanently</span></p>
+        <p><textarea name="note" rows="3" style="width:100%"
+             placeholder="What did they say? (optional)"></textarea></p>
+        <p><button type="submit" class="gold">Record the reply</button></p>
+      </form>
+    {% endif %}
+
     <h2>Status</h2>
     <form method="post" action="/leads/{{ lead.lead_id }}/status" class="toolbar"
           style="margin-bottom:12px">

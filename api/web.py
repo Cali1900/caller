@@ -115,8 +115,10 @@ _NEEDS_YOU_COUNT = f"SELECT count(*) AS n FROM leads l WHERE {_NEEDS_YOU_PREDICA
 # outranks a draft. NO OPEN TRACKING - Apple Mail Privacy Protection pre-loads
 # pixels, so an "opened" count on a list of lawyers is noise. Replies only.
 #
-# 'replied' is INERT: nothing writes leads.replied_at yet. The column is here
-# so the state is visible the day detection lands, not a claim that it works.
+# 'replied' is LIVE now: the "I got a reply" checkbox on lead detail writes
+# leads.replied_at through stages.record_reply(). Sean reads every reply at
+# this volume, so a person ticking a box is the detector - and automatic
+# ingest, when built, becomes a second writer to the same field.
 _EMAIL_STATE = """
     CASE WHEN l.replied_at IS NOT NULL           THEN 'replied'
          WHEN ck.clicks > 0                      THEN 'clicked'
@@ -772,6 +774,35 @@ def lead_status(lead_id: str, status: str = Form(...),
                    VALUES (%s,'status','status changed BY HAND',%s)""",
                 (lead_id, f'{was} -> {status}  (by {changed_by or "operator"})'))
     msg = f'Status set to {status} by hand (was {was}).'
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                            status_code=303)
+
+
+@router.post('/leads/{lead_id}/reply')
+def lead_reply(lead_id: str, note: str = Form(''), by: str = Form('operator')):
+    """
+    "I GOT A REPLY" - manual reply detection, and the guard the drip will read.
+
+    Sean reads every reply at this volume, so a person ticking a box IS the
+    detector. When automatic ingest lands it calls the SAME
+    stages.record_reply(), as a second writer to one field - not a
+    replacement - so the dialer's guard, the auto-send gate and the drip all
+    keep reading one fact from one place.
+    """
+    ok = stages.record_reply(lead_id, note=note, by=by or 'operator')
+    msg = ('Reply recorded. Nothing will auto-contact this lead again.'
+           if ok else 'A reply was already recorded for this lead.')
+    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                            status_code=303)
+
+
+@router.post('/leads/{lead_id}/reply/undo')
+def lead_reply_undo(lead_id: str, by: str = Form('operator')):
+    """Untick it. Writes to the timeline exactly as the tick did."""
+    ok = stages.clear_reply(lead_id, by=by or 'operator')
+    msg = ('Reply record withdrawn - it stays on the timeline. Check the '
+           'status: a click can also have made this lead engaged.'
+           if ok else 'No reply was recorded for this lead.')
     return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
                             status_code=303)
 

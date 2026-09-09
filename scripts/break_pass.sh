@@ -118,6 +118,22 @@ preflight() {
   [[ -f "$ACTIVE" ]] && echo "   it died with this break applied: $(cat "$ACTIVE")"
   echo "=================================================================="
   dirty_report
+
+  # REFUSE TO CLOBBER WORK DONE SINCE THE KILL.
+  #
+  # The state dir survives a SIGKILL on purpose, but it is a snapshot from
+  # whenever that run STARTED. If real edits landed afterwards, restoring
+  # blindly reverts them - which is exactly what happened once: a run killed
+  # at the ten-minute cap left a snapshot, routes were added to api/web.py,
+  # and the next run's recovery silently deleted them.
+  #
+  # A file may be restored only if it is UNCHANGED, or holds a break we can
+  # NAME. Anything else was edited since, and recovery is not entitled to an
+  # opinion about it.
+  if ! python3 scripts/breaks_recovery_check.py "$STATE"; then
+    return 1
+  fi
+
   echo "  restoring from $ORIG ..."
   if restore_all; then
     echo "  RECOVERED ✓ - every guard file is back to its original"
