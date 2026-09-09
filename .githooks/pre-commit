@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# REFUSE TO COMMIT WHILE A BREAK PASS IS RUNNING.
+#
+# A break pass mutates api/ by design: at any instant during one, some guard
+# is deliberately removed. `git add -A` during that window commits the safety
+# off, and it is not detectable by reading the diff afterwards because the
+# pass restores the file a few seconds later - the commit is wrong and the
+# working tree is right.
+#
+# That is exactly how the DIAL_ALLOWLIST check got committed and pushed as a
+# bare `return`: assert_dialable, the guard that stops a dev box calling
+# strangers, disabled in origin/main by a background job nobody was watching.
+#
+# "Be careful" is not a control. This is.
+set -u
+LOCK=".break_pass_state.lock"
+
+if [[ -e "$LOCK" ]] && command -v flock >/dev/null 2>&1; then
+  # If we CANNOT take the lock, a pass is holding it.
+  if ! flock -n "$LOCK" true 2>/dev/null; then
+    echo "REFUSING TO COMMIT: a break pass is running and holds $LOCK." >&2
+    echo >&2
+    echo "It removes a guard from api/ on purpose, one at a time. A commit" >&2
+    echo "taken now captures whichever safety is currently off - and the pass" >&2
+    echo "restores the file seconds later, so the diff will look innocent." >&2
+    echo >&2
+    echo "Wait for it to finish (./scripts/break_pass_all.sh --status), then" >&2
+    echo "commit." >&2
+    exit 1
+  fi
+fi
+
+# Belt and braces: the state directory outlives a KILLED pass, and a killed
+# pass may have left a break applied.
+if [[ -d .break_pass_state ]]; then
+  echo "REFUSING TO COMMIT: .break_pass_state exists, so a break pass was" >&2
+  echo "killed and may have left a guard removed in api/." >&2
+  echo >&2
+  echo "Run ./scripts/break_pass.sh --check to see, then --recover." >&2
+  exit 1
+fi
