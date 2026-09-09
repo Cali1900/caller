@@ -41,6 +41,10 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  'sender_email', 'sender_name', 'sender_company_line',
                  'daily_cap', 'max_concurrent', 'dial_interval_min',
                  'dial_interval_max',
+                 # Retry ladders, per outcome. One rung per attempt; a rung is
+                 # a duration or next_day. See api/retry_ladder.py.
+                 'retry_busy', 'retry_no_answer', 'retry_voicemail',
+                 'max_attempts',
                  # Email 1: manual or auto, and how long after the call.
                  # DEFAULTS TO MANUAL - see api/autosend.py.
                  'email_1_mode', 'email_1_delay_minutes',
@@ -276,6 +280,14 @@ def update(campaign_id, **fields):
             f'Add the column to CONFIG_FIELDS or stop writing it - silently '
             f'dropping it is how a setting appears to save and does nothing.')
     clean = dict(fields)
+    # A LADDER IS VALIDATED HERE, not at the database. The column is text[],
+    # so Postgres would accept '{4 hours}' or '{tomorrow}' happily and the
+    # first thing to notice would be a lead whose next_attempt_at never got
+    # set. Refuse it while there is still a person looking at the screen.
+    from api import retry_ladder as _rl
+    for outcome, col in _rl.COLUMNS.items():
+        if col in clean and clean[col] is not None:
+            clean[col] = _rl.validate(clean[col])
     if not clean:
         return get(campaign_id)
     sets = ', '.join(f'{k} = %s' for k in clean)

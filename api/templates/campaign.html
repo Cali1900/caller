@@ -76,6 +76,37 @@
       <p class="dim" style="margin-bottom:0">Random within the range each tick.
          About <b>{{ per_hour }}</b> calls/hour.</p>
     </div>
+
+    <div class="card">
+      <h2>Retry gaps</h2>
+      <div class="field"><label for="ma">Max attempts</label>
+        <input id="ma" name="max_attempts" type="number" min="1" max="10"
+               value="{{ c.max_attempts }}"></div>
+      {% for outcome, label, hint in retry_rows %}
+      <div class="field">
+        <label for="rt-{{ outcome }}">{{ label }}</label>
+        <input id="rt-{{ outcome }}" name="retry_{{ outcome }}" type="text"
+               value="{{ (c['retry_' + outcome] or []) | join(', ') }}"
+               style="width:100%">
+        <span class="dim">{{ hint }}</span>
+      </div>
+      {% set n = c['retry_' + outcome] | length %}
+      {% set live = reachable[outcome] %}
+      {% if live < n %}
+        <p class="dim" style="color:#a33">
+          <b>Rung{{ 's' if n - live > 1 }} {{ live + 1 }}{% if n - live > 1 %}&ndash;{{ n }}{% endif %}
+          can never fire.</b> A rung is only used if another attempt follows
+          it, so at max attempts {{ c.max_attempts }} only the first
+          {{ live }} appl{{ 'ies' if live == 1 else 'y' }}. Raise max
+          attempts to {{ n + 1 }}, or shorten the ladder.</p>
+      {% endif %}
+      {% endfor %}
+      <p class="dim" style="margin-bottom:0">One rung per attempt, in order.
+         A rung is a gap (<code>15m</code>, <code>4h</code>, <code>3d</code>)
+         or <code>next_day</code> &mdash; 09:00 the next morning in
+         <b>their</b> timezone, not ours. Busy is shortest on purpose: a busy
+         signal means a human is there.</p>
+    </div>
   </div>
 
   <div>

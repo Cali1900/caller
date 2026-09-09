@@ -24,23 +24,21 @@ THE THREE TRAPS, and how this module handles each:
 
 import json
 
-from api import db, stages
+from api import db, retry_ladder, stages
 
-# PHASE 2: the retry ladder is per REASON, not a flat escalation.
-# "busy" means someone is there right now - come back soon. "no answer" means
-# nobody picked up - a couple of hours. "voicemail" means the number works but
-# the desk is unattended, so tomorrow morning, in THEIR timezone.
-BACKOFF = {
-    'busy':      "now() + interval '15 minutes'",
-    'no_answer': "now() + interval '2 hours'",
-    'no_info':   "now() + interval '2 hours'",
-    'api_error': "now() + interval '4 hours'",
-    # next day 09:00 in the CALLED PARTY's local time, not ours
-    'voicemail': ("(((now() AT TIME ZONE l.timezone)::date + 1)"
-                  " + time '09:00') AT TIME ZONE l.timezone"),
-}
-DEFAULT_BACKOFF = "now() + interval '4 hours'"
-MAX_ATTEMPTS = 4
+# THE RETRY LADDERS LIVE ON THE CAMPAIGN, not here. They used to be a flat
+# dict: busy 15m and no_answer 2h regardless of attempt, so four attempts
+# meant four calls to the same firm inside eight hours - a pattern a
+# receptionist notices, and the opposite of what the spacing work was for.
+#
+# See api/retry_ladder.py for the rung grammar. What stays here is only the
+# mapping from a Retell disconnection reason to a ladder, which is a fact
+# about the platform rather than a preference of Sean's.
+#
+# MAX_ATTEMPTS is now per campaign too, because a rung only fires if an
+# attempt follows it - a four-rung ladder under a hardcoded cap of 4 had a
+# fourth rung that could never fire.
+MAX_ATTEMPTS = 4          # fallback only, when the campaign cannot be read
 
 # disconnection_reason -> retry reason
 REASON_MAP = {
@@ -218,21 +216,38 @@ def _handle_call_ended(conn, call: dict) -> None:
 
 def _retry(conn, lead_id: str, reason: str) -> None:
     """
-    attempts+1, then back off by REASON. Capped at MAX_ATTEMPTS.
+    attempts+1, then wait the rung this campaign sets for this outcome.
 
-    The interval is interpolated as SQL rather than bound as a parameter
-    because the voicemail rule references l.timezone - the arithmetic has to
-    happen in the row's own timezone, which a bound interval cannot express.
-    Every value comes from the BACKOFF dict above; nothing here is caller
-    supplied.
+    THE LADDER IS THE LEAD'S OWN CAMPAIGN'S, re-read here in-transaction. The
+    same fault as the stale campaign snapshot on dial: a lead moved between
+    campaigns, or a ladder edited mid-run, must take effect on the next
+    retry rather than whenever the worker last looked.
+
+    Every value is BOUND. The fragment retry_ladder.sql_for returns contains
+    no caller data - it is one of exactly two shapes, and the duration or the
+    hour inside it is a parameter.
     """
-    interval_sql = BACKOFF.get(reason, DEFAULT_BACKOFF)
     with conn.cursor() as cur:
-        cur.execute('SELECT attempts FROM leads WHERE lead_id = %s', (lead_id,))
+        cur.execute("""SELECT l.attempts, c.max_attempts,
+                              c.retry_busy, c.retry_no_answer, c.retry_voicemail
+                         FROM leads l
+                    LEFT JOIN campaign_configs c ON c.campaign_id = l.campaign_id
+                        WHERE l.lead_id = %s""", (lead_id,))
         row = cur.fetchone()
         attempts = (row['attempts'] if row else 0) + 1
+        cap = (row or {}).get('max_attempts') or MAX_ATTEMPTS
+        ladder = retry_ladder.for_campaign(row, reason)
+        try:
+            frag, frag_params = retry_ladder.sql_for(
+                retry_ladder.rung_for(ladder, attempts))
+        except retry_ladder.BadLadder as exc:
+            # FAIL SLOW, never fast. An unreadable rung must not become a
+            # tight gap; it becomes the widest rung we know.
+            print(f'[drain] bad retry rung for {reason}: {exc} - '
+                  f'falling back to next_day', flush=True)
+            frag, frag_params = retry_ladder.sql_for(retry_ladder.NEXT_DAY)
 
-        if attempts >= MAX_ATTEMPTS:
+        if attempts >= cap:
             cur.execute(
                 """UPDATE leads SET status='max_attempts', attempts=%s,
                        last_outcome=%s, updated_at=now()
@@ -243,10 +258,10 @@ def _retry(conn, lead_id: str, reason: str) -> None:
         cur.execute(
             f"""UPDATE leads l
                    SET status='no_answer', attempts=%s, last_outcome=%s,
-                       next_attempt_at = {interval_sql},
+                       next_attempt_at = {frag},
                        updated_at=now()
                  WHERE l.lead_id=%s""",
-            (attempts, reason, lead_id))
+            [attempts, reason] + frag_params + [lead_id])
 
 
 def _activity(conn, lead_id, call_id, summary, detail=None):

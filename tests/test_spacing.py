@@ -160,11 +160,16 @@ def test_nothing_in_the_dialer_shortens_the_gap_on_a_busy(db):
 # --------------------------------------------------------------------------
 
 def test_busy_backs_off_15_minutes_not_the_generic_ladder(db):
-    from api import drain
-    assert '15 minutes' in drain.BACKOFF['busy']
+    # BACKOFF is gone: the ladders live on the campaign now, so the property
+    # is asserted where it is configured rather than against a module dict.
+    # Busy is still the shortest, and for the same reason - a busy signal
+    # means a human is there, the best signal in that list.
+    from api import drain, retry_ladder as rl
+    assert rl.minutes(rl.DEFAULTS['busy'][0]) == 15
+    assert rl.minutes(rl.DEFAULTS['busy'][0]) < rl.minutes(rl.DEFAULTS['no_answer'][0])
     assert drain.REASON_MAP['dial_busy'] == 'busy'
     # and it is genuinely shorter than the no-answer rung
-    assert '2 hours' in drain.BACKOFF['no_answer']
+    assert rl.minutes(rl.DEFAULTS['no_answer'][0]) == 120
 
 
 def test_three_busies_do_not_produce_three_immediate_dials(db, running, no_real_calls):

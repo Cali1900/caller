@@ -19,6 +19,7 @@ whatever a receptionist happened to say.
 import csv
 import datetime
 import io
+import re
 import urllib.parse
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.templating import Jinja2Templates
 
 from api import (archive as _archive_mod,
+                 retry_ladder as _rl,
                  campaigns, clicks as clicks_mod, db,
                  forecast as forecast_mod, funnel as funnel_mod,
                  digest as digest_mod, drafts as drafts_mod,
@@ -739,6 +741,40 @@ def lead_emailed(lead_id: str, emailed_by: str = Form('operator')):
 #              strands the lead: claimed forever, never selected again.
 # Both are easy to add back if Sean wants them; a stranded lead and an
 # unsuppressed DNC are not as easy to undo.
+# Label and hint per ladder. Busy first because it is the shortest and the
+# reason why is the least obvious.
+def _retry_fields(max_attempts, busy, no_answer, voicemail) -> dict:
+    """
+    Only the ladders that were actually SUBMITTED.
+
+    A field that is absent is not a field set to empty. Treating the two
+    alike meant any older form that posts to this route - and every test that
+    does - had its whole save rejected for an empty ladder it never sent.
+    An omitted ladder must leave the stored one alone.
+    """
+    out = {}
+    if max_attempts is not None:
+        out['max_attempts'] = max_attempts
+    for outcome, raw in (('busy', busy), ('no_answer', no_answer),
+                         ('voicemail', voicemail)):
+        if raw is not None:
+            out[f'retry_{outcome}'] = _split_ladder(raw)
+    return out
+
+
+def _split_ladder(raw: str):
+    """"15m, 1h, 4h, next_day" -> the rungs. Commas or spaces; a person
+    typing a ladder should not have to think about which."""
+    return [p for p in re.split(r'[,\s]+', (raw or '').strip()) if p]
+
+
+RETRY_ROWS = (
+    ('busy', 'Busy', 'A human is there - come back soonest.'),
+    ('no_answer', 'No answer', 'Nobody picked up.'),
+    ('voicemail', 'Voicemail', 'The number works, the desk is unattended.'),
+)
+
+
 MANUAL_STATUSES = (
     # where the dialer left it
     'new', 'queued', 'completed', 'callback', 'no_answer', 'email_path',
@@ -934,6 +970,12 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg,
         'per_hour': per_hour, 'remaining': remaining,
+        # The ladders, and how many rungs of each can actually fire. A rung
+        # only applies if another attempt follows it, so a four-rung ladder
+        # under max attempts 4 has a fourth rung that is decoration.
+        'retry_rows': RETRY_ROWS,
+        'reachable': {o: _rl.reachable(camp[f'retry_{o}'], camp['max_attempts'])
+                      for o in _rl.COLUMNS},
         'hours_left': round(remaining / per_hour, 1) if per_hour else 0,
         'windows': campaigns.windows(campaign_id), 'days': DAYS,
         'prompt_rows': {'L1': prompts_mod.listing(cfg, 'L1',
@@ -1014,7 +1056,11 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
                   sender_email: str = Form(...), sender_name: str = Form(...),
                   sender_company_line: str = Form(...), daily_cap: int = Form(...),
                   max_concurrent: int = Form(...), dial_interval_min: int = Form(...),
-                  dial_interval_max: int = Form(...)):
+                  dial_interval_max: int = Form(...),
+                  max_attempts: int = Form(None),
+                  retry_busy: str = Form(None),
+                  retry_no_answer: str = Form(None),
+                  retry_voicemail: str = Form(None)):
     if dial_interval_min > dial_interval_max:
         return RedirectResponse(
             f'/campaign/{campaign_id}?msg={urllib.parse.quote("REJECTED: gap min cannot exceed gap max")}',
@@ -1032,7 +1078,9 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
                          sender_company_line=sender_company_line,
                          daily_cap=daily_cap, max_concurrent=max_concurrent,
                          dial_interval_min=dial_interval_min,
-                         dial_interval_max=dial_interval_max)
+                         dial_interval_max=dial_interval_max,
+                         **_retry_fields(max_attempts, retry_busy,
+                                         retry_no_answer, retry_voicemail))
         msg = f'saved - prompt v{agent_l1_version} is now live'
     except Exception as exc:
         # A raw constraint violation is a wall of Postgres. Say what the
@@ -1045,6 +1093,12 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
             msg = f'REJECTED: daily cap must be 1-5000. Nothing changed.'
         elif 'max_concurrent_check' in text:
             msg = f'REJECTED: calls in flight must be 1-10. Nothing changed.'
+        elif isinstance(exc, _rl.BadLadder):
+            # Say which rung and why, in the words on the screen. A raw
+            # constraint here would only say the array was text.
+            msg = f'REJECTED: {text}. Nothing changed.'
+        elif 'max_attempts_check' in text:
+            msg = 'REJECTED: max attempts must be 1-10. Nothing changed.'
         elif 'dial_interval' in text:
             msg = ('REJECTED: the gap must be 15-3600s (min) and 15-7200s '
                    '(max). Nothing changed.')
