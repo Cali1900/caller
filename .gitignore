@@ -9,3 +9,4 @@ __pycache__/
 *.bak.*
 .break_pass_state/
 .break_pass_state.lock
+.break_pass_progress

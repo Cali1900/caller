@@ -54,15 +54,30 @@ ACTIVE="$STATE/ACTIVE"
 MODE=run
 FULL=0
 ONLY=""
+# CHUNKING. The ten-minute command cap was killing full runs mid-flight, and a
+# killed run is what makes the recovery path necessary at all. Running ten at a
+# time finishes well inside the cap, so nothing is ever killed and recovery
+# stays a backstop rather than a routine.
+FROM=1
+LIMIT=0
 for arg in "$@"; do
   case "$arg" in
     --check)    MODE=check ;;
     --recover)  MODE=recover ;;
     --full)     FULL=1 ;;
     --only=*)   ONLY="${arg#--only=}" ;;
-    *) echo "usage: $0 [--check|--recover] [--full] [--only=NN]" >&2; exit 2 ;;
+    --from=*)   FROM="${arg#--from=}" ;;
+    --limit=*)  LIMIT="${arg#--limit=}" ;;
+    *) echo "usage: $0 [--check|--recover] [--full] [--only=NN] [--from=N] [--limit=N]" >&2; exit 2 ;;
   esac
 done
+
+# A non-number reads as 0 inside $(( )), so --from=ten would silently run the
+# whole pass while reporting a chunk. Refuse it instead.
+for v in FROM LIMIT; do
+  [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "--${v,,} must be a whole number, got: ${!v}" >&2; exit 2; }
+done
+[[ $FROM -ge 1 ]] || { echo "--from is 1-based; got $FROM" >&2; exit 2; }
 
 targets() {
   python3 -c "
@@ -209,9 +224,17 @@ trap 'echo; echo "  interrupted - restoring"; exit 130' INT TERM HUP
 fail=0
 run=0
 
+TOTAL=$(ls scripts/breaks/*.py | wc -l)
+idx=0
 for spec in scripts/breaks/*.py; do
   base=$(basename "$spec")
+  idx=$((idx + 1))
   [[ -n "$ONLY" && "$base" != "$ONLY"* ]] && continue
+  if [[ -z "$ONLY" ]]; then
+    [[ $idx -lt $FROM ]] && continue
+    [[ $LIMIT -gt 0 && $((idx - FROM)) -ge $LIMIT ]] && continue
+  fi
+  last_idx=$idx
   run=$((run + 1))
 
   # NUL-delimited: LABEL contains spaces and word-splitting mangled TARGET.
@@ -323,6 +346,22 @@ echo "FINAL VERIFY  ($run break$([[ $run -eq 1 ]] || echo s) exercised)"
 echo "=================================================================="
 restore_all && echo "  every guard file matches its original ✓" || fail=1
 dirty_report || fail=1
+
+# Zero breaks exercised is not a pass. A typo'd --from or an --only matching
+# nothing would otherwise exit green having tested no guard at all.
+if [[ $run -eq 0 ]]; then
+  echo "  ⚠️  NO BREAKS EXERCISED - $TOTAL definitions exist and none were selected."
+  [[ -n "$ONLY" ]] && echo "      --only=$ONLY matched no file in scripts/breaks/."
+  [[ $FROM -gt $TOTAL ]] && echo "      --from=$FROM is past the last definition ($TOTAL)."
+  fail=1
+fi
+
+if [[ -n "$ONLY" || ( $LIMIT -gt 0 && ${last_idx:-0} -lt $TOTAL ) ]]; then
+  echo "  chunk finished at definition ${last_idx:-0} of $TOTAL."
+  echo "  Skipping the full suite - it runs with the LAST chunk, once."
+  [[ $fail -eq 0 ]] && echo "CHUNK OK" || echo "CHUNK FAILED"
+  exit $fail
+fi
 
 echo "  running FULL suite, expecting GREEN ..."
 if ./scripts/test.sh -q > /tmp/bp_out 2>&1; then
