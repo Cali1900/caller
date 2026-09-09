@@ -128,16 +128,131 @@ _EMAIL_STATE = """
 EMAIL_STATES = ('draft_ready', 'sent', 'clicked', 'replied', 'none')
 
 
+# Sortable columns. The VALUE is the expression; direction is applied
+# separately so one key serves both directions.
+#
+# NULLS LAST everywhere, in BOTH directions, on purpose: "never called" and
+# "she did not answer" are absences, not zeros, and sorting them among the
+# real values says they are. An unknown belongs at the bottom whichever way
+# the arrow points.
 SORTS = {
-    'recent': '(l.last_called_at IS NULL), l.last_called_at DESC, l.created_at DESC',
-    # NULLS LAST on purpose: a firm that declined to answer is not a firm that
-    # sends no demands, and sorting it alongside the zeros would say it is.
-    'volume': 'l.demands_per_month DESC NULLS LAST, l.company',
+    'firm':      'l.company',
+    'city':      'l.city',
+    'state':     'l.state',
+    'stage':     'l.stage',
+    'status':    'l.status',
+    'calls':     'call_count',
+    'emails':    'em.email_count',
+    'agent':     'sc.agent_score',
+    'outcome':   'sc.outcome_score',
+    'volume':    'l.demands_per_month',
+    'last_call': 'l.last_called_at',
+    'last_email': 'em.last_email_at',
+    'recent':    'l.last_called_at',
 }
+DEFAULT_SORT, DEFAULT_DIR = 'recent', 'desc'
+
+
+def _order_by(sort, direction):
+    col = SORTS.get(sort) or SORTS[DEFAULT_SORT]
+    d = 'ASC' if direction == 'asc' else 'DESC'
+    # l.company is the tiebreak so paging is STABLE - without a deterministic
+    # tiebreak a lead can appear on two pages or on none.
+    return f'{col} {d} NULLS LAST, l.company ASC, l.lead_id ASC'
+
+
+def _score_range(where, params, field, lo, hi):
+    """agent < 7, outcome >= 8. Applied to the LATEST score for the lead."""
+    if lo not in (None, ''):
+        where.append(f'{field} >= %s'); params.append(int(lo))
+    if hi not in (None, ''):
+        where.append(f'{field} <= %s'); params.append(int(hi))
+
+
+_LEAD_JOINS = """
+      FROM leads l
+      LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
+      LEFT JOIN campaign_configs cc ON cc.campaign_id = l.campaign_id
+      LEFT JOIN LATERAL (
+          SELECT count(*) AS clicks, min(minutes_since_sent) AS first_minutes
+            FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck ON true
+      LEFT JOIN LATERAL (
+          SELECT count(*) AS email_count, max(created_at) AS last_email_at
+            FROM email_audit ea
+           WHERE ea.lead_id = l.lead_id
+             AND ea.outcome IN ('sent', 'sent_manual')) em ON true
+      LEFT JOIN LATERAL (
+          SELECT s.agent_score, s.outcome_score
+            FROM call_scores s JOIN calls c ON c.call_id = s.call_id
+           WHERE c.lead_id = l.lead_id
+           ORDER BY c.created_at DESC LIMIT 1) sc ON true
+"""
+
+
+def _distinct_states():
+    """States that actually appear, so the dropdown offers only real ones."""
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT DISTINCT state FROM leads
+                            WHERE coalesce(state,'') <> '' ORDER BY state""")
+            return [r['state'] for r in cur.fetchall()]
+
+
+def _chips(q, status, stage, needs_you, email_state, campaign_id, state, city,
+           has_email, agent_min, agent_max, outcome_min, outcome_max,
+           vol_min, vol_max, called, camp_names=None):
+    """
+    The active filters, each removable.
+
+    A filter you cannot see is a filter you forget you set - and then the
+    count looks wrong and the list looks broken. Every one shows, with the key
+    to drop so removing it is one click rather than editing a URL.
+    """
+    out = []
+
+    def add(key, label, *keys):
+        out.append({'label': label, 'clear_keys': list(keys) or [key]})
+
+    if q:
+        add('q', f'search: {q}')
+    if status:
+        add('status', f'status: {status}')
+    if stage:
+        add('stage', f'stage: {stage}')
+    if needs_you:
+        add('needs_you', 'needs you')
+    if email_state:
+        add('email_state', f'email: {email_state}')
+    if campaign_id == 'none':
+        add('campaign_id', 'no campaign')
+    elif campaign_id:
+        add('campaign_id',
+            f'campaign: {(camp_names or {}).get(str(campaign_id), campaign_id)}')
+    if state:
+        add('state', f'state: {state}')
+    if city:
+        add('city', f'city: {city}')
+    if has_email:
+        add('has_email', 'has an email' if has_email == 'yes' else 'no email')
+    if called:
+        add('called', 'called' if called == 'yes' else 'never called')
+    if agent_min or agent_max:
+        add('agent', f'agent {agent_min or "0"}-{agent_max or "10"}',
+            'agent_min', 'agent_max')
+    if outcome_min or outcome_max:
+        add('outcome', f'outcome {outcome_min or "0"}-{outcome_max or "10"}',
+            'outcome_min', 'outcome_max')
+    if vol_min or vol_max:
+        add('vol', f'demands/mo {vol_min or "0"}-{vol_max or "any"}',
+            'vol_min', 'vol_max')
+    return out
 
 
 def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
-                campaign_id='', sort='recent'):
+                campaign_id='', sort='recent', direction='desc', state='',
+                city='', has_email='', agent_min='', agent_max='',
+                outcome_min='', outcome_max='', vol_min='', vol_max='',
+                called=''):
     where, params = ["1=1"], []
     if q:
         where.append("(l.company ILIKE %s OR l.phone_e164 ILIKE %s "
@@ -156,6 +271,24 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
         where.append('l.campaign_id IS NULL')      # in the pool, on no campaign
     elif campaign_id:
         where.append('l.campaign_id = %s'); params.append(campaign_id)
+    if state:
+        where.append('l.state = %s'); params.append(state)
+    if city:
+        where.append('l.city ILIKE %s'); params.append(f'%{city}%')
+    if has_email == 'yes':
+        where.append("coalesce(l.dm_email,'') <> ''")
+    elif has_email == 'no':
+        where.append("coalesce(l.dm_email,'') = ''")
+    if called == 'yes':
+        where.append('l.first_dialed_at IS NOT NULL')
+    elif called == 'no':
+        where.append('l.first_dialed_at IS NULL')
+    _score_range(where, params, 'sc.agent_score', agent_min, agent_max)
+    _score_range(where, params, 'sc.outcome_score', outcome_min, outcome_max)
+    # A volume filter EXCLUDES unknowns rather than treating them as zero -
+    # "she did not answer" is not "sends none", and a range of 0-10 that
+    # swept up every unanswered lead would be silently wrong.
+    _score_range(where, params, 'l.demands_per_month', vol_min, vol_max)
     sql = f"""
         SELECT l.*,
                ({_EMAIL_STATE.strip()}) AS email_state,
@@ -169,37 +302,23 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                -- "sends none" and must never sort as zero.
                l.demands_per_month, l.demands_per_month_raw,
                cc.name AS campaign_name, cc.is_running AS campaign_running
-          FROM leads l
-          LEFT JOIN campaign_configs cc ON cc.campaign_id = l.campaign_id
-          LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
-          LEFT JOIN LATERAL (
-              SELECT count(*) AS clicks, min(minutes_since_sent) AS first_minutes
-                FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck ON true
-          -- Emails SENT, from the audit - the only record of what actually
-          -- went out. leads.emailed_at is one timestamp and will not survive
-          -- the drip, which sends up to four.
-          LEFT JOIN LATERAL (
-              SELECT count(*) AS email_count, max(created_at) AS last_email_at
-                FROM email_audit ea
-               WHERE ea.lead_id = l.lead_id
-                 AND ea.outcome IN ('sent', 'sent_manual')) em ON true
-          LEFT JOIN LATERAL (
-              SELECT s.agent_score, s.outcome_score
-                FROM call_scores s JOIN calls c ON c.call_id = s.call_id
-               WHERE c.lead_id = l.lead_id
-               ORDER BY c.created_at DESC LIMIT 1) sc ON true
-         WHERE {' AND '.join(where)}
+          {_LEAD_JOINS}
+           WHERE {' AND '.join(where)}
          ORDER BY {{order}}
          LIMIT %s OFFSET %s"""
-    sql = sql.replace('{order}', SORTS.get(sort, SORTS['recent']))
+    sql = sql.replace('{order}', _order_by(sort, direction))
     return sql, params + [limit, offset], where, params
 
 
 @router.get('/', response_class=HTMLResponse)
 def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
                needs_you: str = '', email_state: str = '', campaign_id: str = '',
-               sort: str = 'recent', page: int = 1, per: int = PAGE,
-               msg: str = ''):
+               sort: str = 'recent', dir: str = 'desc',
+               state: str = '', city: str = '', has_email: str = '',
+               agent_min: str = '', agent_max: str = '',
+               outcome_min: str = '', outcome_max: str = '',
+               vol_min: str = '', vol_max: str = '', called: str = '',
+               page: int = 1, per: int = PAGE, msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
@@ -208,7 +327,8 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         hdr = _header(conn, cfg)
         sql, params, where, cparams = _lead_query(
             q, status, stage, needs_you, per, (page - 1) * per, email_state,
-            campaign_id, sort)
+            campaign_id, sort, dir, state, city, has_email, agent_min,
+            agent_max, outcome_min, outcome_max, vol_min, vol_max, called)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
@@ -216,14 +336,7 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
             # references it, and a count that cannot see `d` would 500 or, worse,
             # silently disagree with the rows on screen.
             cur.execute(
-                f"""SELECT count(*) AS n FROM leads l
-                     LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
-                     LEFT JOIN campaign_configs cc
-                            ON cc.campaign_id = l.campaign_id
-                     LEFT JOIN LATERAL (
-                         SELECT count(*) AS clicks
-                           FROM email_clicks ec WHERE ec.lead_id = l.lead_id) ck
-                       ON true
+                f"""SELECT count(*) AS n {_LEAD_JOINS}
                     WHERE {' AND '.join(where)}""",
                 cparams)
             total = cur.fetchone()['n']
@@ -235,7 +348,12 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
          (('q', q), ('status', status), ('stage', stage),
           ('needs_you', needs_you), ('email_state', email_state),
           ('campaign_id', campaign_id),
-          ('sort', sort if sort != 'recent' else ''),
+          ('sort', sort if sort != DEFAULT_SORT else ''),
+          ('dir', dir if dir != DEFAULT_DIR else ''),
+          ('state', state), ('city', city), ('has_email', has_email),
+          ('agent_min', agent_min), ('agent_max', agent_max),
+          ('outcome_min', outcome_min), ('outcome_max', outcome_max),
+          ('vol_min', vol_min), ('vol_max', vol_max), ('called', called),
           ('per', per if per != PAGE else ''))
          if v})
     return templates.TemplateResponse(request, 'leads.html', {
@@ -248,7 +366,17 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
                                            email_state, campaign_id,
                                            {str(c['campaign_id']): c['name']
                                             for c in campaigns.list_all()}),
-        'campaign_id': campaign_id, 'sort': sort,
+        'campaign_id': campaign_id, 'sort': sort, 'dir': dir,
+        'state': state, 'city': city, 'has_email': has_email,
+        'agent_min': agent_min, 'agent_max': agent_max,
+        'outcome_min': outcome_min, 'outcome_max': outcome_max,
+        'vol_min': vol_min, 'vol_max': vol_max, 'called': called,
+        'chips': _chips(q, status, stage, needs_you, email_state, campaign_id,
+                        state, city, has_email, agent_min, agent_max,
+                        outcome_min, outcome_max, vol_min, vol_max, called,
+                        {str(c['campaign_id']): c['name']
+                         for c in campaigns.list_all()}),
+        'states': _distinct_states(),
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + per - 1) // per)})
@@ -301,11 +429,21 @@ async def leads_queue_all(request: Request):
     if camp is None:
         return RedirectResponse('/?msg=no+such+campaign', status_code=303)
 
+    # EVERY filter, not a subset. The first version read six of them, so a
+    # state or score filter was silently ignored and the button added a set
+    # nobody meant - the exact failure this control was built to avoid.
+    # _lead_query's signature is the single source of what a filter is.
     f = {k: form.get(k, '') for k in
-         ('q', 'status', 'stage', 'needs_you', 'email_state', 'campaign_id_filter')}
+         ('q', 'status', 'stage', 'needs_you', 'email_state',
+          'campaign_id_filter', 'state', 'city', 'has_email',
+          'agent_min', 'agent_max', 'outcome_min', 'outcome_max',
+          'vol_min', 'vol_max', 'called')}
     _, _, where, cparams = _lead_query(
         f['q'], f['status'], f['stage'], f['needs_you'], 1, 0,
-        f['email_state'], f['campaign_id_filter'])
+        f['email_state'], f['campaign_id_filter'], DEFAULT_SORT, DEFAULT_DIR,
+        f['state'], f['city'], f['has_email'], f['agent_min'], f['agent_max'],
+        f['outcome_min'], f['outcome_max'], f['vol_min'], f['vol_max'],
+        f['called'])
 
     with db.get_conn() as conn:
         with conn.cursor() as cur:
@@ -314,15 +452,8 @@ async def leads_queue_all(request: Request):
                        SET campaign_id = %s, pool_status = 'active',
                            updated_at = now()
                      WHERE l.lead_id IN (
-                         SELECT l.lead_id FROM leads l
-                         LEFT JOIN email_drafts d ON d.lead_id = l.lead_id
-                         LEFT JOIN campaign_configs cc
-                                ON cc.campaign_id = l.campaign_id
-                         LEFT JOIN LATERAL (
-                             SELECT count(*) AS clicks
-                               FROM email_clicks ec
-                              WHERE ec.lead_id = l.lead_id) ck ON true
-                         WHERE {' AND '.join(where)})
+                         SELECT l.lead_id {_LEAD_JOINS}
+                          WHERE {' AND '.join(where)})
                        AND l.pool_status <> 'done'""",
                 [campaign_id_target] + cparams)
             n = cur.rowcount

@@ -1,5 +1,11 @@
 {% extends "base.html" %}{% block title %}Leads · Caller{% endblock %}
 {% block body %}
+{% macro sh(key, label, cls='') -%}
+{%- set nd = 'asc' if (sort == key and dir == 'desc') else ('desc' if sort == key else 'desc') -%}
+<th class="{{ cls }} sortable"><a href="/?{{ qs }}&amp;sort={{ key }}&amp;dir={{ nd }}"
+  >{{ label }}{% if sort == key %}<span class="arr">{{ '▼' if dir == 'desc' else '▲' }}</span>{% endif %}</a></th>
+{%- endmacro %}
+
 <h1>Leads</h1>
 <p class="sub">{{ total }} matching &middot;
   {% if running %}<span style="color:var(--good)">{{ running.name }} running</span>
@@ -29,15 +35,40 @@
                         ('none','no draft')] %}
       <option value="{{ v }}" {% if v == email_state %}selected{% endif %}>{{ lbl }}</option>{% endfor %}</select>
     <label class="dim"><input type="checkbox" name="needs_you" value="1" {% if needs_you %}checked{% endif %}> needs you</label>
+  </div>
+  <div class="card toolbar" style="margin-top:-8px">
+    <select name="state"><option value="">any state</option>
+      {% for st in states %}<option value="{{ st }}" {% if st == state %}selected{% endif %}>{{ st }}</option>{% endfor %}</select>
+    <input name="city" value="{{ city or '' }}" placeholder="city" size="12">
+    <select name="has_email">
+      <option value="">email: any</option>
+      <option value="yes" {% if has_email == 'yes' %}selected{% endif %}>has an email</option>
+      <option value="no" {% if has_email == 'no' %}selected{% endif %}>no email</option>
+    </select>
+    <select name="called">
+      <option value="">called: any</option>
+      <option value="yes" {% if called == 'yes' %}selected{% endif %}>called</option>
+      <option value="no" {% if called == 'no' %}selected{% endif %}>never called</option>
+    </select>
+    <span class="dim">agent</span>
+    <input name="agent_min" value="{{ agent_min or '' }}" size="2" placeholder="0">
+    <span class="dim">to</span>
+    <input name="agent_max" value="{{ agent_max or '' }}" size="2" placeholder="10">
+    <span class="dim">outcome</span>
+    <input name="outcome_min" value="{{ outcome_min or '' }}" size="2" placeholder="0">
+    <span class="dim">to</span>
+    <input name="outcome_max" value="{{ outcome_max or '' }}" size="2" placeholder="10">
+    <span class="dim">demands/mo</span>
+    <input name="vol_min" value="{{ vol_min or '' }}" size="3" placeholder="0">
+    <span class="dim">to</span>
+    <input name="vol_max" value="{{ vol_max or '' }}" size="3" placeholder="any">
+    <button type="submit">Apply</button>
     <button type="submit">Search</button>
     <a class="dim" href="/">reset</a>
     <span class="spacer" style="flex:1"></span>
     <a href="/export.csv?{{ qs }}">Export CSV</a>
-    <span class="dim">sort</span>
-    <select name="sort" onchange="this.form.submit()">
-      <option value="recent" {% if sort != 'volume' %}selected{% endif %}>most recent call</option>
-      <option value="volume" {% if sort == 'volume' %}selected{% endif %}>demands/month</option>
-    </select>
+    <input type="hidden" name="sort" value="{{ sort }}">
+    <input type="hidden" name="dir" value="{{ dir }}">
     <span class="dim">per page</span>
     <select name="per" onchange="this.form.submit()">
       {% for n in page_sizes %}
@@ -46,6 +77,15 @@
     </select>
   </div>
 </form>
+
+{% if chips %}
+<p class="chips"><b>{{ '{:,}'.format(total) }} matching</b>
+  {% for c in chips %}<a class="chip" href="/?{{ qs }}{% for k in c['clear_keys'] %}&amp;{{ k }}={% endfor %}"
+     title="remove this filter">{{ c['label'] }} <span class="x">&times;</span></a>{% endfor %}
+  <a class="dim" href="/">reset all</a></p>
+{% else %}
+<p class="chips"><b>{{ '{:,}'.format(total) }} leads</b> <span class="dim">&mdash; no filter</span></p>
+{% endif %}
 
 <div class="card">
   <h2>Upload a CSV</h2>
@@ -68,6 +108,16 @@
   <input type="hidden" name="needs_you" value="{{ needs_you or '' }}">
   <input type="hidden" name="email_state" value="{{ email_state or '' }}">
   <input type="hidden" name="campaign_id_filter" value="{{ campaign_id or '' }}">
+  <input type="hidden" name="state" value="{{ state or '' }}">
+  <input type="hidden" name="city" value="{{ city or '' }}">
+  <input type="hidden" name="has_email" value="{{ has_email or '' }}">
+  <input type="hidden" name="called" value="{{ called or '' }}">
+  <input type="hidden" name="agent_min" value="{{ agent_min or '' }}">
+  <input type="hidden" name="agent_max" value="{{ agent_max or '' }}">
+  <input type="hidden" name="outcome_min" value="{{ outcome_min or '' }}">
+  <input type="hidden" name="outcome_max" value="{{ outcome_max or '' }}">
+  <input type="hidden" name="vol_min" value="{{ vol_min or '' }}">
+  <input type="hidden" name="vol_max" value="{{ vol_max or '' }}">
 <div class="card toolbar">
   <b>With selected:</b>
   <select name="campaign_id">
@@ -97,11 +147,14 @@
 <tr>
   <th style="width:28px" title="Selects only the rows on THIS page">
     <input type="checkbox" id="selall"></th>
-  <th>Firm</th><th>Campaign</th><th>Queue</th><th>Phone</th><th>Stage</th><th>Status</th>
-  <th>Contact</th><th>Email</th><th>Follow-up</th><th class="right">Calls</th>
-  <th class="right">Emails</th><th>Last email</th>
-  <th class="right" title="A receptionist's estimate - directional, not a contract">Demands/mo</th>
-  <th class="right">Agent</th><th class="right">Outcome</th><th>Last call</th></tr>
+  {{ sh('firm', 'Firm') }}<th>Campaign</th><th>Queue</th><th>Phone</th>
+  {{ sh('stage', 'Stage') }}{{ sh('status', 'Status') }}
+  <th>Contact</th><th>Email</th><th>Follow-up</th>
+  {{ sh('calls', 'Calls', 'right') }}{{ sh('emails', 'Emails', 'right') }}
+  {{ sh('last_email', 'Last email') }}
+  {{ sh('volume', 'Demands/mo', 'right') }}
+  {{ sh('agent', 'Agent', 'right') }}{{ sh('outcome', 'Outcome', 'right') }}
+  {{ sh('last_call', 'Last call') }}</tr>
 {% for l in leads %}
 <tr>
   <td><input type="checkbox" name="lead_id" value="{{ l.lead_id }}"></td>
