@@ -40,6 +40,8 @@
     <select name="state"><option value="">any state</option>
       {% for st in states %}<option value="{{ st }}" {% if st == state %}selected{% endif %}>{{ st }}</option>{% endfor %}</select>
     <input name="city" value="{{ city or '' }}" placeholder="city" size="12">
+    <select name="tag"><option value="">any tag</option>
+      {% for t in all_tags %}<option value="{{ t.tag }}" {% if t.tag == tag %}selected{% endif %}>{{ t.tag }} ({{ t.n }})</option>{% endfor %}</select>
     <select name="has_email">
       <option value="">email: any</option>
       <option value="yes" {% if has_email == 'yes' %}selected{% endif %}>has an email</option>
@@ -110,6 +112,7 @@
   <input type="hidden" name="campaign_id_filter" value="{{ campaign_id or '' }}">
   <input type="hidden" name="state" value="{{ state or '' }}">
   <input type="hidden" name="city" value="{{ city or '' }}">
+  <input type="hidden" name="tag" value="{{ tag or '' }}">
   <input type="hidden" name="has_email" value="{{ has_email or '' }}">
   <input type="hidden" name="called" value="{{ called or '' }}">
   <input type="hidden" name="agent_min" value="{{ agent_min or '' }}">
@@ -159,7 +162,12 @@
 <tr>
   <td><input type="checkbox" name="lead_id" value="{{ l.lead_id }}"></td>
   <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a>
-      {% if l.tz_needs_review %}<span class="pill human_review" title="timezone derived from a split state">tz?</span>{% endif %}</td>
+      {% if l.tz_needs_review %}<span class="pill human_review" title="timezone derived from a split state">tz?</span>{% endif %}
+      {% for t in l.tags or [] %}<a class="tag" href="/?tag={{ t | urlencode }}">{{ t }}</a>{% endfor %}
+      {# WHY IS IT HERE - same generator as lead detail. A search result you
+         have to click through to understand has not answered the question
+         you searched for. #}
+      {% if l.why %}<div class="why">{{ l.why }}</div>{% endif %}</td>
   <td>{% if l.campaign_name %}<a class="camptag{% if l.campaign_running %} running{% endif %}"
         href="/campaign/{{ l.campaign_id }}"
         title="{% if l.campaign_running %}running{% else %}stopped{% endif %}">{{ l.campaign_name }}</a>

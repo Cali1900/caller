@@ -55,6 +55,16 @@ NO_CONNECT_REASONS = {
     'voicemail_reached', 'dial_answered_machine',
 }
 
+# The same set as a SQL array literal, DERIVED from it rather than restated.
+#
+# _LEAD_JOINS binds its parameters positionally and psycopg2 refuses a query
+# that mixes positional with named placeholders, so the lead query cannot
+# pass this set as a parameter without converting every other filter too.
+# Building the literal from the set keeps one source of truth: adding a
+# reason above changes the SQL, and nothing here is caller supplied.
+NO_CONNECT_SQL = "ARRAY[" + ', '.join(
+    "'" + r.replace("'", "''") + "'" for r in sorted(NO_CONNECT_REASONS)) + "]"
+
 _JUNK_STRINGS = {'undefined', 'null', 'none', 'n/a', 'na', '-'}
 
 

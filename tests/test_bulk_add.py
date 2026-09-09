@@ -88,7 +88,9 @@ def test_the_button_states_the_real_count_and_the_filter(db, client):
     _leads(12, prefix='+1919554')
     body = client.get('/?status=new').text
     assert 'Add all 12 matching' in body
-    assert 'status = new' in body
+    # The confirm now reuses the filter CHIPS, which label as "status: new".
+    # Same fact, one implementation - see _filter_description.
+    assert 'status: new' in body
 
 
 def test_no_filter_says_so_out_loud(db, client):
@@ -122,3 +124,29 @@ def test_the_page_scoped_control_is_still_page_scoped(db, client):
     assert 'Add all' in body
     assert body.index('Add selected') < body.index('Add all'), \
         'the safe one comes first'
+
+
+def test_the_confirm_names_every_filter_not_just_the_first_six(db, client):
+    """
+    THE FAULT THIS CLOSES. _filter_description listed six of the seventeen
+    filters _lead_query accepts, so the confirm could read "status: new"
+    while the button was about to add every lead in North Carolina too. Sean
+    hit exactly this shape once already: "2 matching: state = NC" while it
+    added everything.
+
+    state, city and tag are all in the group the old version could not see.
+    """
+    _leads(3, prefix='+1919556')
+    body = client.get('/?status=new&state=NC&city=Raleigh').text
+
+    # SCOPED TO THE CONFIRM TEXT, not the page. The removable filter pills
+    # render the same labels elsewhere on this page, so asserting over the
+    # whole body passes whether or not the confirm names anything - a masked
+    # guard, caught by break 89 going green.
+    import re as _re
+    m = _re.search(r'Matching: ([^\\]*)\\n', body)
+    assert m, 'the bulk-add confirm has no "Matching:" line at all'
+    confirm = m.group(1)
+    for expected in ('status: new', 'state: NC', 'city: Raleigh'):
+        assert expected in confirm, \
+            f'the confirm did not name {expected!r}; it said {confirm!r}'

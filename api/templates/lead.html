@@ -6,6 +6,25 @@
 
 {% if saved %}<div class="banner">{{ saved }}</div>{% endif %}
 
+{# WHY IS IT HERE. Assembled from state, no new data - and the SAME
+   generator that writes the line under each firm on the leads list. #}
+{% if why_line %}<p class="why-lead">{{ why_line }}</p>{% endif %}
+
+<form method="post" action="/leads/{{ lead.lead_id }}/tags" class="toolbar"
+      style="margin:-6px 0 16px">
+  {% for t in tags %}<a class="tag" href="/?tag={{ t | urlencode }}">{{ t }}</a>{% endfor %}
+  <input type="text" name="tag" placeholder="add a tag" size="18">
+  <button type="submit" class="ghost">Tag</button>
+  {% if tags %}<span class="dim">Click a tag to see every firm with it.</span>{% endif %}
+</form>
+{% if tags %}
+<form method="post" action="/leads/{{ lead.lead_id }}/tags/remove" class="toolbar"
+      style="margin:-10px 0 16px">
+  <select name="tag">{% for t in tags %}<option>{{ t }}</option>{% endfor %}</select>
+  <button type="submit" class="ghost">Remove tag</button>
+</form>
+{% endif %}
+
 <div class="grid">
   <div class="card">
     <h2>Contact</h2>

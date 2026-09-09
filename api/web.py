@@ -28,6 +28,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.templating import Jinja2Templates
 
 from api import (archive as _archive_mod,
+                 drain as _drain, why as _why,
                  retry_ladder as _rl,
                  campaigns, clicks as clicks_mod, db,
                  forecast as forecast_mod, funnel as funnel_mod,
@@ -189,11 +190,70 @@ _LEAD_JOINS = """
            WHERE ea.lead_id = l.lead_id
              AND ea.outcome IN ('sent', 'sent_manual')) em ON true
       LEFT JOIN LATERAL (
+          SELECT count(*) AS call_count,
+                 -- "reached a human": every call whose disconnection reason
+                 -- is not one of the never-connected ones. The list is
+                 -- drain.NO_CONNECT_REASONS, passed in rather than restated,
+                 -- so a new reason cannot mean connected here and not there.
+                 count(*) FILTER (
+                     WHERE coalesce(c.disconnection_reason,'') <> ''
+                       AND NOT (c.disconnection_reason = ANY(""" + _drain.NO_CONNECT_SQL + """))
+                 ) AS human_calls
+            FROM calls c WHERE c.lead_id = l.lead_id) ca ON true
+      LEFT JOIN LATERAL (
+          SELECT t.tags FROM (
+              SELECT array_agg(tag ORDER BY tag) AS tags
+                FROM lead_tags lt WHERE lt.lead_id = l.lead_id) t) tg ON true
+      LEFT JOIN LATERAL (
           SELECT s.agent_score, s.outcome_score
             FROM call_scores s JOIN calls c ON c.call_id = s.call_id
            WHERE c.lead_id = l.lead_id
            ORDER BY c.created_at DESC LIMIT 1) sc ON true
 """
+
+
+def _tags_for(lead_id):
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT tag FROM lead_tags WHERE lead_id = %s '
+                        'ORDER BY tag', (lead_id,))
+            return [r['tag'] for r in cur.fetchall()]
+
+
+def _clean_tag(raw: str) -> str:
+    """Lowercased, trimmed, collapsed. 'Big Firm' and 'big  firm' are the
+    same tag - stored twice they filter as two and neither finds everything."""
+    return re.sub(r'\s+', ' ', (raw or '').strip().lower())[:40]
+
+
+def _all_tags():
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT tag, count(*) AS n FROM lead_tags '
+                        'GROUP BY tag ORDER BY n DESC, tag')
+            return cur.fetchall()
+
+
+def _why_row(conn, lead_id):
+    """
+    The leads-list row for ONE lead.
+
+    Built from _LEAD_JOINS - the same joins the list uses - so the counts in
+    the line on lead detail and the line in a search result are computed by
+    the same SQL, not by two queries that agree today.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT l.lead_id, l.status, l.stage, l.dm_name,
+                               l.dm_email, l.dm_email_confirmed,
+                               l.stage_changed_at, l.emailed_at, l.replied_at,
+                               l.next_attempt_at, l.archived_at,
+                               l.archive_reason, l.returns_at,
+                               ca.call_count, ca.human_calls, tg.tags,
+                               ck.clicks, em.email_count,
+                               ({_EMAIL_STATE.strip()}) AS email_state
+                        {_LEAD_JOINS}
+                        WHERE l.lead_id = %s""", (lead_id,))
+        return cur.fetchone()
 
 
 def _distinct_states():
@@ -207,7 +267,7 @@ def _distinct_states():
 
 def _chips(q, status, stage, needs_you, email_state, campaign_id, state, city,
            has_email, agent_min, agent_max, outcome_min, outcome_max,
-           vol_min, vol_max, called, camp_names=None):
+           vol_min, vol_max, called, tag='', camp_names=None):
     """
     The active filters, each removable.
 
@@ -235,6 +295,8 @@ def _chips(q, status, stage, needs_you, email_state, campaign_id, state, city,
     elif campaign_id:
         add('campaign_id',
             f'campaign: {(camp_names or {}).get(str(campaign_id), campaign_id)}')
+    if tag:
+        add('tag', f'tag: {tag}')
     if state:
         add('state', f'state: {state}')
     if city:
@@ -259,7 +321,7 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
                 campaign_id='', sort='recent', direction='desc', state='',
                 city='', has_email='', agent_min='', agent_max='',
                 outcome_min='', outcome_max='', vol_min='', vol_max='',
-                called=''):
+                called='', tag=''):
     where, params = ["1=1"], []
     if q:
         where.append("(l.company ILIKE %s OR l.phone_e164 ILIKE %s "
@@ -288,6 +350,13 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
         where.append('l.campaign_id IS NULL')      # in the pool, on no campaign
     elif campaign_id:
         where.append('l.campaign_id = %s'); params.append(campaign_id)
+    if tag:
+        # EXISTS, not a join: joining lead_tags would multiply a lead by its
+        # tags and the count would read higher than the rows on screen - the
+        # count-drifts-from-the-list bug, which has now shipped three times.
+        where.append('EXISTS (SELECT 1 FROM lead_tags lt2 '
+                     'WHERE lt2.lead_id = l.lead_id AND lt2.tag = %s)')
+        params.append(_clean_tag(tag))
     if state:
         where.append('l.state = %s'); params.append(state)
     if city:
@@ -309,7 +378,10 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
     sql = f"""
         SELECT l.*,
                ({_EMAIL_STATE.strip()}) AS email_state,
-               (SELECT count(*) FROM calls c WHERE c.lead_id = l.lead_id) AS call_count,
+               -- call_count now comes from the shared lateral alongside
+               -- human_calls, so the list and lead detail cannot disagree
+               -- about how many times a firm has been called.
+               ca.call_count, ca.human_calls, tg.tags,
                sc.agent_score  AS last_agent,
                sc.outcome_score AS last_outcome_score,
                ck.clicks, ck.first_minutes,
@@ -335,7 +407,7 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
                agent_min: str = '', agent_max: str = '',
                outcome_min: str = '', outcome_max: str = '',
                vol_min: str = '', vol_max: str = '', called: str = '',
-               page: int = 1, per: int = PAGE, msg: str = ''):
+               tag: str = '', page: int = 1, per: int = PAGE, msg: str = ''):
     """THE LANDING PAGE. Where each firm stands, not a numbers dashboard."""
     cfg = _cfg()
     page = max(1, page)
@@ -345,10 +417,16 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         sql, params, where, cparams = _lead_query(
             q, status, stage, needs_you, per, (page - 1) * per, email_state,
             campaign_id, sort, dir, state, city, has_email, agent_min,
-            agent_max, outcome_min, outcome_max, vol_min, vol_max, called)
+            agent_max, outcome_min, outcome_max, vol_min, vol_max, called,
+            tag)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
+            # SAME GENERATOR as lead detail, over a row built by the same
+            # joins. Two implementations would drift, and the one on the
+            # list is the one that would quietly go stale.
+            for r in rows:
+                r['why'] = _why.line(r)
             # The same draft join as the list query - the email-state predicate
             # references it, and a count that cannot see `d` would 500 or, worse,
             # silently disagree with the rows on screen.
@@ -373,55 +451,50 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
           ('vol_min', vol_min), ('vol_max', vol_max), ('called', called),
           ('per', per if per != PAGE else ''))
          if v})
+    # ONE chips object. The removable filter pills on the page and the words
+    # in the bulk-add confirm are the same list, so they cannot disagree
+    # about what is filtered.
+    _chip_list = _chips(q, status, stage, needs_you, email_state, campaign_id,
+                        state, city, has_email, agent_min, agent_max,
+                        outcome_min, outcome_max, vol_min, vol_max, called,
+                        tag,
+                        {str(c['campaign_id']): c['name']
+                         for c in campaigns.list_all()})
     return templates.TemplateResponse(request, 'leads.html', {
         'hdr': hdr, 'leads': rows, 'q': q, 'status': status,
         'stage': stage, 'needs_you': needs_you, 'statuses': STATUSES,
         'email_state': email_state, 'per': per, 'page_sizes': PAGE_SIZES,
         # The count and the words for the bulk-add confirm. `total` is the
         # matching set, which is what that button acts on - not the page.
-        'filter_desc': _filter_description(q, status, stage, needs_you,
-                                           email_state, campaign_id,
-                                           {str(c['campaign_id']): c['name']
-                                            for c in campaigns.list_all()}),
+        'filter_desc': _filter_description(_chip_list),
         'campaign_id': campaign_id, 'sort': sort, 'dir': dir,
         'state': state, 'city': city, 'has_email': has_email,
         'agent_min': agent_min, 'agent_max': agent_max,
         'outcome_min': outcome_min, 'outcome_max': outcome_max,
         'vol_min': vol_min, 'vol_max': vol_max, 'called': called,
-        'chips': _chips(q, status, stage, needs_you, email_state, campaign_id,
-                        state, city, has_email, agent_min, agent_max,
-                        outcome_min, outcome_max, vol_min, vol_max, called,
-                        {str(c['campaign_id']): c['name']
-                         for c in campaigns.list_all()}),
+        'chips': _chip_list,
         'states': _distinct_states(),
+        'tag': tag, 'all_tags': _all_tags(),
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
         'pages': max(1, (total + per - 1) // per)})
 
 
-def _filter_description(q, status, stage, needs_you, email_state, campaign_id,
-                        campaigns_by_id=None):
+def _filter_description(chips) -> str:
     """
-    The active filter, in words. Shown in the confirm so a set nobody meant
-    cannot be added by accident - "1,100 matching" is not enough on its own.
+    The active filter, in words, for the confirm on "add all N matching".
+
+    BUILT FROM _chips, not from its own list. It used to enumerate six of the
+    seventeen filters _lead_query accepts, so the confirm could say
+    "status = new" while the button was about to add every lead in North
+    Carolina too. That is the count-drifts-from-the-list fault one screen
+    further on, and the fix is the same one: a single place that knows what a
+    filter is.
+
+    "1,100 matching" is not enough on its own - the words are what makes it
+    checkable before it is clicked.
     """
-    bits = []
-    if q:
-        bits.append(f'search = {q!r}')
-    if status:
-        bits.append(f'status = {status}')
-    if stage:
-        bits.append(f'stage = {stage}')
-    if email_state:
-        bits.append(f'email state = {email_state}')
-    if needs_you:
-        bits.append('needs you')
-    if campaign_id == 'none':
-        bits.append('no campaign')
-    elif campaign_id:
-        name = (campaigns_by_id or {}).get(str(campaign_id))
-        bits.append(f'campaign = {name or campaign_id}')
-    return ', '.join(bits) or 'NO FILTER - every lead'
+    return ', '.join(c['label'] for c in chips) or 'NO FILTER - every lead'
 
 
 @router.post('/leads/queue-all')
@@ -454,13 +527,13 @@ async def leads_queue_all(request: Request):
          ('q', 'status', 'stage', 'needs_you', 'email_state',
           'campaign_id_filter', 'state', 'city', 'has_email',
           'agent_min', 'agent_max', 'outcome_min', 'outcome_max',
-          'vol_min', 'vol_max', 'called')}
+          'vol_min', 'vol_max', 'called', 'tag')}
     _, _, where, cparams = _lead_query(
         f['q'], f['status'], f['stage'], f['needs_you'], 1, 0,
         f['email_state'], f['campaign_id_filter'], DEFAULT_SORT, DEFAULT_DIR,
         f['state'], f['city'], f['has_email'], f['agent_min'], f['agent_max'],
         f['outcome_min'], f['outcome_max'], f['vol_min'], f['vol_max'],
-        f['called'])
+        f['called'], f['tag'])
 
     with db.get_conn() as conn:
         with conn.cursor() as cur:
@@ -535,6 +608,8 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
             lead = cur.fetchone()
             if lead is None:
                 return HTMLResponse('<p>no such lead</p>', status_code=404)
+        why_line = _why.line(_why_row(conn, lead_id))
+        with conn.cursor() as cur:
             cur.execute('SELECT * FROM suppression WHERE phone_e164 = %s',
                         (lead['phone_e164'],))
             suppressed = cur.fetchone()
@@ -598,6 +673,8 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         'suppressed': suppressed, 'local_time': local, 'saved': saved,
         'draft': draft, 'campaign': camp,
         'manual_statuses': MANUAL_STATUSES,
+        'why_line': why_line,
+        'tags': _tags_for(lead_id),
         'archive_reasons': _archive_mod.REASONS,
         'clicks': clicks_mod.summary(lead['lead_id'])})
 
@@ -783,6 +860,44 @@ MANUAL_STATUSES = (
     'emailed', 'engaged', 'demo_booked', 'won', 'lost', 'lost_no_response',
     'bad_email',
 )
+
+
+@router.post('/leads/{lead_id}/tags')
+def lead_tag_add(lead_id: str, tag: str = Form(...),
+                 tagged_by: str = Form('operator')):
+    """
+    FREE TEXT, on purpose. A fixed vocabulary is a list someone has to extend
+    in code every time Sean needs a word he had not thought of - "referred by
+    X", "call after tax season". segment covers the one case it was built
+    for; this covers the rest.
+
+    Several at once, comma separated, because tagging is done in one pass.
+    """
+    added = [t for t in (_clean_tag(x) for x in tag.split(',')) if t]
+    if not added:
+        msg = 'REJECTED: an empty tag.'
+    else:
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                for t in added:
+                    cur.execute(
+                        """INSERT INTO lead_tags (lead_id, tag, created_by)
+                           VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+                        (lead_id, t, tagged_by))
+        msg = f'tagged: {", ".join(added)}'
+    return RedirectResponse(
+        f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+
+
+@router.post('/leads/{lead_id}/tags/remove')
+def lead_tag_remove(lead_id: str, tag: str = Form(...)):
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM lead_tags WHERE lead_id=%s AND tag=%s',
+                        (lead_id, _clean_tag(tag)))
+    return RedirectResponse(
+        f'/leads/{lead_id}?saved={urllib.parse.quote("removed " + tag)}',
+        status_code=303)
 
 
 @router.post('/leads/{lead_id}/archive')
