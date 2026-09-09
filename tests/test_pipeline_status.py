@@ -174,3 +174,90 @@ def test_the_new_statuses_are_filterable(db, client):
     assert str(lid) in client.get('/?status=engaged').text
     assert str(lid) not in client.get('/?status=won').text
     assert client.get('/funnel?status=engaged').status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# leaving the archive is not a status change
+# ---------------------------------------------------------------------------
+
+def test_the_status_dropdown_refuses_to_take_a_lead_out_of_archive(db, client):
+    """
+    THE MIRROR OF THE REFUSAL FOR MOVING *INTO* ARCHIVED.
+
+    Setting an archived lead to 'new' from the dropdown used to run a bare
+    UPDATE. That leaves pool_status='done', campaign_id NULL, archived_at and
+    returns_at set, and every gate the return exists to clear still set -
+    un-archived in name only, undialable and un-emailable.
+
+    And PERMANENTLY so, two ways: archive.return_due() selects
+    WHERE status='archived', so the nightly sweep can no longer see it; and
+    lead.html renders "Return to the pool now" only for an archived lead, so
+    the one control that would repair it disappears. No route back but SQL.
+
+    It REFUSES rather than performing the restore quietly. unarchive()
+    snapshots the send record and clears four gates - far more than "set the
+    status" - and a dropdown that silently did all that would make the timeline
+    lie about what a person did. Same discipline as /dnc being the only route
+    to suppression.
+    """
+    from api import archive
+    lid = _lead(phone='+14245558210')
+    archive.archive(lid, 'refused', by='test')
+
+    r = client.post(f'/leads/{lid}/status', data={'status': 'new'},
+                    follow_redirects=False)
+    assert 'REJECTED' in r.headers['location'], \
+        'the dropdown took a lead out of archive and stranded it'
+    assert 'Return+to+the+pool' in r.headers['location'] \
+        or 'Return%20to%20the%20pool' in r.headers['location'], \
+        'the refusal must name the control that actually works'
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT status, pool_status, archived_at, returns_at
+                             FROM leads WHERE lead_id = %s""", (lid,))
+            row = cur.fetchone()
+    assert row['status'] == 'archived', 'the lead must be left alone entirely'
+    assert row['pool_status'] == 'done'
+    assert row['archived_at'] is not None and row['returns_at'] is not None
+
+
+def test_the_restore_button_is_the_route_out_and_it_works(db, client):
+    """
+    The other half: refusing is only defensible because a control that does the
+    whole thing exists. It is the SAME code the nightly sweep runs.
+    """
+    from api import archive
+    lid = _lead(phone='+14245558211')
+    archive.archive(lid, 'refused', by='test')
+
+    r = client.post(f'/leads/{lid}/unarchive', data={'unarchived_by': 'sean'},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT status, pool_status, campaign_id, attempts,
+                                  archived_at, returns_at, has_confirmed_email,
+                                  emailed_at, replied_at, dm_email, dm_name
+                             FROM leads WHERE lead_id = %s""", (lid,))
+            row = cur.fetchone()
+    assert row['status'] == 'new'
+    assert row['pool_status'] == 'pool'
+    assert row['campaign_id'] is None, 'so it can be assigned again'
+    assert row['attempts'] == 0
+    assert row['archived_at'] is None and row['returns_at'] is None
+    # The gates are cleared...
+    assert row['has_confirmed_email'] is False
+    assert row['emailed_at'] is None and row['replied_at'] is None
+    # ...and the FACTS are kept.
+    assert row['dm_email'] == 'b@f.example'
+    assert row['dm_name'] == 'Bob'
+
+    # The return is on the timeline, not silent.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT summary FROM activity
+                            WHERE lead_id = %s AND kind = 'archive'
+                            ORDER BY created_at DESC LIMIT 1""", (lid,))
+            assert 'sean' in cur.fetchone()['summary']

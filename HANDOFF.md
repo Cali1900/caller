@@ -16,7 +16,7 @@ Last updated 2026-09-09. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260909_035_rename_stage.sql` |
 | Tests | 611 passed, 1 skipped |
-| Break pass | 94 definitions (84 deleted with `next_day`; 91–95 added). Full pass green at 93; break 95 verified individually since. `--status` now says COMPLETE / IN PROGRESS / NEVER RUN and no longer erases the only record on success |
+| Break pass | **95 definitions** (84 deleted with `next_day`; 91–96 added). Full pass GREEN across all 94 at 2026-09-09T15:54Z with the suite at 611; break 96 added and verified individually after. `--status` now says COMPLETE / IN PROGRESS / NEVER RUN, records `.break_pass_last` instead of erasing the only evidence, and refuses to record a completion it cannot put a test count on |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
 
@@ -166,7 +166,7 @@ api/
   why.py         "why is it here", assembled from existing state
   funnel.py      / forecast.py / volume.py  the numbers screens
 migrations/      forward-only, applied by scripts/migrate.sh
-scripts/breaks/  94 break definitions, one per guard
+scripts/breaks/  95 break definitions, one per guard
 ```
 
 ## Running it
@@ -249,6 +249,32 @@ timings stay true after `emailed_at` is cleared.
 Breaks **91–93**. The hand pull (`unarchive()`) and the nightly sweep leave a
 lead in the *same* state, asserted by a test — two paths that disagree is "why
 is this one different" with no answer.
+
+### Getting a lead back out of archive
+
+**One control: "Return to the pool now"** in the Archive section of lead detail
+(`POST /leads/{id}/unarchive` → `archive.unarchive()`). It is the SAME code the
+nightly sweep runs — they share `_CLEAR_GATES` and `_snapshot_contacts`, and a
+test asserts the hand pull and the sweep leave a lead in *identical* state. It
+clears the campaign, the attempts and the four gates, snapshots the send record,
+keeps every contact fact, and writes the return to the timeline.
+
+⚠️ **THE STATUS DROPDOWN REFUSES TO DO IT**, and that refusal is the exact
+mirror of the one that already stops a lead being moved *into* `archived`.
+
+A bare `UPDATE leads SET status` on an archived lead leaves `pool_status='done'`,
+`campaign_id` NULL, `archived_at`/`returns_at` set, and every gate still set —
+un-archived in name only, undialable and un-emailable. And **permanently**, two
+ways: `return_due()` selects `WHERE status='archived'`, so the nightly sweep can
+never see it again; and `lead.html` renders the Restore button only for an
+archived lead, so the one control that would repair it disappears from the page.
+No route back but hand SQL.
+
+It refuses rather than quietly performing the restore instead. `unarchive()`
+snapshots the send record and clears four gates — a great deal more than "set
+the status" — and a dropdown that silently did all that would make the timeline
+lie about what a person did. **Same discipline as `/dnc` being the only route to
+suppression.** Break 96.
 
 ⚠️ Not yet surfaced in the UI: `archived_contacts` has a reader and a test but
 no template. The lead detail screen does not yet show "emailed Sep 2026, 2

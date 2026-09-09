@@ -970,6 +970,39 @@ def lead_status(lead_id: str, status: str = Form(...),
             if row is None:
                 return RedirectResponse('/?msg=no+such+lead', status_code=303)
             was = row['status']
+            # LEAVING ARCHIVE IS NOT A STATUS CHANGE, and this refusal is the
+            # exact mirror of the one above for moving INTO archived.
+            #
+            # A bare UPDATE here strands the lead: pool_status stays 'done',
+            # campaign_id stays NULL, archived_at/returns_at stay set, and every
+            # gate the return is supposed to clear (has_confirmed_email,
+            # emailed_at, dm_email_confirmed, replied_at) stays set. So the lead
+            # is un-archived in name only - undialable and un-emailable.
+            #
+            # And it is stranded PERMANENTLY, two ways: archive.return_due()
+            # selects WHERE status = 'archived', so the nightly sweep can no
+            # longer see it; and lead.html only renders "Return to the pool now"
+            # {% if lead.status == 'archived' %}, so the one control that would
+            # repair it disappears from the page. There is no route back but
+            # hand SQL.
+            #
+            # It REFUSES rather than quietly doing the restore instead. Doing
+            # something bigger than was asked is how the archive reason gets
+            # lost: unarchive() snapshots the send record and clears four gates,
+            # which is a great deal more than "set the status", and a dropdown
+            # that silently performed it would make the timeline lie about what
+            # a person did. Same discipline as /dnc being the only route to
+            # suppression.
+            if was == 'archived':
+                msg = ('REJECTED: leaving the archive is not a status change. '
+                       'Use "Return to the pool now" in the Archive section - '
+                       'it clears the campaign, the attempts and the send '
+                       'gates, and records the return. A bare status change '
+                       'would leave the lead un-archived but unusable, and '
+                       'invisible to the nightly sweep.')
+                return RedirectResponse(
+                    f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                    status_code=303)
             if was == status:
                 return RedirectResponse(
                     f'/leads/{lead_id}?saved={urllib.parse.quote("Already " + status)}',
