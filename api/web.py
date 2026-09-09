@@ -1291,6 +1291,24 @@ async def campaign_step_preview(campaign_id: str, request: Request):
         'lead': {'company': lead.get('company'), 'name': lead.get('dm_name')}})
 
 
+def _step_days(value):
+    """
+    Days -> minutes, or None when nothing was posted.
+
+    None means "not supplied", which drip.validate() reads as 0 for step 1 -
+    'immediately' is the sensible reading of a blank timing box on the FIRST
+    email. A non-number is passed through so validate() refuses it with its own
+    message rather than being silently coerced.
+    """
+    v = (value or '').strip()
+    if not v:
+        return None
+    try:
+        return int(v) * 1440
+    except ValueError:
+        return v
+
+
 def _step_minutes(value, unit):
     """
     (number, 'm'|'h') -> minutes, or None when nothing was posted.
@@ -1336,8 +1354,13 @@ async def campaign_steps_save(request: Request, campaign_id: str):
                          # "after 2 hours" typed as 120 minutes is arithmetic the
                          # operator should not be doing. Stored as minutes: one
                          # column, one scale, and the unit is presentation.
-                         'delay_minutes': _step_minutes(
-                             form.get(f'every_{i}'), form.get(f'unit_{i}')),
+                         # STEP 1 IS MEASURED IN DAYS FROM JOINING THE DRIP.
+                         # Stored in the same delay_minutes column so there is
+                         # one scale in the database and the unit is
+                         # presentation - the column name is now narrower than
+                         # what it holds, which is the lesser evil against a
+                         # second timing column that must agree with it.
+                         'delay_minutes': _step_days(form.get(f'day1_{i}')),
                          'enabled': '1' if form.get(f'enabled_{i}') else '',
                          'subject': form.get(f'subject_{i}'),
                          'body': form.get(f'body_{i}')})
@@ -1389,6 +1412,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
                 'body': drafts_mod.render(
                     st['body'], drafts_mod.values_for(pv_lead, camp))}
             for st in _drip_mod.steps(campaign_id)},
+        'source_split': _drip_mod.source_split(campaign_id),
         'preview_candidates': drafts_mod.preview_candidates(campaign_id),
         'placeholders': drafts_mod.PLACEHOLDERS,
         'reachable': {o: _rl.reachable(camp[f'retry_{o}'], camp['max_attempts'])

@@ -365,23 +365,54 @@ def enter(cur, lead_id, drip_campaign_id) -> bool:
     #   call-sourced   email 1 IS step 1 -> next due is step 2, at its delay
     #   imported       no email 1 -> step 1 is due now, and sending it stamps
     #                  emailed_at (see DUE_NOW and send_step)
+    # ⚠️ RESOLVE STEP 1 FIRST, and only claim a link if there IS one.
+    #
+    # The previous version put the lookup in the UPDATE's SET clause. On a drip
+    # with NO STEPS YET that subquery returns NULL, so it set step_id = NULL - a
+    # no-op - while cur.rowcount was still 1 because the WHERE matched. The code
+    # believed it had linked email 1 to step 1 and wrote "email 1 counts as step
+    # 1" to the timeline. It had not.
+    #
+    # THE CONSEQUENCE WAS A WRONG EMAIL TO A REAL FIRM. Add the sequence later and
+    # step 1 has no send row for that lead, delay_days is 0, emailed_at is set -
+    # so `emailed_at + 0 days <= now()` is true, nothing excludes it, and a firm
+    # we CALLED receives step 1's cold opener, which says nothing about the call.
+    #
+    # rowcount answers "did the UPDATE match a row", never "did it find a step".
     cur.execute(
-        """UPDATE email_sends es SET step_id = (
-                   SELECT s.step_id FROM drip_steps s
-                    WHERE s.campaign_id = %s AND s.deleted_at IS NULL
-                    ORDER BY s.position LIMIT 1)
-            WHERE es.lead_id = %s AND es.seq = 1 AND es.step_id IS NULL
-              AND es.sent_at IS NOT NULL""",
-        (drip_campaign_id, lead_id))
-    linked = cur.rowcount
+        """SELECT step_id FROM drip_steps
+            WHERE campaign_id = %s AND deleted_at IS NULL
+            ORDER BY position LIMIT 1""", (drip_campaign_id,))
+    first_step = cur.fetchone()
+    linked = 0
+    if first_step:
+        cur.execute(
+            """UPDATE email_sends SET step_id = %s
+                WHERE lead_id = %s AND seq = 1 AND step_id IS NULL
+                  AND sent_at IS NOT NULL""",
+            (first_step['step_id'], lead_id))
+        linked = cur.rowcount
     cur.execute(
         """INSERT INTO activity (lead_id, kind, summary, detail)
            VALUES (%s, 'drip', 'entered the drip', %s)""",
-        (lead_id,
-         'email 1 counts as step 1; the sequence is scheduled from that send'
-         if linked else
-         'no email has gone yet - step 1 is due now and will start the clock'))
+        (lead_id, _entry_detail(linked, bool(first_step))))
     return True
+
+
+def _entry_detail(linked, has_steps) -> str:
+    """
+    What actually happened, in the three cases that exist. The old message
+    covered two and asserted the wrong one in the third.
+    """
+    if linked:
+        return 'email 1 counts as step 1; the sequence is scheduled from that send'
+    if not has_steps:
+        # ⚠️ THE CASE THAT SENT A WRONG EMAIL. Say it plainly on the timeline so
+        # the lead is findable, rather than recording a link that did not happen.
+        return ('⚠️ this drip has NO STEPS YET, so email 1 could not be recorded '
+                'against step 1. Write the sequence before this lead is due, or '
+                'it will receive step 1 as if it had never been called.')
+    return 'no email has gone yet - step 1 is due now and will start the clock'
 
 
 def record_send(cur, lead_id, step_id, seq, to_email, subject, sent_by):
@@ -402,6 +433,31 @@ def record_send(cur, lead_id, step_id, seq, to_email, subject, sent_by):
         (lead_id, step_id, seq, to_email or '', subject, sent_by,
          secrets.token_urlsafe(16)))
     return cur.fetchone()
+
+
+def source_split(campaign_id) -> dict:
+    """
+    {'total': n, 'imported': n, 'call': n} for the leads on this drip.
+
+    ⚠️ DERIVED, NOT DECLARED. A drip could carry a `source` column instead, and
+    that was considered and rejected: step 1 is LOAD-BEARING for a call-sourced
+    lead - it is the row email 1 is linked to - so hiding it would make the
+    +4-day step become position 1, and enter() would link email 1 to THAT,
+    skipping it. Hiding step 1 eats a step rather than skipping one.
+
+    A count reflects what is actually on the drip rather than an intention set at
+    creation, and it stays true when both sources are mixed - which nothing
+    prevents, since bulk add-to-drip and default_drip_id can both feed one.
+    Same reasoning as lead_source being provenance rather than the dial gate.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE lead_source = 'import') AS imported,
+                          count(*) FILTER (WHERE lead_source <> 'import') AS call
+                     FROM leads WHERE drip_campaign_id = %s""", (campaign_id,))
+            return dict(cur.fetchone())
 
 
 def sends(lead_id):
@@ -475,7 +531,21 @@ ALREADY_SENT_STOP = ('AND NOT EXISTS (SELECT 1 FROM email_sends es '
 # coalesce on drip_entered_at so a lead that predates the column still works:
 # an absent entry time reads as "already elapsed", never as "never due", which
 # is the direction that fails loudly rather than silently.
-DUE_NOW = ("AND ((l.emailed_at IS NOT NULL"
+# ⚠️ STEP 1 IS NEVER SCHEDULED BY DAYS. It IS the first send, so "N days
+# after the first send" is meaningless for it - and treating it as day 0
+# from emailed_at is what let a CALL-SOURCED lead receive it.
+#
+# THE BUG THIS CLOSES: a lead that joined a drip before the sequence was
+# written has no send row against step 1 (there was no step 1 to link to).
+# Add the steps later and the days branch matched it - emailed_at set,
+# delay_days 0 - so a firm we CALLED received step 1's cold opener, which
+# says nothing about the call. enter() no longer mis-reports the link, but
+# THIS is what makes it safe: position > 1 means step 1 cannot be reached
+# down the days path at all, whatever happened at entry.
+#
+#   step 1     only for a lead with NO emailed_at, timed from drip_entered_at
+#   steps 2+   from emailed_at, which step 1 (or the call campaign) created
+DUE_NOW = ("AND ((l.emailed_at IS NOT NULL AND s.position > 1"
            "      AND l.emailed_at + (s.delay_days || ' days')::interval"
            "          <= now())"
            "  OR (l.emailed_at IS NULL AND s.position = 1"

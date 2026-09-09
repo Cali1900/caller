@@ -252,20 +252,35 @@
           </div>
 
           {% if loop.first %}
-          {# STEP 1 IS THE FIRST SEND. Minutes or hours after joining the drip -
-             it cannot be N days after itself, so it gets no day field at all. #}
+          {# STEP 1 IS THE FIRST SEND, so it is measured from JOINING THE DRIP -
+             never "after the first send", which would be after itself. #}
           <div class="field">
             <label>Sends</label>
             <div class="toolbar">
-              <input type="number" name="every_{{ i }}" min="0" max="168"
-                     value="{{ st.delay_minutes // 60 if st.delay_minutes and st.delay_minutes % 60 == 0 else st.delay_minutes or 0 }}"
-                     style="width:5em">
-              <select name="unit_{{ i }}">
-                <option value="m" {% if not (st.delay_minutes and st.delay_minutes % 60 == 0) %}selected{% endif %}>minutes</option>
-                <option value="h" {% if st.delay_minutes and st.delay_minutes % 60 == 0 and st.delay_minutes > 0 %}selected{% endif %}>hours</option>
-              </select>
-              <span class="dim">after a lead joins the drip &mdash; 0 = immediately</span>
+              <input type="number" name="day1_{{ i }}" min="0" max="60"
+                     value="{{ (st.delay_minutes or 0) // 1440 }}" style="width:4.5em">
+              <span class="dim">days after <b>joining the drip</b>
+                &mdash; 0 = immediately</span>
             </div>
+            {# WHO THIS STEP ACTUALLY GOVERNS, counted rather than declared. A
+               control that does nothing for half the leads should say which
+               half - and the number is the answer when both sources are mixed. #}
+            {% set sp = source_split %}
+            {% if sp.total %}
+              <span class="dim">Step 1 governs <b>{{ sp.imported }}</b> of the
+                {{ sp.total }} lead{{ '' if sp.total == 1 else 's' }} on this drip.
+                {% if not sp.imported %}All {{ sp.total }} arrived from calls and
+                  had email&nbsp;1 sent by their call campaign &mdash; for them
+                  this step is the <b>record</b> of that send, not an email.
+                  Its copy and timing apply only to imported leads.
+                {% elif sp.call %}{{ sp.call }} arrived from calls and already had
+                  email&nbsp;1; they start at step&nbsp;2.
+                {% endif %}</span>
+            {% else %}
+              <span class="dim">No leads on this drip yet. Step 1 sends to
+                <b>imported</b> leads; a call-sourced lead already had
+                email&nbsp;1 and starts at step&nbsp;2.</span>
+            {% endif %}
           </div>
           {% endif %}
 
@@ -294,12 +309,29 @@
       <span class="dim">A blank step is not saved.</span>
     </div>
 
-    <template id="steptpl">
+    {# ⚠️ NO GAP ROW IN THE TEMPLATE. It used to carry one, so on a drip with no
+       steps the FIRST step you added got "days after the first send" above it -
+       and step 1 IS the first send. The gap is inserted by the JS only when the
+       new step is not the first, which is the only place that knows. #}
+    <template id="stepgaptpl">
       <div class="stepgap">
         &darr;&nbsp; send
         <input type="number" name="delay___I__" min="1" max="365" style="width:4.5em">
         days after the first send
       </div>
+    </template>
+    <template id="step1tpl">
+      <div class="field">
+        <label>Sends</label>
+        <div class="toolbar">
+          <input type="number" name="day1___I__" min="0" max="60" value="0"
+                 style="width:4.5em">
+          <span class="dim">days after <b>joining the drip</b>
+            &mdash; 0 = immediately</span>
+        </div>
+      </div>
+    </template>
+    <template id="steptpl">
       <details class="card step" style="margin:6px 0;padding:10px" open>
         <summary style="cursor:pointer"><b>New step</b></summary>
         <div class="copy-split">
@@ -477,7 +509,25 @@
     addBtn.addEventListener('click', function () {
       var i = next++;
       var box = document.createElement('div');
-      box.innerHTML = tpl.innerHTML.split('__I__').join(String(i));
+      /* THE GAP ROW ONLY WHEN THIS IS NOT THE FIRST STEP, and step 1's own
+         "days after joining the drip" control only when it IS. The template
+         used to carry the gap unconditionally, so on an empty drip the FIRST
+         step added was labelled "days after the first send" - and step 1 IS
+         the first send. Only this callback knows which case it is. */
+      var html = '';
+      if (i > 0) {
+        html += document.getElementById('stepgaptpl').innerHTML;
+      }
+      html += tpl.innerHTML;
+      box.innerHTML = html.split('__I__').join(String(i));
+      if (i === 0) {
+        var one = document.createElement('div');
+        one.innerHTML = document.getElementById('step1tpl')
+                          .innerHTML.split('__I__').join(String(i));
+        var split = box.querySelector('.copy-split > div');
+        if (split) while (one.firstChild) split.insertBefore(
+            one.firstChild, split.querySelector('.field'));
+      }
       while (box.firstChild) host.appendChild(box.firstChild);
       var f = host.querySelector('[name="subject_' + i + '"]');
       if (f) f.focus();

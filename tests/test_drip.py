@@ -900,17 +900,25 @@ def test_each_step_collapses_and_the_delay_sits_between_them(db, dripc, client):
 def test_step_1_is_not_offered_a_day_field(db, dripc, client):
     """It IS the first send. A day field on it read as a control and was not one."""
     r = client.get(f"/campaign/{dripc['campaign_id']}")
-    # A NUMBER PLUS A UNIT - minutes or hours, per the spec. "after 2 hours"
-    # typed as 120 minutes is arithmetic the operator should not be doing.
-    assert 'name="every_0"' in r.text, 'step 1 has no timing control'
-    assert 'name="unit_0"' in r.text, 'step 1 cannot be set in hours'
-    assert '>minutes<' in r.text and '>hours<' in r.text
+    # DAYS AFTER JOINING THE DRIP. Step 1 IS the first send, so its label must
+    # never say "after the first send" - that is after itself.
+    assert 'name="day1_0"' in r.text, 'step 1 has no timing control'
+    assert 'joining the drip' in r.text, \
+        'step 1 does not say what its delay is measured from'
     assert 'name="delay_0"' not in r.text, \
-        'step 1 is still offered a day field it cannot honour'
-    # And no between-steps delay row may precede step 1 either.
+        'step 1 is still offered a days-after-the-first-send field'
+    # ⚠️ ASSERT ON THE TEXT, NOT ONLY THE CLASS. The previous version checked
+    # that no class="stepgap" preceded step 1, which was true of the SERVER
+    # HTML while the CLONE TEMPLATE still carried one - so on an empty drip the
+    # first step added got "days after the first send" above it. A class check
+    # cannot see markup the browser builds; the template's own text can.
     first = r.text.index('<b>Step 1</b>')
-    assert 'class="stepgap"' not in r.text[:first], \
-        'a days row renders above step 1'
+    assert 'class="stepgap"' not in r.text[:first], 'a days row renders above step 1'
+    tpl = r.text[r.text.index('<template id="steptpl">'):]
+    tpl = tpl[:tpl.index('</template>')]
+    assert 'after the first send' not in tpl, \
+        'the clone template carries a gap row, so the FIRST step added by hand '\
+        'is labelled "days after the first send" - and step 1 IS the first send'
 
 
 def test_a_step_created_without_the_field_is_enabled(db):
@@ -987,7 +995,7 @@ def test_saving_a_sequence_needs_no_call_only_fields(db, dripc, client):
     work. No agent_l1_version, no daily_cap, no spacing.
     """
     r = client.post(f"/campaign/{dripc['campaign_id']}/steps", data={
-        'step_id_0': '', 'every_0': '15', 'unit_0': 'm', 'enabled_0': '1',
+        'step_id_0': '', 'day1_0': '1', 'enabled_0': '1',
         'subject_0': 'Opener', 'body_0': 'Hi {{first_name}}',
         'delay_1': '4', 'enabled_1': '1',
         'subject_1': 'Second', 'body_1': 'Following up',
@@ -996,7 +1004,7 @@ def test_saving_a_sequence_needs_no_call_only_fields(db, dripc, client):
     assert 'REJECTED' not in r.headers['location'], r.headers['location']
     saved = drip.steps(dripc['campaign_id'])
     assert [s['subject'] for s in saved] == ['Opener', 'Second']
-    assert saved[0]['delay_minutes'] == 15
+    assert saved[0]['delay_minutes'] == 1440, 'one day, stored as minutes'
     assert saved[1]['delay_days'] == 4
 
 
@@ -1086,3 +1094,121 @@ def test_the_sender_belongs_to_the_campaign_not_to_a_step(db, dripc, client):
     closed_at = html.index('</form>', save_form)
     assert save_form < sender < closed_at, \
         'the sender fields fell outside the form that saves them'
+
+
+# ==========================================================================
+# A CALL-SOURCED LEAD MUST NEVER RECEIVE STEP 1
+# ==========================================================================
+
+def test_a_call_sourced_lead_never_receives_step_1(db, dripc):
+    """
+    ⚠️ THE BUG: a lead that joined a drip BEFORE the sequence was written had no
+    step 1 to be linked to. Add the steps later and the days branch matched step
+    1 - emailed_at set, delay_days 0 - so a firm we CALLED received step 1's cold
+    opener, which says nothing about the call.
+
+    enter() no longer mis-reports the link, but the STRUCTURAL fix is that step 1
+    is not on the days path at all: `s.position > 1`. Step 1 is reachable only
+    by a lead with NO emailed_at.
+    """
+    cid = dripc['campaign_id']
+    # A stepless drip is a state the UI allows - /campaigns warns "no steps yet".
+    for st in drip.steps(cid):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM drip_steps WHERE step_id = %s',
+                            (st['step_id'],))
+    assert drip.steps(cid) == []
+
+    lid = _lead(db, days_ago=40, phone_e164='+15553339500')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            assert drip.enter(cur, lid, cid) is True
+
+    # NOW write the sequence, as anyone would.
+    drip.save_steps(cid, [
+        {'delay_minutes': 0, 'subject': 'Cold opener', 'body': 'I found you on a list'},
+        {'delay_days': 4, 'subject': 'Second', 'body': 'b'},
+    ])
+
+    due = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert 1 not in [r['position'] for r in due], (
+        'a firm we CALLED is queued for step 1 - the cold opener that says '
+        'nothing about the call')
+    assert [r['position'] for r in due] == [2], \
+        'it should pick up at step 2, at its delay from emailed_at'
+
+
+def test_entering_a_stepless_drip_says_so_on_the_timeline(db, dripc):
+    """
+    It used to record "email 1 counts as step 1" - which was false, because there
+    was no step 1. rowcount answers "did the UPDATE match a row", never "did it
+    find a step".
+    """
+    cid = dripc['campaign_id']
+    for st in drip.steps(cid):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM drip_steps WHERE step_id = %s',
+                            (st['step_id'],))
+    lid = _lead(db, days_ago=40, phone_e164='+15553339501')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            drip.enter(cur, lid, cid)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT detail FROM activity
+                            WHERE lead_id = %s AND kind = 'drip'
+                            ORDER BY created_at DESC LIMIT 1""", (lid,))
+            detail = cur.fetchone()['detail']
+    assert 'NO STEPS YET' in detail, detail
+    assert 'counts as step 1' not in detail, \
+        'it still claims a link it did not make'
+
+
+def test_the_editor_says_who_step_1_governs(db, dripc, client):
+    """
+    DERIVED, NOT DECLARED. A drip could carry a source column; that was rejected
+    because step 1 is load-bearing for a call-sourced lead - hiding it would make
+    the +4-day step position 1, and enter() would link email 1 to THAT, eating a
+    step rather than skipping one.
+
+    A count also stays true when both sources are mixed, which nothing prevents.
+    """
+    cid = dripc['campaign_id']
+    r = client.get(f'/campaign/{cid}')
+    assert 'No leads on this drip yet' in r.text
+
+    # All call-sourced: step 1 governs none of them, and it says so.
+    for n in range(2):
+        lid = _lead(db, days_ago=40, phone_e164=f'+1555333960{n}')
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE leads SET drip_campaign_id=%s WHERE lead_id=%s',
+                            (cid, lid))
+    # ⚠️ NORMALISE WHITESPACE. Jinja wraps the rendered text, so asserting a
+    # literal one-line substring fails on markup that is perfectly correct -
+    # brittle in the same way as matching a CSS comment was.
+    def flat(t):
+        return ' '.join(t.split())
+    r = client.get(f'/campaign/{cid}')
+    assert 'Step 1 governs <b>0</b> of the 2 leads' in flat(r.text), \
+        'the label does not say step 1 governs none of them'
+    assert 'All 2 arrived from calls' in flat(r.text)
+
+    # Mixed: the number is what matters, in BOTH directions.
+    lid = _lead(db, days_ago=0, phone_e164='+15553339610',
+                lead_source='import')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('UPDATE leads SET drip_campaign_id=%s WHERE lead_id=%s',
+                        (cid, lid))
+    r = client.get(f'/campaign/{cid}')
+    assert 'Step 1 governs <b>1</b> of the 3 leads' in flat(r.text), \
+        'the label does not report the imported count when sources are mixed'
+    assert '2 arrived from calls and already had' in flat(r.text)
+
+    # AND IT STAYS EDITABLE AND PRESENT even when it governs nobody.
+    assert 'name="subject_0"' in r.text and 'name="body_0"' in r.text, \
+        'step 1 must stay editable - imported leads get added later'
+    assert 'name="day1_0"' in r.text, 'step 1 lost its timing control'
