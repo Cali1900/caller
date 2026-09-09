@@ -40,6 +40,16 @@ TOTAL=$(ls scripts/breaks/*.py | wc -l)
 # changed set would skip guards while reporting a complete pass.
 FINGERPRINT=$(ls scripts/breaks/*.py | md5sum | cut -d' ' -f1)
 
+# A STALE ANCHOR COSTS TWENTY MINUTES TO FIND at chunk eight, and a second
+# to find here. It also catches the worse case - an anchor matching twice,
+# where the patch hits an occurrence the named test does not read.
+if ! python3 scripts/breaks_anchor_check.py; then
+  echo
+  echo "Fix the definitions above before running. A break whose anchor has"
+  echo "moved is not a guard that passed - it is a guard nothing checked."
+  exit 1
+fi
+
 done_through=0
 if [[ -f "$PROGRESS" ]]; then
   read -r p_fp p_size p_done _ < "$PROGRESS"
