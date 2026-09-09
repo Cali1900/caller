@@ -54,7 +54,7 @@ def _client(cfg) -> Retell:
 # Which Retell agent runs which stage. L2 is deliberately absent: at L2 we OWE
 # them an email and nothing dials.
 STAGE_AGENTS = {
-    'L1': ('AGENT_L1', 'AGENT_L1_VERSION'),
+    'L1': 'AGENT_L1',
 }
 
 
@@ -70,26 +70,38 @@ def agent_for(cfg, stage: str, campaign=None):
     """
     (agent_id, version) for a stage. Raises for a stage that must not dial.
 
-    Version comes from settings, falling back to the env seed if the settings
-    table cannot be read - falling back to a KNOWN version is safer than
-    refusing to dial or guessing at 'latest'.
+    THE CAMPAIGN ROW IS THE ONLY ANSWER to "which version is live".
+
+    There used to be a second answer: an AGENT_L1_VERSION env var, used as a
+    seed and overridden by the campaign whenever one could be read. One fact
+    with two homes - and the env copy was the stale one, because nothing
+    updated it when the picker changed the campaign's version.
+
+    It only ever surfaced when the database could not be read, and dialing
+    with a version nobody chose is the exact failure the picker exists to
+    prevent: v8 went live once as a side effect of an unrelated edit. So this
+    now REFUSES instead of falling back. A call that cannot name its prompt
+    version is a call whose score cannot be attributed.
     """
     try:
-        aid, ver = STAGE_AGENTS[stage]
+        aid = STAGE_AGENTS[stage]
     except KeyError:
         raise ValueError(f'no dialing agent for stage {stage!r} - refusing')
-    version = getattr(cfg, ver)
-    key = STAGE_VERSION_SETTING.get(stage)
-    if key:
-        try:
-            # The prompt version is a PROPERTY OF THE RUNNING CAMPAIGN.
-            # Falling back to the env seed beats guessing at 'latest'.
-            from api import campaigns as _campaigns
-            camp = campaign or _campaigns.running()
-            if camp and camp.get(key) is not None:
-                version = camp[key]
-        except Exception:
-            pass
+    key = STAGE_VERSION_SETTING[stage]
+
+    camp = campaign
+    if camp is None:
+        from api import campaigns as _campaigns
+        camp = _campaigns.running()
+    if not camp:
+        raise ValueError(
+            f'no campaign to read {key} from - refusing to dial. The prompt '
+            f'version is a property of a campaign; there is no default.')
+    version = camp.get(key)
+    if version is None:
+        raise ValueError(
+            f'campaign {camp.get("name", camp.get("campaign_id"))!r} has no '
+            f'{key} - refusing to dial rather than guessing at a version.')
     return getattr(cfg, aid), version
 
 
@@ -158,7 +170,8 @@ def create_web_call(cfg, lead, dynamic=None):
     """Browser call. No telephony, no risk - this is rollout step 1."""
     if not isinstance(lead, dict):          # tolerate a bare lead_id
         lead = {'lead_id': lead, 'stage': 'L1'}
-    agent_id, agent_version = agent_for(cfg, lead.get('stage') or 'L1')
+    agent_id, agent_version = agent_for(cfg, lead.get('stage') or 'L1',
+                                        lead.get('campaign'))
     return _client(cfg).call.create_web_call(
         agent_id=agent_id,
         agent_version=agent_version,

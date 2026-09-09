@@ -4,7 +4,7 @@ Draft follow-up emails. GENERATED, NEVER SENT.
 Nothing in this repo sends email to a lead. A draft is written when we capture
 a name and a confirmed email; a person opens the lead, reads it, edits if
 needed, sends it themselves, then clicks "mark as sent" - which is the
-EXISTING L2 -> L3 transition (stages.mark_emailed), not a second one.
+EXISTING send record (stages.mark_emailed), not a second one.
 
 THE OPENER IS THE WHOLE POINT. It references the call. Without that this is
 cold outreach and the phone call was wasted.

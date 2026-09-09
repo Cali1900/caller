@@ -17,15 +17,23 @@ import json
 from api import db
 
 
-def snapshot(cfg, stage: str = 'L1', changed_by: str = 'system',
+def snapshot(cfg, version: int, stage: str = 'L1', changed_by: str = 'system',
              note: str = 'auto-snapshot'):
     """
-    Read the pinned Retell agent version and record it. Idempotent on
+    Read one Retell agent version and record it. Idempotent on
     (agent_id, agent_version).
+
+    VERSION IS REQUIRED, and the caller must say where it got it. This used
+    to read cfg.AGENT_L1_VERSION, which made it a second definition of "the
+    live version" alongside the campaign row - and the stale one, since
+    nothing updated env when the picker changed a campaign. A snapshot of the
+    wrong version is worse than no snapshot: it attributes scores to a prompt
+    that never ran.
     """
+    version = int(version)
     from retell import Retell
     c = Retell(api_key=cfg.RETELL_API_KEY)
-    agent = c.agent.retrieve(cfg.AGENT_L1, version=cfg.AGENT_L1_VERSION)
+    agent = c.agent.retrieve(cfg.AGENT_L1, version=version)
     engine = agent.response_engine
     d = engine if isinstance(engine, dict) else json.loads(engine.model_dump_json())
     llm = c.llm.retrieve(d['llm_id'], version=int(d['version']))
@@ -45,19 +53,8 @@ def snapshot(cfg, stage: str = 'L1', changed_by: str = 'system',
                                    model = EXCLUDED.model,
                                    prompt_chars = EXCLUDED.prompt_chars
                    RETURNING version, model, prompt_chars, agent_version""",
-                (stage, cfg.AGENT_L1, cfg.AGENT_L1_VERSION, prompt, model,
+                (stage, cfg.AGENT_L1, version, prompt, model,
                  len(prompt), changed_by, note))
-            return cur.fetchone()
-
-
-def active(cfg, stage: str = 'L1'):
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT version, model, prompt_chars, agent_version
-                     FROM prompt_versions
-                    WHERE agent_id = %s AND agent_version = %s""",
-                (cfg.AGENT_L1, cfg.AGENT_L1_VERSION))
             return cur.fetchone()
 
 

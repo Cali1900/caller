@@ -125,14 +125,18 @@ def test_l2_is_never_a_dial_candidate(db, cfg_env, enrolled):
 
 def test_only_l1_is_a_dial_candidate(db, cfg_env, enrolled):
     """
-    L3's automatic follow-up was unwired: a follow-up is its own campaign now.
-    An L3 lead sitting in the queue must NOT be picked up by the L1 campaign -
-    it would be dialed with the wrong prompt and against the wrong cap.
+    STAGE_DIALABLE is L1 only. An L2 lead is one we OWE an email - dialing it
+    again would talk to a firm we have already promised to write to.
+
+    This used to construct an L3 lead. L3 is no longer a value the stage
+    column accepts, so that state is refused by the database rather than
+    filtered by the dialer, which is the stronger of the two. L2 is the stage
+    that still exists and still must never be picked up.
     """
     l1 = _lead(db, stage='L1', phone_e164='+15552220011')
-    l3 = _lead(db, stage='L3', phone_e164='+15552220012',
+    l2 = _lead(db, stage='L2', phone_e164='+15552220012',
                dm_name='Sara', dm_email='s@w.com', dm_email_confirmed=True)
-    enrolled(l1); enrolled(l3)
+    enrolled(l1); enrolled(l2)
     got = {c['stage'] for c in dialer.select_and_claim(cfg_env, limit=10)}
     assert got == {'L1'}
 
@@ -203,7 +207,9 @@ def test_only_l2_can_be_marked_emailed(db, cfg_env):
     real Send now.
     """
     import pytest as _pytest
-    for stage in ('L1', 'L3'):
+    # L1 is now the ONLY other stage - the column accepts L1 and L2 and
+    # nothing else - so this loop is exhaustive rather than a sample.
+    for stage in ('L1',):
         lid = _lead(db, stage=stage, phone_e164=f'+1555222{ord(stage[1]):04d}')
         with _pytest.raises(stages.NotAtL2) as e:
             stages.mark_emailed(lid, emailed_by='operator')
@@ -265,18 +271,20 @@ def test_recording_a_reply_twice_is_a_no_op(db, cfg_env):
 # --------------------------------------------------------------------------
 
 def test_each_stage_uses_its_own_agent(cfg_env):
-    assert retell.agent_for(cfg_env, 'L1')[0] == cfg_env.AGENT_L1
+    # A campaign is passed explicitly: the version has exactly one home now,
+    # and resolving the agent ID must not depend on which campaign is running.
+    assert retell.agent_for(cfg_env, 'L1', {'agent_l1_version': 9})[0] == cfg_env.AGENT_L1
     # L3 HAS NO DIALING AGENT any more - a follow-up is its own campaign, by
     # email. agent_for refuses rather than guessing, which is the fail-closed
     # behaviour every unknown stage gets.
     import pytest as _pytest
     with _pytest.raises(ValueError):
-        retell.agent_for(cfg_env, 'L3')
+        retell.agent_for(cfg_env, 'L3', {'agent_l1_version': 9})
 
 
 def test_l2_has_no_agent_at_all(cfg_env):
     with pytest.raises(ValueError):
-        retell.agent_for(cfg_env, 'L2')
+        retell.agent_for(cfg_env, 'L2', {'agent_l1_version': 9})
 
 
 def test_dynamic_vars_supply_every_variable_the_l3_prompt_uses():
@@ -357,3 +365,47 @@ def test_a_lead_walks_l1_to_l2_and_stops(db, cfg_env):
         trail = [r['summary'] for r in cur.fetchall()]
     assert any('L1 -> L2' in t for t in trail)
     assert any('emailed' in t for t in trail)
+
+
+# --------------------------------------------------------------------------
+# the stage column accepts two values and no others
+# --------------------------------------------------------------------------
+def test_stage_refuses_every_value_nothing_can_write(db):
+    """
+    THE DATABASE IS THE GUARD, not the dialer's WHERE clause.
+
+    The constraint used to allow L1, L2, L3, L4, won and lost. Only
+    stages.py writes stage and it only ever writes 'L2', so four of those
+    six were states no code path could reach - but a hand-run UPDATE, a
+    migration or a fixture could, and then STAGE_DIALABLE silently skips the
+    lead forever with nothing saying why.
+
+    'won' and 'lost' are the worse pair: they are STATUSES. Allowing them
+    here too means status and stage can disagree about whether a lead is won
+    and nothing decides which is right - the same one-fact-two-homes fault
+    as agent_l3_version.
+    """
+    import psycopg2
+    for bad in ('L3', 'L4', 'won', 'lost', 'L0', ''):
+        with db.cursor() as cur:
+            cur.execute('SAVEPOINT s')
+            try:
+                cur.execute(
+                    """INSERT INTO leads (company, phone_e164, timezone, stage)
+                       VALUES ('Whitfield Law', '+15552229999', %s, %s)""",
+                    (LA, bad))
+            except psycopg2.errors.CheckViolation:
+                cur.execute('ROLLBACK TO SAVEPOINT s')
+            else:
+                cur.execute('ROLLBACK TO SAVEPOINT s')
+                raise AssertionError(
+                    f'stage={bad!r} was accepted - nothing writes it, so a row '
+                    f'holding it would sit unreachable behind STAGE_DIALABLE')
+    db.rollback()
+
+
+def test_stage_still_accepts_the_two_that_exist(db):
+    """The other half: narrowing the constraint must not break the ladder."""
+    for good in ('L1', 'L2'):
+        lid = _lead(db, stage=good, phone_e164=f'+1555222{ord(good[1]):04d}')
+        assert _get(db, lid)['stage'] == good

@@ -162,7 +162,7 @@ def test_a_lead_not_in_the_queue_is_never_a_candidate(db, queued):
     with db.cursor() as cur:      # the premise: they would pass every other filter
         cur.execute("""SELECT count(*) AS n FROM leads
                         WHERE campaign_id=%s AND pool_status='pool'
-                          AND stage IN ('L1','L3') AND replied_at IS NULL""",
+                          AND stage IN ('L1','L2') AND replied_at IS NULL""",
                     (queued.campaign_id,))
         assert cur.fetchone()['n'] == 2
 

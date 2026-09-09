@@ -50,14 +50,31 @@ def test_two_campaigns_can_point_at_different_versions(db, cfg_env):
     assert retell.agent_for(cfg_env, 'L1', campaign=b)[1] == 9
 
 
-def test_it_falls_back_to_a_known_version_if_the_db_cannot_be_read(db, cfg_env, monkeypatch):
-    """Falling back to the env seed beats guessing at 'latest'."""
+def test_it_refuses_to_dial_if_the_campaign_cannot_be_read(db, cfg_env, monkeypatch):
+    """
+    It used to fall back to an AGENT_L1_VERSION env seed here. That was the
+    only moment the env copy was ever used, and it was the stale copy: the
+    picker writes the campaign row and nothing wrote env.
+
+    Dialing with a version nobody chose is the precise failure the picker
+    exists to prevent - v8 went live once as a side effect of an unrelated
+    edit, and no score could be attributed afterwards. Refusing loses the
+    call; guessing loses the ability to trust every call that followed.
+    """
     def boom():
         raise RuntimeError('db down')
     monkeypatch.setattr('api.db.get_conn', boom)
-    agent_id, version = retell.agent_for(cfg_env, 'L1')
-    assert agent_id == cfg_env.AGENT_L1
-    assert isinstance(version, int)
+    with pytest.raises(RuntimeError):
+        retell.agent_for(cfg_env, 'L1')
+
+
+def test_it_refuses_when_no_campaign_is_running(db, cfg_env):
+    """No campaign means nothing says which prompt is live. There is no
+    default version, because a default is a second answer."""
+    campaigns_mod.stop()
+    with pytest.raises(ValueError) as e:
+        retell.agent_for(cfg_env, 'L1')
+    assert 'agent_l1_version' in str(e.value)
 
 
 def test_the_dialed_version_is_stamped_into_call_metadata(db, cfg_env, monkeypatch):

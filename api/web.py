@@ -59,7 +59,9 @@ STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'human_review', 'paused',
             'emailed', 'engaged', 'demo_booked', 'won', 'lost',
             'lost_no_response', 'bad_email']
-STAGES = ['L1', 'L2', 'L3', 'L4', 'won', 'lost']
+# L1 and L2 are the only stages a lead can hold - the DB constraint
+# agrees. won/lost live on status, which is the one home for them.
+STAGES = ['L1', 'L2']
 DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
         'Friday', 'Saturday']
 PAGE = 100
@@ -699,7 +701,7 @@ def draft_send(lead_id: str):
 @router.post('/leads/{lead_id}/emailed')
 def lead_emailed(lead_id: str, emailed_by: str = Form('operator')):
     """
-    "I emailed them" - L2 -> L3, follow-up due in 3 days.
+    "I emailed them" - records the send. The lead stays at L2.
 
     This handler does NOT contain the transition. stages.mark_emailed() does,
     because the coming sequencer from demandcounselor.com will call the same

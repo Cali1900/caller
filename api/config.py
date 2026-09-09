@@ -50,7 +50,6 @@ class Config:
     RETELL_API_KEY: str
     RETELL_FROM_NUMBER: str
     AGENT_L1: str
-    AGENT_L1_VERSION: int
     OPERATOR_TIMEZONE: str
 
     ANTHROPIC_API_KEY: str
@@ -111,7 +110,6 @@ def load_config() -> Config:
         RETELL_API_KEY=_required('RETELL_API_KEY'),
         RETELL_FROM_NUMBER=_required('RETELL_FROM_NUMBER'),
         AGENT_L1=_required('AGENT_L1'),
-        AGENT_L1_VERSION=int(_required('AGENT_L1_VERSION')),
         OPERATOR_TIMEZONE=_required('OPERATOR_TIMEZONE'),
         ANTHROPIC_API_KEY=_required('ANTHROPIC_API_KEY'),
         SCORER_MODEL=_required('SCORER_MODEL'),

@@ -48,25 +48,19 @@
     </div>
     <h2>Ladder</h2>
     <p><span class="pill {{ 'completed' if lead.stage != 'L1' else '' }}">L1 cold call</span>
-       &rarr; <span class="pill {{ 'completed' if lead.stage in ['L3','L4','won'] else ('human_review' if lead.stage == 'L2' else '') }}">L2 you email them</span>
-       &rarr; <span class="pill {{ 'completed' if lead.stage in ['L4','won'] else '' }}">L3 follow-up call</span></p>
+       &rarr; <span class="pill {{ 'completed' if lead.emailed_at else ('human_review' if lead.stage == 'L2' else '') }}">L2 you email them</span></p>
     {% if lead.stage == 'L2' %}
-      <form method="post" action="/leads/{{ lead.lead_id }}/emailed">
-        <input type="hidden" name="emailed_by" value="operator">
-        <button type="submit">I emailed them</button>
-        <span class="dim">queues the L3 follow-up call in 3 days</span>
-      </form>
-    {% elif lead.stage == 'L3' %}
-      <div class="kv">
-        <div>emailed</div><div class="dim">{{ lead.emailed_at.strftime('%Y-%m-%d %H:%M') if lead.emailed_at }} by {{ lead.emailed_by or '?' }}</div>
-        <div>follow-up due</div><div class="dim">{{ lead.next_attempt_at.strftime('%Y-%m-%d %H:%M') if lead.next_attempt_at }}</div>
-        <div>saw the email</div><div>
-          {% if lead.dm_saw_email is true %}<span class="pill completed">yes</span>
-          {% elif lead.dm_saw_email is false %}<span class="pill">not seen</span>
-          {% else %}<span class="dim">not asked yet</span>{% endif %}</div>
-        {% if lead.best_next_step %}<div>next step</div><div>{{ lead.best_next_step }}</div>{% endif %}
-      </div>
-      {% if lead.replied_at %}<p class="dim">They replied {{ lead.replied_at.strftime('%Y-%m-%d') }} &mdash; the follow-up call is cancelled.</p>{% endif %}
+      {% if lead.emailed_at %}
+        <div class="kv">
+          <div>emailed</div><div class="dim">{{ lead.emailed_at.strftime('%Y-%m-%d %H:%M') }} by {{ lead.emailed_by or '?' }}</div>
+        </div>
+      {% else %}
+        <form method="post" action="/leads/{{ lead.lead_id }}/emailed">
+          <input type="hidden" name="emailed_by" value="operator">
+          <button type="submit">I emailed them</button>
+          <span class="dim">records the send; nothing is scheduled</span>
+        </form>
+      {% endif %}
     {% elif lead.stage == 'L1' %}
       <p class="dim">L2 unlocks when a <b>confirmed</b> email is captured.
       {% if lead.dm_email and not lead.dm_email_confirmed %}This lead has an email but it is
