@@ -1,8 +1,21 @@
 """
-The stage ladder: L1 -> L2. It STOPS at L2.
+The one transition: no confirmed email -> a confirmed email. It stops there.
 
-  L1  cold call the front desk. Goal: a name and a confirmed email.
-  L2  we have the email. Nothing is dialed from here - the lead waits.
+  not confirmed   cold call the front desk. Goal: a name and a confirmed email.
+  confirmed       we have the email. Nothing is dialed - the lead waits.
+
+⚠️ `leads.stage` IS GONE (migration 035). It held two values and therefore one
+bit, was named after a four-rung ladder that no longer exists, and BECAUSE
+"stage" does not sound like state an archive return should clear,
+archive.return_due() did not clear it - every lead archived after a send came
+back permanently undialable. The column is now `leads.has_confirmed_email`,
+a boolean, and the dialer filter reads "AND NOT l.has_confirmed_email".
+
+THE 'L1'/'L2' VOCABULARY SURVIVES WHERE IT IS STILL TRUE: `calls.stage` and
+`scores.stage` are HISTORY on past records, and retell.agent_for() selects an
+agent by that name. Those are not the lead's current state, so they keep the
+label - see stage_label() below, which is the ONE place the boolean is
+translated back.
 
 L3 IS UNWIRED FROM THE APP (2026-09-08). There is no automatic follow-up call.
 A campaign is already a named configuration with its own prompt and its own
@@ -40,6 +53,24 @@ class NotAtL2(RuntimeError):
 
 FOLLOWUP_DAYS = 3
 
+# L1 / L2 as a LABEL, for the places that legitimately still speak it: the
+# agent Retell should run (retell.agent_for), and the stage recorded on a call
+# or a score, which is history about that record and not the lead's state now.
+#
+# ONE translation, in one place. Scattering `'L2' if x else 'L1'` through the
+# app is how the two vocabularies drift and how somebody eventually writes a
+# third.
+L1, L2 = 'L1', 'L2'
+
+
+def stage_label(lead_or_flag) -> str:
+    """'L2' if a confirmed email has been captured, else 'L1'."""
+    if isinstance(lead_or_flag, dict):
+        flag = lead_or_flag.get('has_confirmed_email')
+    else:
+        flag = lead_or_flag
+    return L2 if flag else L1
+
 
 def advance_to_l2(cur, lead_id, source: str = 'confirmed email captured'):
     """
@@ -52,9 +83,10 @@ def advance_to_l2(cur, lead_id, source: str = 'confirmed email captured'):
     """
     cur.execute(
         """UPDATE leads
-              SET stage = 'L2', stage_changed_at = now(), updated_at = now()
+              SET has_confirmed_email = true, email_confirmed_at = now(),
+                  updated_at = now()
             WHERE lead_id = %s
-              AND stage = 'L1'
+              AND NOT has_confirmed_email
               AND dm_email IS NOT NULL
               AND dm_email_confirmed IS TRUE
             RETURNING lead_id""", (lead_id,))
@@ -100,7 +132,7 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 """UPDATE leads
                       SET emailed_at = %s, emailed_by = %s,
                           updated_at = now()
-                    WHERE lead_id = %s AND stage = 'L2'
+                    WHERE lead_id = %s AND has_confirmed_email
                       AND emailed_at IS NULL
                     RETURNING *""",
                 (when, emailed_by, lead_id))
@@ -111,16 +143,16 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 # lead never reached the stage where a send is owed. Reporting
                 # the second as the first sent Sean looking for an email that
                 # was never sent.
-                cur.execute("""SELECT stage, emailed_at FROM leads
-                                WHERE lead_id = %s""", (lead_id,))
+                cur.execute("""SELECT has_confirmed_email, emailed_at
+                                 FROM leads WHERE lead_id = %s""", (lead_id,))
                 cur_row = cur.fetchone()
                 if cur_row is None:
                     raise NotAtL2('no such lead')
                 if cur_row['emailed_at'] is not None:
                     return None                      # genuinely already sent
                 raise NotAtL2(
-                    f"lead is at {cur_row['stage']}, not L2 - a send is only "
-                    f"owed once a confirmed email has advanced it")
+                    f"lead is at {stage_label(cur_row)}, not L2 - a send is "
+                    f"only owed once a confirmed email has advanced it")
             # The pipeline stage moves with the send, so the forecast reads
             # a real status instead of deriving one.
             from api import pipeline

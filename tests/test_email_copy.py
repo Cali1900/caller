@@ -155,9 +155,9 @@ def _lead_with_draft(db, email='old@firm.example'):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, gatekeeper_name,
-                               timezone, campaign_id, stage)
+                               timezone, campaign_id, has_confirmed_email)
                            VALUES (%s,'W','Sara Whitfield',%s,true,'Denise',
-                                   'America/Los_Angeles',%s,'L2')
+                                   'America/Los_Angeles',%s,true)
                            RETURNING lead_id""",
                         ('+1424555' + str(abs(hash(email)) % 9000 + 1000), email, cid))
             lid = cur.fetchone()['lead_id']
@@ -326,9 +326,10 @@ def _unconfirmed_lead(db, email='wrong@firm.example'):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage, status, last_called_at)
+                               campaign_id, has_confirmed_email, status,
+                               last_called_at)
                            VALUES (%s,'W','Sean',%s,false,
-                                   'America/Los_Angeles',%s,'L1','human_review',
+                                   'America/Los_Angeles',%s,false,'human_review',
                                    now())
                            RETURNING lead_id""",
                         ('+1424555' + str(abs(hash(email)) % 9000 + 1000), email, cid))
@@ -435,10 +436,10 @@ def test_the_worker_sweep_generates_drafts_for_confirmed_captures(db):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage)
+                               campaign_id, has_confirmed_email)
                            VALUES ('+14245554321','W','Sara',
                                    'sara@firm.example',true,
-                                   'America/Los_Angeles',%s,'L2')
+                                   'America/Los_Angeles',%s,true)
                            RETURNING lead_id""", (cid,))
             lid = cur.fetchone()['lead_id']
     assert d.get(lid) is None
@@ -455,10 +456,10 @@ def test_the_sweep_skips_unconfirmed_emails(db):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage)
+                               campaign_id, has_confirmed_email)
                            VALUES ('+14245554322','W','Sara',
                                    'sara@firm.example',false,
-                                   'America/Los_Angeles',%s,'L2')
+                                   'America/Los_Angeles',%s,true)
                            RETURNING lead_id""", (cid,))
             lid = cur.fetchone()['lead_id']
     d.generate_pending()

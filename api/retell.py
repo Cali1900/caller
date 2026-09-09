@@ -140,7 +140,11 @@ def create_phone_call(cfg, to_number: str, lead, dynamic=None):
     keeping it there means there is exactly one place the guard can be
     bypassed rather than two.
     """
-    stage = lead.get('stage') or 'L1'
+    # AGENT SELECTION still speaks L1/L2 - that is which PROMPT to run, not
+    # the lead's state. stages.stage_label() is the one place the boolean is
+    # translated into that vocabulary.
+    from api.stages import stage_label
+    stage = stage_label(lead)
     agent_id, agent_version = agent_for(cfg, stage, lead.get('campaign'))
     lead_id = lead.get('lead_id')
     resp = _client(cfg).call.create_phone_call(
@@ -168,14 +172,15 @@ def create_phone_call(cfg, to_number: str, lead, dynamic=None):
 
 def create_web_call(cfg, lead, dynamic=None):
     """Browser call. No telephony, no risk - this is rollout step 1."""
+    from api.stages import stage_label
     if not isinstance(lead, dict):          # tolerate a bare lead_id
-        lead = {'lead_id': lead, 'stage': 'L1'}
-    agent_id, agent_version = agent_for(cfg, lead.get('stage') or 'L1',
-                                        lead.get('campaign'))
+        lead = {'lead_id': lead, 'has_confirmed_email': False}
+    stage = stage_label(lead)
+    agent_id, agent_version = agent_for(cfg, stage, lead.get('campaign'))
     return _client(cfg).call.create_web_call(
         agent_id=agent_id,
         agent_version=agent_version,
-        metadata={'lead_id': str(lead.get('lead_id')), 'stage': lead.get('stage')},
+        metadata={'lead_id': str(lead.get('lead_id')), 'stage': stage},
         retell_llm_dynamic_variables=dynamic if dynamic is not None
                                      else dynamic_vars(lead),
     )

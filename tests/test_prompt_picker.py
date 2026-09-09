@@ -92,9 +92,11 @@ def test_the_dialed_version_is_stamped_into_call_metadata(db, cfg_env, monkeypat
                             'create_phone_call': staticmethod(fake)})()})())
     campaigns_mod.update(running_campaign_id(), agent_l1_version=9)
     retell.create_phone_call(cfg_env, '+15551230000',
-                             {'lead_id': 'abc', 'stage': 'L1', 'company': 'X'})
+                             {'lead_id': 'abc', 'has_confirmed_email': False, 'company': 'X'})
     assert captured['override_agent_version'] == 9
     assert captured['metadata']['agent_version'] == 9
+    # retell metadata carries the L1/L2 LABEL (which agent ran), not the
+    # lead's boolean - see stages.stage_label().
     assert captured['metadata']['stage'] == 'L1'
 
 

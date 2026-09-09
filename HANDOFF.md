@@ -14,8 +14,8 @@ Last updated 2026-09-09. Every number in the table below was read from
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260909_034_snapshot_the_reply.sql` |
-| Tests | 598 passed, 1 skipped |
+| Last migration | `20260909_035_rename_stage.sql` |
+| Tests | 611 passed, 1 skipped |
 | Break pass | 94 definitions (84 deleted with `next_day`; 91–95 added). Full pass green at 93; break 95 verified individually since. `--status` now says COMPLETE / IN PROGRESS / NEVER RUN and no longer erases the only record on success |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
@@ -154,7 +154,8 @@ api/
   drafts.py      generates + retargets follow-up drafts. NEVER SENDS
   scorer.py      per-call scoring. Two scores, never averaged together
   digest.py      end-of-day. Day boundary is the OPERATOR's, not UTC's
-  stages.py      L1 -> L2 -> L3. mark_emailed() is the seam for automation
+  stages.py      the confirmed-email transition. mark_emailed() is the seam,
+                 stage_label() the ONE place L1/L2 is still spoken
   web.py         the CRM. SSH tunnel only
   worker.py      the loop. next_gap() is module level so tests call the real one
   sender.py      the ONLY thing that puts campaign mail on the wire
@@ -433,26 +434,63 @@ Done 2026-09-09:
   omission is part of why the archive bug stayed invisible: the module's own
   index of what stops a call did not mention the filter that was stopping them.
 
-### ⚠️ STILL OWED: rename `stage`
+### `stage` is renamed (2026-09-09)
 
-`leads.stage` holds exactly two values (`'L1'`, `'L2'`) and therefore exactly
-one bit: **has a confirmed email been captured**. The same bit is already
-derivable from `dm_email_confirmed`. It is named after a four-rung ladder
-(L1→L2→L3→L4) that no longer exists — migration 027 narrowed the constraint to
-two values, correctly.
+`leads.stage` held two values and therefore one bit, named after a four-rung
+ladder (L1→L2→L3→L4) that no longer existed. **The name is what hid the
+archive bug**: nobody reading `return_due()` thinks "and reset the stage",
+because "stage" does not sound like state a return should clear.
 
-**The name is what hid the archive bug.** Nobody reading `return_due()` thinks
-"and reset the stage", because "stage" does not sound like state a return
-should clear. Called `has_confirmed_email`, the omission would have been
-obvious on sight.
+There were **three** stage-named columns and they meant three different things:
 
-Not done in the same change as the archive fix, deliberately: it is a column
-rename touching the dialer's core filter, the `leads_stage_check` constraint,
-`stages.py`, `sender.py`, `drain.py`, `web.py`, six test files and **breaks 15
-and 35** (both anchored on `STAGE_DIALABLE`). It is a pure refactor with no
-behaviour change, which is exactly the kind of change that should land on its
-own so that anything that breaks has one possible cause. The archive fix is the
-correctness-critical half and should not be bundled with it.
+| was | now | why |
+|---|---|---|
+| `leads.stage` (`'L1'`/`'L2'`) | **`leads.has_confirmed_email`** (boolean) | one bit, now says so. `STAGE_DIALABLE` is `AND NOT l.has_confirmed_email` |
+| `leads.stage_changed_at` | **`leads.email_confirmed_at`** | it only ever recorded that one transition |
+| `leads.stage_attempts` | **dropped** | declared in migration 001, never read or written by anything since; all 1,087 rows held its `NOT NULL DEFAULT` of 0, so nothing was lost |
+
+Boolean rather than a renamed text column on purpose: `boolean NOT NULL` is
+**stronger than the old CHECK**, because an unrepresentable state cannot be
+written by anything and there is no allowed-values list to fall out of step with
+the code. That is migration 027's reasoning carried to its end. `NOT NULL`
+matters as much as the type — a NULL would be neither true nor false and
+`AND NOT l.has_confirmed_email` would silently drop the row.
+
+### ⚠️ 'stage' STILL MEANS OTHER THINGS, and those are NOT renamed
+
+The collision was half the confusion, so be precise about what was left alone:
+
+| where | what it means |
+|---|---|
+| `calls.stage`, `scores.stage`, `activity.stage` | HISTORY about a past record — which agent ran that call. Not the lead's state now |
+| `retell.agent_for()`, `STAGE_AGENTS` | which PROMPT to dial with |
+| `forecast.py`, `pipeline.py` | funnel stage (`emailed → engaged → demo_booked`) |
+| `prompt_versions.stage` | which agent a recorded prompt belongs to |
+| the `/leads` filter on screen | still reads **L1 / L2**, because that is the vocabulary on every call record and timeline entry. `_lead_query` translates it to the boolean |
+
+Because those boundaries legitimately still speak L1/L2, there is **exactly one
+translation point**: `stages.stage_label()`. A test asserts no module outside
+`api/stages.py` builds the label inline — scattering `'L2' if x else 'L1'` is
+how two vocabularies drift and how somebody eventually writes a third.
+
+**Break 35 has now been rewritten twice for the same reason.** Its "widening"
+kept losing the ability to fail: first `('L1','L3')` after migration 027 made L3
+unrepresentable, then `('L1','L2')` which under a boolean is *identical to
+removing the filter* — already break 15. Two breaks doing one thing means one
+guard nothing independently covers. It is now an **inversion** (a dropped
+`NOT`), the realistic bug a boolean invites, and a genuinely different failure:
+removal still dials the right leads among the wrong ones, inversion dials
+exclusively the wrong ones.
+
+Break 18's anchor also went stale in this change and `breaks_anchor_check.py`
+caught it in one second — which is what `ee21fa3` built it for.
+
+**Cost, recorded honestly:** the rename broke **58 tests** on the first run.
+All mechanical (test helpers whose `INSERT INTO leads` formatting the pass did
+not match), except one that was a mistake in the rename itself: a
+find-and-replace renamed retell's `metadata['stage']` key, which is one of the
+labels that was supposed to stay. That is why this did not ride along with the
+archive fix — in one commit those failures would have had two candidate causes.
 
 ## Next, in order
 

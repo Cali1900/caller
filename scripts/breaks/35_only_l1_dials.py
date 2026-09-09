@@ -1,15 +1,21 @@
-# STAGE_DIALABLE is L1 only. At L2 we OWE them an email - dialing again asks
-# a firm the question we are about to answer in writing.
+# INVERT THE FILTER. This break has now been rewritten TWICE for the same
+# reason - each time, the "widening" it performed stopped being able to fail:
 #
-# THIS BREAK USED TO WIDEN THE FILTER TO ('L1','L3') and it stopped guarding
-# anything the day the stage constraint was narrowed: L3 is no longer a value
-# the column accepts, so widening to include it excludes exactly what it
-# excluded before and the named test stayed green. The full pass caught it.
+#   1. It widened to ('L1','L3'). Migration 027 narrowed the stage constraint
+#      so L3 was no longer a value the column accepted, and widening to include
+#      an impossible value excludes exactly what it excluded before. The named
+#      test stayed green and the full pass caught it.
+#   2. It widened to ('L1','L2'). Migration 035 made the column a BOOLEAN, so
+#      "both values" is not a widening at all - it is identical to removing the
+#      filter, which is already break 15. Two breaks doing one thing means one
+#      guard nothing independently covers.
 #
-# L2 is the only widening that is now possible, and it is the one that
-# matters - a lead we have promised to write to, called anyway.
+# An INVERSION is the realistic bug a boolean invites - a dropped NOT - and it
+# is a genuinely different failure from removal: it dials ONLY the firms we owe
+# an email to, and no others. Removal would still dial the right leads among
+# the wrong ones; this dials exclusively the wrong ones.
 TARGET = 'api/dialer.py'
 EXPECT = 'test_only_l1_is_a_dial_candidate'
-LABEL = 'let the L1 campaign dial leads we owe an email'
-OLD = """STAGE_DIALABLE = "AND l.stage = 'L1'\""""
-NEW = """STAGE_DIALABLE = "AND l.stage IN ('L1', 'L2')\""""
+LABEL = 'drop the NOT, so ONLY the leads we owe an email dial'
+OLD = "STAGE_DIALABLE = 'AND NOT l.has_confirmed_email'"
+NEW = "STAGE_DIALABLE = 'AND l.has_confirmed_email'"

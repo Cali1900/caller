@@ -47,7 +47,7 @@ def due(cfg, limit: int = 25):
                   JOIN campaign_configs c ON c.campaign_id = l.campaign_id
                   JOIN email_drafts d     ON d.lead_id = l.lead_id
                  WHERE c.email_1_mode = 'auto'
-                   AND l.stage = 'L2'
+                   AND l.has_confirmed_email
                    AND l.emailed_at IS NULL
                    AND l.replied_at IS NULL
                    AND l.last_called_at IS NOT NULL

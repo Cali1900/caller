@@ -28,7 +28,7 @@ def client(db, cfg_env):
 def _lead(db, **kw):
     cols = {'company': 'Whitfield Law', 'phone_e164': '+19195570001',
             'timezone': NY, 'state': 'NC', 'pool_status': 'active',
-            'status': 'new', 'stage': 'L1',
+            'status': 'new', 'has_confirmed_email': False,
             'campaign_id': running_campaign_id()}
     cols.update(kw)
     keys = ', '.join(cols); ph = ', '.join(['%s'] * len(cols))
@@ -81,8 +81,8 @@ def test_an_untouched_lead_says_it_has_not_been_called(db):
 
 def test_it_names_who_gave_the_email_and_when(db):
     lid = _lead(db, dm_name='Bob Smith', dm_email='bob@whitfield.example',
-                dm_email_confirmed=True, stage='L2',
-                stage_changed_at=datetime.datetime(2026, 9, 8, 15, 0,
+                dm_email_confirmed=True, has_confirmed_email=True,
+                email_confirmed_at=datetime.datetime(2026, 9, 8, 15, 0,
                                                    tzinfo=datetime.timezone.utc))
     line = why.line(_row(lid))
     assert 'Bob Smith gave their email Sep 8' in line
@@ -98,7 +98,7 @@ def test_an_unconfirmed_email_is_called_unconfirmed(db):
 
 def test_it_reports_the_send_and_the_clicks(db):
     lid = _lead(db, dm_name='Bob', dm_email='bob@whitfield.example',
-                dm_email_confirmed=True, stage='L2',
+                dm_email_confirmed=True, has_confirmed_email=True,
                 emailed_at=datetime.datetime(2026, 9, 8, 15, 0,
                                              tzinfo=datetime.timezone.utc))
     with db.cursor() as cur:
@@ -117,7 +117,7 @@ def test_it_reports_the_send_and_the_clicks(db):
 
 
 def test_a_reply_replaces_waiting_with_yours_to_work(db):
-    lid = _lead(db, stage='L2', status='engaged',
+    lid = _lead(db, has_confirmed_email=True, status='engaged',
                 emailed_at=datetime.datetime(2026, 9, 8, tzinfo=datetime.timezone.utc),
                 replied_at=datetime.datetime(2026, 9, 9, tzinfo=datetime.timezone.utc))
     line = why.line(_row(lid))
@@ -163,7 +163,7 @@ def test_the_same_line_renders_on_the_list_and_on_lead_detail(client, db):
     """
     lid = _lead(db, company='Seans Law', dm_name='Bob Smith',
                 dm_email='bob@seanslaw.example', dm_email_confirmed=True,
-                stage='L2', status='emailed',
+                has_confirmed_email=True, status='emailed',
                 emailed_at=datetime.datetime(2026, 9, 8, 15, 0,
                                              tzinfo=datetime.timezone.utc))
     _call(db, lid, 'dial_no_answer')
@@ -182,7 +182,7 @@ def test_the_same_line_renders_on_the_list_and_on_lead_detail(client, db):
 def test_a_search_answers_where_it_is_and_why_without_a_second_click(client, db):
     lid = _lead(db, company='Seans Law', phone_e164='+19195570002',
                 dm_name='Bob Smith', dm_email='bob@seanslaw.example',
-                dm_email_confirmed=True, stage='L2', status='engaged',
+                dm_email_confirmed=True, has_confirmed_email=True, status='engaged',
                 emailed_at=datetime.datetime(2026, 9, 8, tzinfo=datetime.timezone.utc),
                 replied_at=datetime.datetime(2026, 9, 9, tzinfo=datetime.timezone.utc))
     _call(db, lid, 'user_hangup')

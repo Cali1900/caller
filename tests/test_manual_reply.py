@@ -27,10 +27,10 @@ def _lead(status='completed', phone='+14245559000', emailed=True):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage, status, pool_status,
-                               emailed_at, website)
+                               campaign_id, has_confirmed_email, status,
+                               pool_status, emailed_at, website)
                            VALUES (%s,'W','Bob','b@f.example',true,
-                                   'America/Los_Angeles',%s,'L2',%s,'active',
+                                   'America/Los_Angeles',%s,true,%s,'active',
                                    CASE WHEN %s THEN now() END,
                                    'https://f.example')
                            RETURNING lead_id""", (phone, cid, status, emailed))
@@ -112,7 +112,7 @@ def test_a_recorded_reply_removes_it_from_the_dialer(db, client, cfg_env,
     lid, cid = _lead(status='new', phone='+14245559004')
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""UPDATE leads SET stage='L1', next_attempt_at=now()
+            cur.execute("""UPDATE leads SET has_confirmed_email=False, next_attempt_at=now()
                             WHERE lead_id=%s""", (lid,))
     c.start(cid)
     sql = dialer._build_select()

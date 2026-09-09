@@ -60,7 +60,7 @@ def _capture(row) -> str:
     email = (row.get('dm_email') or '').strip()
     if not email:
         return ''
-    when = _day(row.get('stage_changed_at'))
+    when = _day(row.get('email_confirmed_at'))
     who = name or 'Someone there'
     if not row.get('dm_email_confirmed'):
         # UNCONFIRMED IS THE WHOLE POINT of saying it. An unconfirmed email
@@ -125,7 +125,7 @@ def _waiting(row) -> str:
         return 'Out of attempts — nothing will dial it again'
     if row.get('emailed_at'):
         return 'Waiting on a reply'
-    if row.get('stage') == 'L2':
+    if row.get('has_confirmed_email'):
         return 'Owed an email'
     if row.get('next_attempt_at') and row.get('call_count'):
         return f'Next call due {_day(row["next_attempt_at"])}'

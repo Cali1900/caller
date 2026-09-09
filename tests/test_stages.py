@@ -21,7 +21,7 @@ LA = 'America/Los_Angeles'
 
 def _lead(db, **kw):
     cols = {'company': 'Whitfield Law', 'phone_e164': '+15552220001',
-            'timezone': LA, 'pool_status': 'active', 'status': 'new', 'stage': 'L1',
+            'timezone': LA, 'pool_status': 'active', 'status': 'new', 'has_confirmed_email': False,
             'campaign_id': running_campaign_id()}
     cols.update(kw)
     keys = ', '.join(cols); ph = ', '.join(['%s'] * len(cols))
@@ -68,7 +68,7 @@ def test_a_confirmed_email_advances_l1_to_l2(db, cfg_env):
     with db.cursor() as cur:
         assert stages.advance_to_l2(cur, lid) is True
     db.commit()
-    assert _get(db, lid)['stage'] == 'L2'
+    assert _get(db, lid)['has_confirmed_email'] is True
 
 
 def test_an_unconfirmed_email_does_not_advance(db, cfg_env):
@@ -77,7 +77,7 @@ def test_an_unconfirmed_email_does_not_advance(db, cfg_env):
     with db.cursor() as cur:
         assert stages.advance_to_l2(cur, lid) is False
     db.commit()
-    assert _get(db, lid)['stage'] == 'L1'
+    assert _get(db, lid)['has_confirmed_email'] is False
 
 
 def test_no_email_does_not_advance(db, cfg_env):
@@ -85,7 +85,7 @@ def test_no_email_does_not_advance(db, cfg_env):
     with db.cursor() as cur:
         assert stages.advance_to_l2(cur, lid) is False
     db.commit()
-    assert _get(db, lid)['stage'] == 'L1'
+    assert _get(db, lid)['has_confirmed_email'] is False
 
 
 def test_the_drain_advances_the_ladder_on_a_confirmed_capture(db, cfg_env):
@@ -108,7 +108,7 @@ def test_the_drain_advances_the_ladder_on_a_confirmed_capture(db, cfg_env):
     db.commit()
     drain.drain_once()
     row = _get(db, lid)
-    assert row['stage'] == 'L2'
+    assert row['has_confirmed_email'] is True
     assert row['dm_email'] == 'sara@whitfieldlaw.com'
 
 
@@ -118,7 +118,7 @@ def test_the_drain_advances_the_ladder_on_a_confirmed_capture(db, cfg_env):
 
 def test_l2_is_never_a_dial_candidate(db, cfg_env, enrolled):
     """At L2 we OWE them an email. Calling would ask what we are about to answer."""
-    lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
+    lid = _lead(db, has_confirmed_email=True, dm_email='s@w.com', dm_email_confirmed=True)
     enrolled(lid)
     assert dialer.select_and_claim(cfg_env, limit=10) == []
 
@@ -128,17 +128,21 @@ def test_only_l1_is_a_dial_candidate(db, cfg_env, enrolled):
     STAGE_DIALABLE is L1 only. An L2 lead is one we OWE an email - dialing it
     again would talk to a firm we have already promised to write to.
 
-    This used to construct an L3 lead. L3 is no longer a value the stage
-    column accepts, so that state is refused by the database rather than
-    filtered by the dialer, which is the stronger of the two. L2 is the stage
-    that still exists and still must never be picked up.
+    This used to construct an L3 lead. L3 stopped being a value the column
+    accepted (migration 027), and the column is now a boolean entirely
+    (migration 035), so unreachable states are refused by the database rather
+    than filtered by the dialer - the stronger of the two. The lead that holds
+    a confirmed email is the one that still exists and still must never be
+    picked up.
     """
-    l1 = _lead(db, stage='L1', phone_e164='+15552220011')
-    l2 = _lead(db, stage='L2', phone_e164='+15552220012',
-               dm_name='Sara', dm_email='s@w.com', dm_email_confirmed=True)
-    enrolled(l1); enrolled(l2)
-    got = {c['stage'] for c in dialer.select_and_claim(cfg_env, limit=10)}
-    assert got == {'L1'}
+    owed = _lead(db, has_confirmed_email=False, phone_e164='+15552220011')
+    sent = _lead(db, has_confirmed_email=True, phone_e164='+15552220012',
+                 dm_name='Sara', dm_email='s@w.com', dm_email_confirmed=True)
+    enrolled(owed); enrolled(sent)
+    picked = {str(c['lead_id']) for c in dialer.select_and_claim(cfg_env, limit=10)}
+    assert str(owed) in picked, 'the premise: a lead with no confirmed email dials'
+    assert str(sent) not in picked, \
+        'a firm we hold a confirmed email for was dialed - we owe it a send'
 
 
 # --------------------------------------------------------------------------
@@ -153,13 +157,13 @@ def test_mark_emailed_records_the_send_and_schedules_nothing(db, cfg_env):
     follow-up column reads it, and click tracking computes "47m after send"
     from this exact timestamp.
     """
-    lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
+    lid = _lead(db, has_confirmed_email=True, dm_email='s@w.com', dm_email_confirmed=True)
     before = datetime.datetime.now(datetime.UTC)
     row = stages.mark_emailed(lid, emailed_by='operator')
     assert row is not None
     assert row['emailed_by'] == 'operator'
     assert row['emailed_at'] is not None and row['emailed_at'] >= before
-    assert row['stage'] == 'L2', 'the lead waits at L2; nothing advances it'
+    assert row['has_confirmed_email'] is True, 'the lead waits at L2; nothing advances it'
     assert row['next_attempt_at'] == _get(db, lid)['next_attempt_at'], \
         'marking a send must not schedule anything'
 
@@ -172,7 +176,7 @@ def test_clicking_twice_does_not_restamp_the_send_time(db, cfg_env):
     emailed_at would silently change every "N minutes after send" already
     recorded against this lead.
     """
-    lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
+    lid = _lead(db, has_confirmed_email=True, dm_email='s@w.com', dm_email_confirmed=True)
     first = stages.mark_emailed(lid, emailed_by='operator')
     second = stages.mark_emailed(lid, emailed_by='operator')
     assert second is None
@@ -184,7 +188,7 @@ def test_the_automation_slots_in_through_the_same_function(db, cfg_env):
     The point of the seam: the sequencer is another CALLER, not another
     implementation. Same function, different emailed_by.
     """
-    lid = _lead(db, stage='L2', dm_email='s@w.com', dm_email_confirmed=True)
+    lid = _lead(db, has_confirmed_email=True, dm_email='s@w.com', dm_email_confirmed=True)
     row = stages.mark_emailed(lid, emailed_by='auto:demandcounselor.com')
     assert row['emailed_at'] is not None
     assert row['emailed_by'] == 'auto:demandcounselor.com'
@@ -207,13 +211,13 @@ def test_only_l2_can_be_marked_emailed(db, cfg_env):
     real Send now.
     """
     import pytest as _pytest
-    # L1 is now the ONLY other stage - the column accepts L1 and L2 and
-    # nothing else - so this loop is exhaustive rather than a sample.
-    for stage in ('L1',):
-        lid = _lead(db, stage=stage, phone_e164=f'+1555222{ord(stage[1]):04d}')
-        with _pytest.raises(stages.NotAtL2) as e:
-            stages.mark_emailed(lid, emailed_by='operator')
-        assert stage in str(e.value), 'the error must say which stage it is at'
+    # There is exactly ONE other state now that the column is a boolean, so
+    # this is exhaustive rather than a sample.
+    lid = _lead(db, has_confirmed_email=False, phone_e164='+15552220049')
+    with _pytest.raises(stages.NotAtL2) as e:
+        stages.mark_emailed(lid, emailed_by='operator')
+    assert 'L1' in str(e.value), \
+        'the error must say which state the lead is in, via stages.stage_label()'
 
 
 # --------------------------------------------------------------------------
@@ -222,7 +226,7 @@ def test_only_l2_can_be_marked_emailed(db, cfg_env):
 
 def test_a_reply_removes_the_lead_from_the_dialer(db, cfg_env, enrolled):
     # L1: the guard is stage-independent, and L3 is no longer dialable at all.
-    lid = _lead(db, stage='L1', dm_name='Sara', dm_email='s@w.com')
+    lid = _lead(db, has_confirmed_email=False, dm_name='Sara', dm_email='s@w.com')
     enrolled(lid)
     assert len(dialer.select_and_claim(cfg_env, limit=10)) == 1
 
@@ -247,7 +251,7 @@ def test_replied_at_alone_stops_the_dialer(db, cfg_env, enrolled):
     """
     # L1: REPLIED_GUARD is stage-independent, and an L3 lead is now excluded by
     # STAGE_DIALABLE anyway - which would mask the guard exactly as status did.
-    lid = _lead(db, stage='L1', dm_name='Sara', dm_email='s@w.com')
+    lid = _lead(db, has_confirmed_email=False, dm_name='Sara', dm_email='s@w.com')
     enrolled(lid)
     assert len(dialer.select_and_claim(cfg_env, limit=10)) == 1
 
@@ -261,7 +265,7 @@ def test_replied_at_alone_stops_the_dialer(db, cfg_env, enrolled):
 
 
 def test_recording_a_reply_twice_is_a_no_op(db, cfg_env):
-    lid = _lead(db, stage='L2')
+    lid = _lead(db, has_confirmed_email=True)
     assert stages.record_reply(lid) is True
     assert stages.record_reply(lid) is False
 
@@ -323,7 +327,7 @@ def test_the_l3_opener_uses_the_name(db, cfg_env, enrolled, monkeypatch):
     from api.config import load_config
     cfg = load_config()
 
-    lid = _lead(db, stage='L1', company='Whitfield Law', dm_name='Sara',
+    lid = _lead(db, has_confirmed_email=False, company='Whitfield Law', dm_name='Sara',
                 dm_title='Intake Manager', dm_email='sara@whitfieldlaw.com')
     enrolled(lid)
     claimed = dialer.select_and_claim(cfg, limit=5)
@@ -334,7 +338,7 @@ def test_the_l3_opener_uses_the_name(db, cfg_env, enrolled, monkeypatch):
     assert d['company'] == 'Whitfield Law'
     assert d['dm_email'] == 'sara@whitfieldlaw.com'
     assert d['dm_title_suffix'] == ', Intake Manager'
-    assert captured['lead']['stage'] == 'L1'
+    assert captured['lead']['has_confirmed_email'] is False
 
 
 # --------------------------------------------------------------------------
@@ -345,18 +349,18 @@ def test_a_lead_walks_l1_to_l2_and_stops(db, cfg_env):
     """The ladder ENDS at L2. A follow-up is its own campaign now, started by
     a person - not a third rung that schedules itself."""
     lid = _lead(db)
-    assert _get(db, lid)['stage'] == 'L1'
+    assert _get(db, lid)['has_confirmed_email'] is False
 
     with db.cursor() as cur:
         cur.execute("""UPDATE leads SET dm_email='sara@whitfieldlaw.com',
                               dm_email_confirmed=true WHERE lead_id=%s""", (lid,))
         stages.advance_to_l2(cur, lid)
     db.commit()
-    assert _get(db, lid)['stage'] == 'L2'
+    assert _get(db, lid)['has_confirmed_email'] is True
 
     stages.mark_emailed(lid, emailed_by='operator')
     final = _get(db, lid)
-    assert final['stage'] == 'L2', 'nothing advances past L2'
+    assert final['has_confirmed_email'] is True, 'nothing advances past L2'
     assert final['emailed_at'] is not None, 'but we DO know it was emailed'
 
     with db.cursor() as cur:
@@ -368,44 +372,96 @@ def test_a_lead_walks_l1_to_l2_and_stops(db, cfg_env):
 
 
 # --------------------------------------------------------------------------
-# the stage column accepts two values and no others
+# the column is a BOOLEAN, so the type is the constraint
 # --------------------------------------------------------------------------
-def test_stage_refuses_every_value_nothing_can_write(db):
+def test_the_confirmed_email_flag_refuses_every_value_that_is_not_a_boolean(db):
     """
     THE DATABASE IS THE GUARD, not the dialer's WHERE clause.
 
-    The constraint used to allow L1, L2, L3, L4, won and lost. Only
-    stages.py writes stage and it only ever writes 'L2', so four of those
-    six were states no code path could reach - but a hand-run UPDATE, a
-    migration or a fixture could, and then STAGE_DIALABLE silently skips the
-    lead forever with nothing saying why.
+    This used to be a CHECK on `stage`, and the history is worth keeping: the
+    constraint allowed L1, L2, L3, L4, won and lost. Only api/stages.py wrote
+    the column and it only ever wrote 'L2', so four of those six were states no
+    code path could reach - but a hand-run UPDATE, a migration or a fixture
+    could, and then STAGE_DIALABLE silently skipped the lead forever with
+    nothing saying why. 'won' and 'lost' were worse: they are STATUSES, so
+    status and stage could disagree about whether a lead was won with nothing
+    deciding which was right.
 
-    'won' and 'lost' are the worse pair: they are STATUSES. Allowing them
-    here too means status and stage can disagree about whether a lead is won
-    and nothing decides which is right - the same one-fact-two-homes fault
-    as agent_l3_version.
+    Migration 035 made it `has_confirmed_email boolean NOT NULL`, which is
+    STRONGER than any CHECK: an unrepresentable state cannot be written at all,
+    by anything, and there is no list of allowed values to fall out of step
+    with the code. That is the same reasoning migration 027 used when it
+    narrowed the CHECK - carried to its end.
+
+    NOT NULL matters as much as the type. A NULL would be neither true nor
+    false, and "AND NOT l.has_confirmed_email" would silently drop the row -
+    the exact failure mode the old over-wide CHECK had.
     """
     import psycopg2
-    for bad in ('L3', 'L4', 'won', 'lost', 'L0', ''):
+    for bad in ('L1', 'L2', 'won', 'maybe', '2', None):
         with db.cursor() as cur:
             cur.execute('SAVEPOINT s')
             try:
                 cur.execute(
-                    """INSERT INTO leads (company, phone_e164, timezone, stage)
+                    """INSERT INTO leads (company, phone_e164, timezone,
+                                          has_confirmed_email)
                        VALUES ('Whitfield Law', '+15552229999', %s, %s)""",
                     (LA, bad))
-            except psycopg2.errors.CheckViolation:
+            except (psycopg2.errors.InvalidTextRepresentation,
+                    psycopg2.errors.NotNullViolation,
+                    psycopg2.errors.DatatypeMismatch):
                 cur.execute('ROLLBACK TO SAVEPOINT s')
             else:
                 cur.execute('ROLLBACK TO SAVEPOINT s')
                 raise AssertionError(
-                    f'stage={bad!r} was accepted - nothing writes it, so a row '
-                    f'holding it would sit unreachable behind STAGE_DIALABLE')
+                    f'has_confirmed_email={bad!r} was accepted - the column '
+                    f'must hold true or false and nothing else, or a row can '
+                    f'sit unreachable behind STAGE_DIALABLE')
     db.rollback()
 
 
-def test_stage_still_accepts_the_two_that_exist(db):
-    """The other half: narrowing the constraint must not break the ladder."""
-    for good in ('L1', 'L2'):
-        lid = _lead(db, stage=good, phone_e164=f'+1555222{ord(good[1]):04d}')
-        assert _get(db, lid)['stage'] == good
+def test_the_L1_L2_label_is_translated_in_exactly_one_place(db):
+    """
+    The 'L1'/'L2' vocabulary is still true of things that are NOT the lead's
+    current state: which agent Retell should run, and the stage recorded on a
+    past call or score. stages.stage_label() is the single translation.
+
+    Scattering `'L2' if x else 'L1'` is how two vocabularies drift and how
+    somebody eventually writes a third.
+    """
+    assert stages.stage_label(True) == 'L2'
+    assert stages.stage_label(False) == 'L1'
+    assert stages.stage_label(None) == 'L1', 'unknown must not read as confirmed'
+    assert stages.stage_label({'has_confirmed_email': True}) == 'L2'
+    assert stages.stage_label({'has_confirmed_email': False}) == 'L1'
+    assert stages.stage_label({}) == 'L1', 'a row missing the key is not confirmed'
+
+    # And no module outside api/stages.py may build the label itself.
+    import glob
+    import os
+    api_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'api')
+    offenders = []
+    for f in glob.glob(os.path.join(api_dir, '*.py')):
+        if os.path.basename(f) == 'stages.py':
+            continue
+        body = open(f).read()
+        if "'L2' if" in body or '"L2" if' in body:
+            offenders.append(os.path.basename(f))
+    assert not offenders, (
+        f'{offenders} build the L1/L2 label inline - call stages.stage_label() '
+        f'so there is one place the two vocabularies meet')
+
+
+def test_both_states_round_trip(db):
+    """
+    The other half. Replaces test_stage_still_accepts_the_two_that_exist, which
+    asserted the old CHECK still allowed 'L1' and 'L2' - a boolean column
+    cannot hold anything else, so the allowed-values half of that test is now
+    the type system's job (see the type test above). What is still worth
+    asserting is that both states survive a write and a read.
+    """
+    for flag in (False, True):
+        lid = _lead(db, has_confirmed_email=flag,
+                    phone_e164='+1555222%04d' % (50 + int(flag)))
+        assert _get(db, lid)['has_confirmed_email'] is flag

@@ -1,5 +1,6 @@
-# THE STAGE GATE. dialer.STAGE_DIALABLE is "AND l.stage = 'L1'" and NOTHING in
-# this codebase ever writes 'L1' back - api/stages.py only ever writes 'L2'.
+# THE CONFIRMED-EMAIL GATE. dialer.STAGE_DIALABLE refuses any lead that holds
+# a confirmed email, and before migration 035 nothing ever cleared that flag on
+# the way out of archive.
 #
 # So a lead archived for no_reply, bad_email or unsubscribed - the three
 # reasons that can ONLY be reached from L2, because they all require email 1
@@ -12,7 +13,7 @@
 TARGET = 'api/archive.py'
 EXPECT = 'test_a_lead_archived_from_L2_comes_back_dialable'
 LABEL = 'let the return leave the lead at L2, undialable forever'
-OLD = """                          stage = 'L1',
-                          stage_changed_at = now(),
+OLD = """                          has_confirmed_email = false,
+                          email_confirmed_at = NULL,
 """
 NEW = """"""

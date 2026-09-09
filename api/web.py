@@ -63,8 +63,11 @@ STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'human_review', 'paused',
             'emailed', 'engaged', 'demo_booked', 'won', 'lost',
             'lost_no_response', 'bad_email', 'archived']
-# L1 and L2 are the only stages a lead can hold - the DB constraint
-# agrees. won/lost live on status, which is the one home for them.
+# THE FILTER STILL READS L1 / L2, because that is the vocabulary on the screen
+# and on every past call and score record. The COLUMN behind it is
+# leads.has_confirmed_email, a boolean (migration 035) - L2 means "we have a
+# confirmed email and owe them a send". won/lost live on status, which is the
+# one home for them.
 STAGES = ['L1', 'L2']
 DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
         'Friday', 'Saturday']
@@ -147,7 +150,8 @@ SORTS = {
     'firm':      'l.company',
     'city':      'l.city',
     'state':     'l.state',
-    'stage':     'l.stage',
+    # Sorts by the boolean; false (L1) first, which is the working order.
+    'stage':     'l.has_confirmed_email',
     'status':    'l.status',
     'calls':     'call_count',
     'emails':    'em.email_count',
@@ -243,9 +247,9 @@ def _why_row(conn, lead_id):
     the same SQL, not by two queries that agree today.
     """
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT l.lead_id, l.status, l.stage, l.dm_name,
+        cur.execute(f"""SELECT l.lead_id, l.status, l.has_confirmed_email, l.dm_name,
                                l.dm_email, l.dm_email_confirmed,
-                               l.stage_changed_at, l.emailed_at, l.replied_at,
+                               l.email_confirmed_at, l.emailed_at, l.replied_at,
                                l.next_attempt_at, l.archived_at,
                                l.archive_reason, l.returns_at,
                                ca.call_count, ca.human_calls, tg.tags,
@@ -341,7 +345,9 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
         # swept archived leads back onto a campaign would undo the rest.
         where.append("l.status <> 'archived'")
     if stage:
-        where.append("l.stage = %s"); params.append(stage)
+        # L1 / L2 on the screen, a boolean in the column.
+        where.append('l.has_confirmed_email = %s')
+        params.append(stage == 'L2')
     if needs_you:
         where.append(_NEEDS_YOU_PREDICATE)
     if email_state in EMAIL_STATES:
@@ -745,9 +751,10 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
         # mark_emailed only fires at L2, so "Send now" refused every time.
         with db.get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute('SELECT stage FROM leads WHERE lead_id = %s', (lead_id,))
+                cur.execute('SELECT has_confirmed_email FROM leads '
+                            'WHERE lead_id = %s', (lead_id,))
                 r = cur.fetchone()
-                if r and r['stage'] == 'L1':
+                if r and not r['has_confirmed_email']:
                     stages.advance_to_l2(cur, lead_id,
                                          source='email confirmed by hand')
         if drafts_mod.get(lead_id) is None:
@@ -1362,7 +1369,8 @@ def export_csv(q: str = '', status: str = '', stage: str = '', needs_you: str = 
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-    cols = ['company', 'phone_e164', 'timezone', 'city', 'state', 'stage',
+    cols = ['company', 'phone_e164', 'timezone', 'city', 'state',
+            'has_confirmed_email',
             'status', 'dm_name', 'dm_title', 'dm_email', 'dm_email_confirmed',
             'attempts', 'callback_count', 'last_called_at', 'next_attempt_at',
             'last_agent', 'last_outcome_score', 'their_words', 'notes',

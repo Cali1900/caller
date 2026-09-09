@@ -28,7 +28,7 @@ THE RETURN CLEARS GATES AND KEEPS FACTS.
     lead that can never be worked again. A FACT is something we paid a call to
     learn, and six months does not make it untrue.
 
-      cleared   stage               blocks the dialer (STAGE_DIALABLE = L1)
+      cleared   has_confirmed_email blocks the dialer (STAGE_DIALABLE)
                 emailed_at/_by      blocks mark_emailed() - it is write-once
                 dm_email_confirmed  read by autosend.eligibility(),
                                     drafts.generate_for() and advance_to_l2().
@@ -172,14 +172,14 @@ _SNAPSHOT = """
 _CLEAR_GATES = """
                           -- GATES, cleared. Each of these blocks the lead
                           -- FOREVER if it survives the return:
-                          --   stage      -> dialer.STAGE_DIALABLE is L1-only,
-                          --                 and nothing ever writes L1 back
+                          --   has_confirmed_email -> dialer.STAGE_DIALABLE
                           --   emailed_at -> mark_emailed() is write-once
-                          --   dm_email_confirmed -> autosend, drafts, L1->L2
+                          --   dm_email_confirmed -> autosend, drafts, the
+                          --                 confirmed-email transition
                           --   replied_at -> dialer.REPLIED_GUARD, and
                           --                 autosend exclusion 5
-                          stage = 'L1',
-                          stage_changed_at = now(),
+                          has_confirmed_email = false,
+                          email_confirmed_at = NULL,
                           emailed_at = NULL,
                           emailed_by = NULL,
                           dm_email_confirmed = NULL,

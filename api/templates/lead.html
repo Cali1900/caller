@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block title %}{{ lead.company }} &middot; caller{% endblock %}
 {% block body %}
 <h1>{{ lead.company }} <span class="pill {{ lead.status }}">{{ lead.status }}</span>
-    <span class="pill">{{ lead.stage }}</span></h1>
+    <span class="pill">{{ 'L2' if lead.has_confirmed_email else 'L1' }}</span></h1>
 <p><a href="/">&larr; all leads</a></p>
 
 {% if saved %}<div class="banner">{{ saved }}</div>{% endif %}
@@ -66,9 +66,9 @@
       <div>pool</div><div class="dim">{{ lead.pool_status }}</div>
     </div>
     <h2>Ladder</h2>
-    <p><span class="pill {{ 'completed' if lead.stage != 'L1' else '' }}">L1 cold call</span>
-       &rarr; <span class="pill {{ 'completed' if lead.emailed_at else ('human_review' if lead.stage == 'L2' else '') }}">L2 you email them</span></p>
-    {% if lead.stage == 'L2' %}
+    <p><span class="pill {{ 'completed' if lead.has_confirmed_email else '' }}">L1 cold call</span>
+       &rarr; <span class="pill {{ 'completed' if lead.emailed_at else ('human_review' if lead.has_confirmed_email else '') }}">L2 you email them</span></p>
+    {% if lead.has_confirmed_email %}
       {% if lead.emailed_at %}
         <div class="kv">
           <div>emailed</div><div class="dim">{{ lead.emailed_at.strftime('%Y-%m-%d %H:%M') }} by {{ lead.emailed_by or '?' }}</div>
@@ -80,7 +80,7 @@
           <span class="dim">records the send; nothing is scheduled</span>
         </form>
       {% endif %}
-    {% elif lead.stage == 'L1' %}
+    {% else %}
       <p class="dim">L2 unlocks when a <b>confirmed</b> email is captured.
       {% if lead.dm_email and not lead.dm_email_confirmed %}This lead has an email but it is
       <b>unconfirmed</b> &mdash; confirm it above and the ladder advances.{% endif %}</p>

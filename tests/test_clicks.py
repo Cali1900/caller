@@ -28,9 +28,9 @@ def _lead(db, email='bob@firm.example', body=None):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage)
+                               campaign_id, has_confirmed_email)
                            VALUES (%s,'W','Bob Smith',%s,true,
-                                   'America/Los_Angeles',%s,'L2')
+                                   'America/Los_Angeles',%s,true)
                            RETURNING lead_id""",
                         ('+1424555' + str(abs(hash(email)) % 9000 + 1000), email, cid))
             return cur.fetchone()['lead_id']

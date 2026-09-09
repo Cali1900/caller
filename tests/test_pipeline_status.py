@@ -19,16 +19,16 @@ def client(db, cfg_env):
     return TestClient(app)
 
 
-def _lead(status='new', phone='+14245558100', stage='L2', email='b@f.example'):
+def _lead(status='new', phone='+14245558100', has_confirmed_email=True, email='b@f.example'):
     cid = c.create('PS-' + phone[-4:])['campaign_id']
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage, status)
+                               campaign_id, has_confirmed_email, status)
                            VALUES (%s,'W','Bob',%s,true,'America/Los_Angeles',
                                    %s,%s,%s) RETURNING lead_id""",
-                        (phone, email, cid, stage, status))
+                        (phone, email, cid, has_confirmed_email, status))
             return cur.fetchone()['lead_id']
 
 

@@ -185,7 +185,12 @@ def _handle_call_ended(conn, call: dict) -> None:
             )
             VALUES (
                 %s, %s,
-                COALESCE((SELECT stage FROM leads WHERE lead_id = %s), 'L1'),
+                -- calls.stage is HISTORY about this call: which agent ran it.
+                -- Derived from the lead's boolean at insert time; see
+                -- stages.stage_label(), the one place the two vocabularies meet.
+                COALESCE((SELECT CASE WHEN has_confirmed_email THEN 'L2'
+                                      ELSE 'L1' END
+                            FROM leads WHERE lead_id = %s), 'L1'),
                 %s,
                 to_timestamp(%s / 1000.0), to_timestamp(%s / 1000.0), %s,
                 %s, %s, %s, %s, %s, %s

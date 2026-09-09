@@ -47,14 +47,20 @@ SUPPRESSION_JOIN = (
     'WHERE s.phone_e164 = l.phone_e164)'
 )
 
-# L2 NEVER DIALS. At L2 we owe them an email and have not sent it; calling
-# would ask a question we are about to answer ourselves. Isolated as a
-# constant so removing it is a single, visible edit.
-# L1 ONLY. L3's automatic follow-up call was unwired on 2026-09-08: a campaign
-# is already a named configuration with its own prompt and leads, so a
-# follow-up IS another campaign - assign the leads and start it deliberately.
-# A lead that captured a name and email stops at L2 and waits for a person.
-STAGE_DIALABLE = "AND l.stage = 'L1'"
+# A LEAD WE OWE AN EMAIL IS NEVER DIALED. Once a confirmed email is captured we
+# owe the firm a send and have not made it; calling would ask a question we are
+# about to answer ourselves. Isolated as a constant so removing it is a single,
+# visible edit.
+#
+# Was "AND l.stage = 'L1'" until migration 035. The column held one bit under a
+# name borrowed from a four-rung ladder that no longer existed, and because
+# "stage" does not read as state an archive return should clear, the return did
+# not clear it - see api/archive.py. The filter now says what it tests.
+#
+# L3's automatic follow-up call was unwired on 2026-09-08: a campaign is already
+# a named configuration with its own prompt and leads, so a follow-up IS another
+# campaign - assign the leads and start it deliberately.
+STAGE_DIALABLE = 'AND NOT l.has_confirmed_email'
 
 # A REPLY STOPS THE FOLLOW-UP DEAD. Nothing sets replied_at yet - the coming
 # sequencer from demandcounselor.com owns reply detection - but the guard
@@ -74,7 +80,7 @@ QUEUE_MEMBERSHIP = "AND l.pool_status = 'active'"
 CAMPAIGN_MEMBERSHIP = "AND l.campaign_id = %(campaign_id)s"
 
 SELECT_DUE = """
-    SELECT l.lead_id, l.phone_e164, l.status, l.stage, l.attempts,
+    SELECT l.lead_id, l.phone_e164, l.status, l.has_confirmed_email, l.attempts,
            l.company, l.dm_name, l.dm_title, l.dm_email, l.emailed_at,
            l.callback_person, l.first_dialed_at,
            CASE WHEN l.first_dialed_at IS NULL THEN 'fresh' ELSE 'carryover' END

@@ -23,7 +23,7 @@ LA = 'America/Los_Angeles'
 def _lead(db, **kw):
     cols = {'company': 'Whitfield Law', 'phone_e164': '+15552250001',
             'timezone': LA, 'pool_status': 'active', 'status': 'no_answer',
-            'stage': 'L1', 'campaign_id': running_campaign_id()}
+            'has_confirmed_email': False, 'campaign_id': running_campaign_id()}
     cols.update(kw)
     keys = ', '.join(cols); ph = ', '.join(['%s'] * len(cols))
     with db.cursor() as cur:

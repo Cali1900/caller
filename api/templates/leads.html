@@ -176,7 +176,7 @@
       {% elif l.pool_status == 'done' %}<span class="pill">done</span>
       {% else %}<span class="pill">pool</span>{% endif %}</td>
   <td class="dim">{{ l.phone_e164 }}</td>
-  <td class="dim">{{ l.stage }}</td>
+  <td class="dim">{{ 'L2' if l.has_confirmed_email else 'L1' }}</td>
   <td><span class="pill {{ l.status }}">{{ l.status }}</span></td>
   <td>{{ l.dm_name or '' }}{% if l.dm_title %}<br><span class="dim">{{ l.dm_title }}</span>{% endif %}</td>
   <td>{% if l.dm_email %}{{ l.dm_email }}

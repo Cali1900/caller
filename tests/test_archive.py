@@ -33,7 +33,7 @@ def _dialable(db, cfg_env, monkeypatch):
 def _lead(db, **kw):
     cols = {'company': 'Whitfield Law', 'phone_e164': '+15552240001',
             'timezone': LA, 'pool_status': 'active', 'status': 'new',
-            'stage': 'L1', 'campaign_id': running_campaign_id()}
+            'has_confirmed_email': False, 'campaign_id': running_campaign_id()}
     cols.update(kw)
     keys = ', '.join(cols); ph = ', '.join(['%s'] * len(cols))
     with db.cursor() as cur:
@@ -247,7 +247,7 @@ def test_unarchive_brings_it_back_without_touching_suppression(db):
 # ==========================================================================
 # THE RETURN CLEARS GATES AND KEEPS FACTS
 #
-# Every test ABOVE builds its lead at stage='L1'. That is what makes the
+# Every test ABOVE builds its lead at has_confirmed_email=False. That is what makes the
 # suppression test properly isolated, and it is also what hid the bug these
 # tests cover: the three EMAIL-derived archive reasons (no_reply, bad_email,
 # unsubscribed) can only be reached from L2, because they all require email 1
@@ -261,7 +261,7 @@ def _emailed_l2_lead(db, **kw):
     """A lead as it ACTUALLY is when archived for no_reply: at L2, emailed,
     with a confirmed address. This is the state no other test in this file
     constructs."""
-    cols = {'stage': 'L2', 'dm_name': 'Pat Kelly', 'dm_title': 'Office Manager',
+    cols = {'has_confirmed_email': True, 'dm_name': 'Pat Kelly', 'dm_title': 'Office Manager',
             'dm_email': 'pat@whitfield.test', 'dm_email_confirmed': True,
             'website': 'whitfield.test'}
     cols.update(kw)
@@ -290,7 +290,7 @@ def test_a_lead_archived_from_L2_comes_back_dialable(db, cfg_env):
     rested six months, must be callable again.
 
     It was not. return_due() never reset `stage`, nothing in the codebase ever
-    writes stage='L1' (api/stages.py only writes 'L2'), and STAGE_DIALABLE is
+    writes has_confirmed_email=False (api/stages.py only writes 'L2'), and STAGE_DIALABLE is
     "AND l.stage = 'L1'" - so the lead came back to the pool looking fresh and
     could never be dialed. It could not be emailed either: emailed_at survived
     and mark_emailed() is write-once.
@@ -305,7 +305,7 @@ def test_a_lead_archived_from_L2_comes_back_dialable(db, cfg_env):
     _return_and_requeue(db, lid)
 
     row = _get(db, lid)
-    assert row['stage'] == 'L1', 'the stage gate was not cleared'
+    assert row['has_confirmed_email'] is False, 'the stage gate was not cleared'
 
     picked = {str(c['lead_id']) for c in dialer.select_and_claim(cfg_env, limit=10)}
     assert str(lid) in picked, \
@@ -326,10 +326,10 @@ def test_the_return_does_not_skip_straight_to_L2(db, cfg_env):
     archive.archive(lid, 'no_reply')
     _return_and_requeue(db, lid)
 
-    assert _get(db, lid)['stage'] == 'L1'
+    assert _get(db, lid)['has_confirmed_email'] is False
     picked = {str(c['lead_id']) for c in dialer.select_and_claim(cfg_env, limit=10)}
     assert str(lid) in picked
-    assert _get(db, lid)['stage'] == 'L1', \
+    assert _get(db, lid)['has_confirmed_email'] is False, \
         'being selected must not advance the stage - only a capture does that'
 
 
@@ -380,7 +380,7 @@ def test_a_returned_lead_can_be_emailed_again(db):
                     (lid,))
         stages.advance_to_l2(cur, lid, 'reconfirmed on the follow-up call')
     db.commit()
-    assert _get(db, lid)['stage'] == 'L2'
+    assert _get(db, lid)['has_confirmed_email'] is True
     assert stages.mark_emailed(lid, emailed_by='operator') is not None, \
         'the second send was refused because the first one is still on the row'
 
@@ -436,7 +436,8 @@ def test_unarchive_by_hand_leaves_the_same_state_as_the_sweep(db):
     assert archive.return_due()['returned'] == 1
     assert archive.unarchive(b, by='sean') is not None
 
-    fields = ('stage', 'status', 'pool_status', 'campaign_id', 'attempts',
+    fields = ('has_confirmed_email', 'status', 'pool_status', 'campaign_id',
+              'attempts',
               'emailed_at', 'emailed_by', 'dm_email_confirmed', 'dm_email',
               'archived_at', 'returns_at')
     ra, rb = _get(db, a), _get(db, b)
@@ -457,10 +458,10 @@ def test_a_lead_that_replied_comes_back_dialable(db, cfg_env):
     defeats no exclusion list: suppression is keyed on the PHONE and
     email_do_not_send on the ADDRESS, and neither is keyed on the lead.
 
-    ISOLATED: stage='L1' throughout, so the stage gate cannot be what excludes
+    ISOLATED: has_confirmed_email=False throughout, so the stage gate cannot be what excludes
     this lead - only replied_at can.
     """
-    lid = _lead(db, phone_e164='+15552241010', stage='L1')
+    lid = _lead(db, phone_e164='+15552241010', has_confirmed_email=False)
     assert stages.record_reply(lid, note='not interested, we draft our own') is True
     with db.cursor() as cur:
         cur.execute("UPDATE leads SET status='new' WHERE lead_id=%s", (lid,))
@@ -470,7 +471,7 @@ def test_a_lead_that_replied_comes_back_dialable(db, cfg_env):
     _return_and_requeue(db, lid)
 
     row = _get(db, lid)
-    assert row['stage'] == 'L1', 'the premise: the stage gate is not the cause'
+    assert row['has_confirmed_email'] is False, 'the premise: the stage gate is not the cause'
     assert row['replied_at'] is None, 'the reply gate was not cleared'
 
     picked = {str(c['lead_id']) for c in dialer.select_and_claim(cfg_env, limit=10)}
@@ -484,7 +485,7 @@ def test_the_reply_survives_as_history_after_the_gate_is_cleared(db):
     returned firm needs to know it said no once, and what it said - that is
     the difference between a cold call and an informed one.
     """
-    lid = _lead(db, phone_e164='+15552241011', stage='L1')
+    lid = _lead(db, phone_e164='+15552241011', has_confirmed_email=False)
     assert stages.record_reply(lid, note='not interested, we draft our own',
                                by='sean') is True
     with db.cursor() as cur:
@@ -511,7 +512,7 @@ def test_a_suppressed_lead_that_replied_is_still_not_dialable(db, cfg_env):
     list keyed on the phone, and it is untouched by any of this - so a lead
     that both replied AND asked to be removed stays unreachable.
     """
-    lid = _lead(db, phone_e164='+15552241012', stage='L1')
+    lid = _lead(db, phone_e164='+15552241012', has_confirmed_email=False)
     stages.record_reply(lid, note='take me off your list')
     with db.cursor() as cur:
         cur.execute("UPDATE leads SET status='new' WHERE lead_id=%s", (lid,))

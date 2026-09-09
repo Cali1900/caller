@@ -54,10 +54,10 @@ def _ready_lead(email='bob@firm.com', minutes_ago=60, **campaign_kw):
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO leads (phone_e164, company, dm_name,
                                dm_email, dm_email_confirmed, timezone,
-                               campaign_id, stage, status, website,
-                               last_called_at)
+                               campaign_id, has_confirmed_email, status,
+                               website, last_called_at)
                            VALUES (%s,'Firm','Bob Smith',%s,true,
-                                   'America/Los_Angeles',%s,'L2','completed',
+                                   'America/Los_Angeles',%s,true,'completed',
                                    'https://firm.com',%s)
                            RETURNING lead_id""",
                         ('+1424555' + str(abs(hash(email)) % 9000 + 1000),
