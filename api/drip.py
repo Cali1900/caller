@@ -604,4 +604,32 @@ def stop(lead_id, reason: str, by: str = 'operator') -> bool:
         archive.archive(lead_id, 'unsubscribed', by=by)
     elif reason == 'bounced' and row['dm_email']:
         archive.do_not_send(row['dm_email'], 'bad_email', f'drip:{by}')
+        # AND SET THE STATUS, so the bounce is VISIBLE.
+        #
+        # The address going on the do-not-send list is what stops us mailing it
+        # again; it is not what tells anyone it happened. Without this the lead
+        # sits at 'emailed' with no drip and no explanation - in no filter, on
+        # no queue, simply stopped. A LEAD FAILING SILENTLY is the shape every
+        # other guard in this system exists to prevent.
+        #
+        # NOT archived, deliberately: the brief says bounced -> bad_email, back
+        # to Sean. A bounce is a bad ADDRESS, not a bad firm, and it usually
+        # wants a corrected one - which is a person's job and needs the lead in
+        # front of them rather than resting for six months.
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE leads SET status = 'bad_email',
+                              updated_at = now()
+                        WHERE lead_id = %s""", (lead_id,))
+                # The detail is BOUND, not inlined: a multi-line SQL string
+                # literal would put its own newlines and indentation into the
+                # timeline text.
+                cur.execute(
+                    """INSERT INTO activity (lead_id, kind, summary, detail)
+                       VALUES (%s, 'drip', 'status -> bad_email (bounced)', %s)""",
+                    (lead_id,
+                     'the ADDRESS is on the do-not-send list; the lead is left '
+                     'for a person because a bounce usually wants a corrected '
+                     'address, not an archive'))
     return True

@@ -1,8 +1,26 @@
 {% extends "base.html" %}{% block title %}Campaigns · Caller{% endblock %}
 {% block body %}
 <h1>Campaigns</h1>
-<p class="sub">A campaign is a named configuration &mdash; prompt version,
-   sender, cap, spacing and calling windows. <b>One runs at a time.</b></p>
+<p class="sub">A campaign is a named configuration. There are two kinds, and
+   the difference is not cosmetic:</p>
+<table style="max-width:760px;margin-bottom:14px">
+  <tr><th>type</th><th>owns</th><th>how many run at once</th></tr>
+  <tr>
+    <td><span class="pill">call</span></td>
+    <td class="dim">prompt version, cap, spacing, calling windows, email&nbsp;1 copy</td>
+    <td><b>ONE.</b> There is one phone number and one worker, so starting a
+        second asks you to stop the first.</td>
+  </tr>
+  <tr>
+    <td><span class="pill">drip</span></td>
+    <td class="dim">the email sequence, its intervals, and the sender</td>
+    <td><b>MANY.</b> A lead's sequence belongs to the lead, not to whichever
+        call campaign sourced it.</td>
+  </tr>
+</table>
+<p class="sub">Type is set when a campaign is created and cannot be changed
+   afterwards &mdash; changing it under live leads would move their whole
+   ladder sideways.</p>
 {% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
 
 {% if pending %}
@@ -18,15 +36,23 @@
 </div>
 {% endif %}
 
+{# GROUPED BY TYPE, because the columns that matter differ. A drip has no
+   prompt, no cap and no spacing, and showing it blank in those columns reads
+   as "not configured yet" rather than "does not apply". #}
+{% set call_campaigns = campaigns | selectattr('type', 'equalto', 'call') | list %}
+{% set drip_campaigns = campaigns | selectattr('type', 'equalto', 'drip') | list %}
+
+<h2>Call campaigns <span class="dim">&mdash; one runs at a time</span></h2>
+{% if call_campaigns %}
 <table>
 <tr><th></th><th>Campaign</th><th>Prompt</th><th>Sender</th>
     <th class="right">Cap</th><th>Spacing</th>
     <th class="right">Leads</th><th class="right">Queued</th><th>Notes</th><th></th></tr>
-{% for c in campaigns %}
+{% for c in call_campaigns %}
 <tr>
   <td>{% if c.is_running %}<span class="pill completed">RUNNING</span>{% endif %}</td>
   <td><a href="/campaign/{{ c.campaign_id }}"><b>{{ c.name }}</b></a>
-      {% if c.type != 'call' %}<span class="pill">{{ c.type }}</span>{% endif %}</td>
+      <span class="pill">call</span></td>
   <td class="dim">v{{ c.agent_l1_version }}</td>
   <td class="dim">{{ c.sender_email }}</td>
   <td class="right">{{ c.daily_cap }}</td>
@@ -46,6 +72,48 @@
 </tr>
 {% endfor %}
 </table>
+{% else %}
+<p class="dim">None. Nothing can dial without one.</p>
+{% endif %}
+
+<h2 style="margin-top:20px">Drip campaigns
+    <span class="dim">&mdash; many run at once</span></h2>
+{% if drip_campaigns %}
+<table>
+<tr><th></th><th>Campaign</th><th>Sequence</th><th>Sender</th>
+    <th>After the last step</th><th class="right">Leads on it</th>
+    <th>Notes</th><th></th></tr>
+{% for c in drip_campaigns %}
+<tr>
+  <td>{% if c.is_running %}<span class="pill completed">RUNNING</span>{% endif %}</td>
+  <td><a href="/campaign/{{ c.campaign_id }}#drip"><b>{{ c.name }}</b></a>
+      <span class="pill">drip</span></td>
+  <td class="dim">
+    {%- set n = step_counts.get(c.campaign_id|string, 0) -%}
+    {% if n %}{{ n }} step{{ '' if n == 1 else 's' }}
+    {% else %}<b>no steps yet</b> &mdash; it sends nothing{% endif %}</td>
+  <td class="dim">{{ c.sender_email }}</td>
+  <td class="dim">{{ c.after_last_step }}</td>
+  <td class="right">{{ drip_counts.get(c.campaign_id|string, 0) }}</td>
+  <td class="dim">{{ (c.notes or '')|truncate(50) }}</td>
+  <td>
+    {% if c.is_running %}
+      <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/stop">
+        <button type="submit" class="danger">Stop</button></form>
+    {% else %}
+      <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/start">
+        <button type="submit" class="ghost">Start</button></form>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %}
+</table>
+<p class="dim">A lead joins a drip when <b>email&nbsp;1</b> is sent &mdash; that
+   is the only way in. Starting a drip is its switch; stopping it is not a side
+   effect of switching which call campaign dials.</p>
+{% else %}
+<p class="dim">None yet. Create one below to write a follow-up sequence.</p>
+{% endif %}
 
 <div class="card" style="margin-top:16px;max-width:640px">
   <h2>New campaign</h2>
@@ -53,6 +121,16 @@
     <div class="field">
       <label for="nm">Name</label>
       <input id="nm" name="name" required placeholder="C2">
+    </div>
+    <div class="field">
+      <label for="ty">Type</label>
+      <select id="ty" name="campaign_type">
+        <option value="call">call &mdash; dials. Owns the prompt, cap, spacing and windows</option>
+        <option value="drip">drip &mdash; emails a sequence. Owns the steps and the sender</option>
+      </select>
+      <span class="dim">Set at creation and <b>not changeable afterwards</b>
+        &mdash; changing it under live leads would move their whole ladder
+        sideways. One call campaign runs at a time; many drips can.</span>
     </div>
     <div class="field">
       <label for="tf">Copy settings from</label>

@@ -184,6 +184,38 @@ Two rules that follow:
    somewhere else in the file first — that is how `guards.py` ended up with an
    `if` whose body was dedented.
 
+### ⚠️ STANDING RULE — a table designed to OUTLIVE A LEAD will outlive TEST ISOLATION
+
+`tests/conftest.py` truncates between tests, and `TRUNCATE ... CASCADE` only
+reaches tables with a foreign key path to the ones named. **So the property that
+makes an exclusion list correct is the same property that breaks test
+isolation**, and it is not a quirk of one table — it is true of every table of
+that shape:
+
+| table | keyed on | has an FK to `leads`? |
+|---|---|---|
+| `suppression` | the **phone** | no |
+| `email_do_not_send` | the **address** | no |
+| `email_audit` | nothing that cascades | no |
+
+Each of these is deliberately *not* keyed on the lead, because it has to survive
+the lead being archived, returned to the pool, re-uploaded or deduplicated. That
+is exactly why a cascade cannot clear them, and why a row written by one test is
+still there for every test that runs after it.
+
+`email_do_not_send` was leaking this way from migration 029 until 2026-09-09,
+when three drip tests failed for a reason that had nothing to do with the drip: a
+lead was excluded by an address a completely different test had blocked. It is
+the masked-guard shape pointed at the harness instead of the code, and the
+harness is the worse place for it — a false exclusion there is invisible in every
+test at once.
+
+**So: name these tables EXPLICITLY in the TRUNCATE, never rely on a cascade
+path.** Relying on the cascade means the next table built to outlive a lead
+silently starts leaking, and the symptom will be a test failing somewhere else
+entirely. **When you add a table that is keyed on a phone, an address, or
+anything other than a lead, add it to that list in the same commit.**
+
 ### ⚠️ STANDING CHECK — a test may not configure what production ignores
 
 `tests/test_no_dead_config.py` fails when a test writes a settings key no

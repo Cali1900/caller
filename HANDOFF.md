@@ -15,7 +15,7 @@ Last updated 2026-09-09. Every number in the table below was read from
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260909_037_prepared_sends.sql` |
-| Tests | 638 passed, 1 skipped |
+| Tests | 647 passed, 1 skipped |
 | Break pass | **103 definitions** (97–104 added for the drip). Full pass GREEN across all 103 at 2026-09-09T17:23Z, suite 632. The FIRST run of that pass FAILED — break 100 reported GREEN because a drip test was passing with zero clicks; see masked-guard row 12 in README.md |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
@@ -295,6 +295,35 @@ exactly when it is working. After the last step: `archive('no_reply')`, or
 our emails has not given up the right to be phoned about a case they asked about,
 so `drip.stop()` never writes to `suppression`. A prose "take me off your list"
 is broader — that is a person's call at the DNC button.
+
+### Reaching the drip from the UI
+
+`/campaigns` **creates both kinds.** The New Campaign form has a TYPE selector
+(call | drip), defaulting to `call` so anything posting without the field behaves
+as it always did, and a bad value is refused rather than silently becoming a call
+campaign. Type is set at creation and `campaigns.update()` refuses it afterwards.
+
+The list is **grouped and labelled by type**, with a drip's own columns (sequence
+length, after-the-last-step, leads on it) rather than blank cap and spacing boxes
+— a blank reads as "not configured yet" when it means "does not apply". A drip
+with **no steps** says so on the list, because a drip with no sequence sends
+nothing.
+
+The page header no longer says "One runs at a time" globally. **That is true of
+call campaigns and false of drips**, and the index enforcing it is scoped to
+`type='call'`. It is now stated per type, and a test asserts that exact string is
+gone.
+
+A **drip's** page shows the sequence editor and hides prompt version, cap,
+spacing, retry gaps and calling windows, plus a short card saying what a drip does
+not have and why. A **call** campaign's page is unchanged — asserted by its own
+test listing all seven sections, because taking something off the call page would
+be the easy mistake in that change.
+
+⚠️ **This was built and UNREACHABLE for one commit**: the drip shipped complete
+with no way to create a drip campaign except SQL. Same fault as a control that
+exists and cannot be found — the archive Restore button, inverted. When a feature
+lands, check the path a person takes to reach it, not only that its tests pass.
 
 ## ⚠️ THE REPLY GATE IS NOT FAIL-CLOSED. SEAN READING HIS INBOX IS THE GUARD.
 

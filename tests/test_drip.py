@@ -59,6 +59,12 @@ def _lead(db, days_ago=0, **kw):
     return lid
 
 
+def _get_lead(db, lid):
+    with db.cursor() as cur:
+        cur.execute('SELECT * FROM leads WHERE lead_id = %s', (lid,))
+        return cur.fetchone()
+
+
 def _join(db, lid, cid, sent_steps=0):
     """Put the lead on the drip and mark the first `sent_steps` steps as sent."""
     steps = drip.steps(cid)
@@ -434,3 +440,156 @@ def test_the_digest_names_tomorrows_sends_by_firm(db, dripc, cfg_env):
     assert 'Whitfield Law' in body, 'a count is not actionable; a firm name is'
     assert 'step 3' in body
     assert 'stop' in body.lower()
+
+
+def test_a_bounce_is_visible_in_the_status_filter(db, dripc, client):
+    """
+    A BOUNCE MUST SHOW, not just stop.
+
+    Putting the address on the do-not-send list is what prevents another send.
+    It is not what tells anyone it happened. Without the status change the lead
+    sits at 'emailed' with no drip and no explanation - in no filter, on no
+    queue, simply stopped. A lead failing silently is the shape every other guard
+    in this system exists to prevent.
+
+    ASSERTED THROUGH THE REAL FILTER, not just the column: "it shows up" is the
+    property, and a status nothing can filter on would satisfy the column check
+    while failing the point.
+    """
+    lid = _lead(db, days_ago=11, company='Bouncy Law LLP')
+    _join(db, lid, dripc['campaign_id'], sent_steps=1)
+
+    assert drip.stop(lid, 'bounced', by='test') is True
+
+    row = _get_lead(db, lid)
+    assert row['status'] == 'bad_email', 'the bounce left no visible trace'
+    assert row['drip_campaign_id'] is None, 'the drip did not stop'
+    # The ADDRESS is blocked, which is the half that stops another send.
+    assert archive.is_do_not_send('pat@whitfield.test')
+    # NOT archived: a bounce wants a corrected address, from a person.
+    assert row['archived_at'] is None, \
+        'a bounce archived the lead - it should be left for a person'
+
+    r = client.get('/?status=bad_email')
+    assert r.status_code == 200
+    assert 'Bouncy Law LLP' in r.text, \
+        'the bounced lead does not appear when filtering on bad_email'
+
+
+def test_a_bounce_records_why_on_the_timeline(db, dripc):
+    lid = _lead(db, days_ago=11)
+    _join(db, lid, dripc['campaign_id'], sent_steps=1)
+    drip.stop(lid, 'bounced', by='sean')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT summary, detail FROM activity
+                            WHERE lead_id = %s AND kind = 'drip'
+                            ORDER BY created_at""", (lid,))
+            rows = cur.fetchall()
+    trail = ' | '.join(f"{r['summary']} :: {r['detail'] or ''}" for r in rows)
+    assert 'bad_email' in trail and 'bounced' in trail
+    assert 'corrected address' in trail, \
+        'the timeline must say WHY it was not archived'
+    # The bound detail must not carry SQL indentation into the timeline.
+    for r in rows:
+        if r['detail']:
+            assert '\n' not in r['detail'], 'a newline leaked into the detail text'
+
+
+# ==========================================================================
+# THE DRIP IS REACHABLE FROM THE UI
+#
+# It was built and unreachable: the New Campaign form made call campaigns only,
+# with no type selector, so a drip could not be created without SQL. Feature
+# built and not wired is the same fault as a control that exists and cannot be
+# found - the archive Restore button, inverted.
+# ==========================================================================
+
+def test_the_create_form_can_make_a_drip(db, client):
+    r = client.post('/campaigns/new',
+                    data={'name': 'D-UI', 'campaign_type': 'drip',
+                          'template_from': '', 'notes': 'from the form'},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    made = [c for c in campaigns.list_all() if c['name'] == 'D-UI']
+    assert len(made) == 1
+    assert made[0]['type'] == 'drip', 'the form made a CALL campaign'
+    assert made[0]['is_running'] is False, 'created stopped, always'
+
+
+def test_the_create_form_still_defaults_to_call(db, client):
+    """Anything posting without the field must behave as it did before."""
+    r = client.post('/campaigns/new',
+                    data={'name': 'C-UI', 'template_from': '', 'notes': ''},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    made = [c for c in campaigns.list_all() if c['name'] == 'C-UI']
+    assert made[0]['type'] == 'call'
+
+
+def test_a_bad_type_is_refused_not_silently_a_call_campaign(db, client):
+    r = client.post('/campaigns/new',
+                    data={'name': 'X-UI', 'campaign_type': 'email',
+                          'template_from': '', 'notes': ''},
+                    follow_redirects=False)
+    assert 'could+not+create' in r.headers['location'] \
+        or 'could%20not%20create' in r.headers['location']
+    assert not [c for c in campaigns.list_all() if c['name'] == 'X-UI'], \
+        'a bad type created a campaign anyway'
+
+
+def test_the_campaigns_page_labels_and_groups_by_type(db, dripc, client):
+    r = client.get('/campaigns')
+    assert r.status_code == 200, r.text[:400]
+    assert 'Call campaigns' in r.text and 'Drip campaigns' in r.text
+    assert 'many run at once' in r.text
+    assert 'campaign_type' in r.text, 'the create form has no type selector'
+    # ⚠️ THE HEADER MUST NOT CLAIM ONE-AT-A-TIME GLOBALLY. It is true of call
+    # campaigns and false of drips, and the index enforcing it is scoped to
+    # type='call'.
+    assert '<b>One runs at a time.</b>' not in r.text, \
+        'the page still says one campaign runs at a time, which is only true of calls'
+
+
+def test_the_list_warns_about_a_drip_with_no_steps(db, client):
+    """A drip with no sequence sends nothing, and that must be visible from the
+    list rather than only after opening it."""
+    cid = campaigns.create('D-EMPTY', campaign_type='drip')['campaign_id']
+    campaigns.start(cid)
+    r = client.get('/campaigns')
+    assert 'no steps yet' in r.text
+
+
+def test_a_drip_page_hides_what_a_drip_does_not_have(db, dripc, client):
+    """
+    Prompt version, cap, spacing and calling windows belong to the CALL campaign
+    and it keeps them. A blank box on a drip reads as "not configured yet"
+    rather than "does not apply", which is how somebody ends up trying to set a
+    dial interval on an email sequence.
+    """
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert r.status_code == 200, r.text[:400]
+    assert 'The sequence' in r.text and 'Save the sequence' in r.text
+    # MATCHED ON THE HEADING, not the bare phrase. base.html carries a CSS
+    # comment reading "Prompt versions: seventeen and growing", so a substring
+    # check passes on every page in the app and this test would have asserted
+    # nothing about the drip page at all.
+    for gone in ('Prompt version', 'Daily cap', 'Spacing', 'Calling window',
+                 'Retry gaps'):
+        assert f'<h2>{gone}</h2>' not in r.text, \
+            f'a drip page still shows the {gone!r} section'
+    # It does own a sender, and it says what it lacks and why.
+    assert '<h2>Sender</h2>' in r.text
+    assert 'does not dial' in r.text
+
+
+def test_a_call_page_is_unchanged(db, client):
+    """The other half of the same change: nothing was taken off a call
+    campaign's page."""
+    r = client.get(f'/campaign/{running_campaign_id()}')
+    assert r.status_code == 200, r.text[:400]
+    for kept in ('Prompt version', 'Daily cap', 'Spacing', 'Calling window',
+                 'Retry gaps', 'Follow-up email copy', 'Sender'):
+        assert f'<h2>{kept}</h2>' in r.text, f'a call page lost {kept!r}'
+    assert 'Save the sequence' not in r.text, \
+        'a call campaign was offered a sequence editor it cannot use'

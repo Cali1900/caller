@@ -1091,17 +1091,41 @@ def campaigns_list(request: Request, msg: str = '', confirm: str = ''):
         hdr = _header(conn, cfg)
     rows = campaigns.list_all()
     pending = campaigns.get(confirm) if confirm else None
+    # A DRIP WITH NO STEPS SENDS NOTHING, and that is worth saying on the list
+    # rather than only inside the campaign. leads_total/leads_queued on the row
+    # count leads.campaign_id, which is the CALL campaign - a drip needs its own
+    # count off drip_campaign_id.
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT campaign_id::text AS cid, count(*) AS n
+                             FROM drip_steps WHERE deleted_at IS NULL
+                            GROUP BY campaign_id""")
+            step_counts = {r['cid']: r['n'] for r in cur.fetchall()}
+            cur.execute("""SELECT drip_campaign_id::text AS cid, count(*) AS n
+                             FROM leads WHERE drip_campaign_id IS NOT NULL
+                            GROUP BY drip_campaign_id""")
+            drip_counts = {r['cid']: r['n'] for r in cur.fetchall()}
     return templates.TemplateResponse(request, 'campaigns.html', {
         'hdr': hdr, 'campaigns': rows, 'msg': msg,
+        'step_counts': step_counts, 'drip_counts': drip_counts,
         'running': campaigns.running(), 'pending': pending})
 
 
 @router.post('/campaigns/new')
 def campaigns_new(name: str = Form(...), template_from: str = Form(''),
-                  notes: str = Form('')):
+                  notes: str = Form(''), campaign_type: str = Form('call')):
+    """
+    TYPE IS CHOSEN HERE AND NOWHERE ELSE. It is set at CREATION and
+    campaigns.update() refuses it: changing a campaign's type under live leads
+    would move their whole ladder sideways.
+
+    Defaulting to 'call' keeps the old form's behaviour for anything that posts
+    without the field, and a bad value is refused by create() rather than
+    silently becoming a call campaign.
+    """
     try:
         row = campaigns.create(name, template_from=template_from or None,
-                               notes=notes)
+                               campaign_type=campaign_type, notes=notes)
     except Exception as exc:
         return RedirectResponse(
             f'/campaigns?msg={urllib.parse.quote("could not create: " + str(exc)[:150])}',
