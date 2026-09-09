@@ -26,7 +26,8 @@ from fastapi import APIRouter, Form, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from api import (campaigns, clicks as clicks_mod, db,
+from api import (archive as _archive_mod,
+                 campaigns, clicks as clicks_mod, db,
                  forecast as forecast_mod, funnel as funnel_mod,
                  digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
@@ -58,7 +59,7 @@ STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'email_path', 'demo_pending', 'dnc', 'max_attempts', 'failed',
             'human_review', 'paused',
             'emailed', 'engaged', 'demo_booked', 'won', 'lost',
-            'lost_no_response', 'bad_email']
+            'lost_no_response', 'bad_email', 'archived']
 # L1 and L2 are the only stages a lead can hold - the DB constraint
 # agrees. won/lost live on status, which is the one home for them.
 STAGES = ['L1', 'L2']
@@ -265,6 +266,16 @@ def _lead_query(q, status, stage, needs_you, limit, offset, email_state='',
         params += [f'%{q}%'] * 6
     if status:
         where.append("l.status = %s"); params.append(status)
+    else:
+        # ARCHIVED IS OUT OF EVERY WORKING VIEW. A resting lead is not work,
+        # and at 1,085 leads a few hundred archived rows would bury the ones
+        # that need doing. Reachable only by asking for it: status=archived.
+        #
+        # This sits in _lead_query rather than on the page so the COUNT and
+        # the bulk "add all matching" inherit it - the count drifting from
+        # the list has already shipped three times, and a bulk add that
+        # swept archived leads back onto a campaign would undo the rest.
+        where.append("l.status <> 'archived'")
     if stage:
         where.append("l.stage = %s"); params.append(stage)
     if needs_you:
@@ -585,6 +596,7 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         'suppressed': suppressed, 'local_time': local, 'saved': saved,
         'draft': draft, 'campaign': camp,
         'manual_statuses': MANUAL_STATUSES,
+        'archive_reasons': _archive_mod.REASONS,
         'clicks': clicks_mod.summary(lead['lead_id'])})
 
 
@@ -737,6 +749,39 @@ MANUAL_STATUSES = (
 )
 
 
+@router.post('/leads/{lead_id}/archive')
+def lead_archive(lead_id: str, reason: str = Form(...),
+                 archived_by: str = Form('operator'), note: str = Form('')):
+    """
+    ARCHIVE NEEDS A REASON, which is why it is a button and not a dropdown
+    entry. Setting status='archived' by hand would leave archived_at and
+    returns_at null, and the sweep reads returns_at - so the lead would rest
+    forever with nothing on screen saying why.
+
+    Same shape as /dnc: the status and the facts that make it mean something
+    are written in one transaction, and that route is the only way in.
+    """
+    from api import archive as _archive
+    try:
+        _archive.archive(lead_id, reason, by=archived_by, note=note)
+        msg = f'Archived ({reason}). Returns to the pool in 6 months.'
+    except _archive.ArchiveRefused as exc:
+        msg = f'REJECTED: {exc}'
+    return RedirectResponse(
+        f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+
+
+@router.post('/leads/{lead_id}/unarchive')
+def lead_unarchive(lead_id: str, unarchived_by: str = Form('operator')):
+    """Back to the pool early. Clears nothing but the lead's own columns."""
+    from api import archive as _archive
+    row = _archive.unarchive(lead_id, by=unarchived_by)
+    msg = ('Returned to the pool. Suppression and the email do-not-send list '
+           'are untouched.') if row else 'That lead is not archived.'
+    return RedirectResponse(
+        f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+
+
 @router.post('/leads/{lead_id}/status')
 def lead_status(lead_id: str, status: str = Form(...),
                 changed_by: str = Form('operator')):
@@ -754,7 +799,9 @@ def lead_status(lead_id: str, status: str = Form(...),
     """
     if status not in MANUAL_STATUSES:
         msg = (f'REJECTED: {status!r} cannot be set by hand. '
-               f'Use the DNC button for dnc; "dialing" is the dialer\'s.')
+               f'Use the DNC button for dnc; "dialing" is the dialer\'s; '
+               f'use Archive for archived - it needs a reason and a return '
+               f'date, and a bare status would rest the lead forever.')
         return RedirectResponse(
             f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
 

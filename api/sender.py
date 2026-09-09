@@ -22,7 +22,7 @@ real person. Those are not equivalent failures.
 
 import datetime
 
-from api import (autosend, campaigns, db, drafts, guards, mail, stages)
+from api import (archive, autosend, campaigns, db, drafts, guards, mail, stages)
 from api.guards import EmailRefused
 
 
@@ -75,6 +75,11 @@ def send_one(cfg, lead_id) -> dict:
                     return {'sent': False, 'detail': 'no such lead'}
                 lead = dict(lead)
                 to_email = (lead.get('dm_email') or '').strip()
+                if archive.is_do_not_send(to_email):
+                    return {'sent': False,
+                            'detail': f'{to_email} is on the email '
+                                      f'do-not-send list - it bounced hard or '
+                                      f'asked to be removed'}
 
                 camp = (campaigns.get(lead['campaign_id'])
                         if lead.get('campaign_id') else None)
@@ -179,6 +184,11 @@ def send_manual(cfg, lead_id, sent_by: str = 'operator') -> dict:
                     return {'sent': False, 'detail': 'no such lead'}
                 lead = dict(lead)
                 to_email = (lead.get('dm_email') or '').strip()
+                if archive.is_do_not_send(to_email):
+                    return {'sent': False,
+                            'detail': f'{to_email} is on the email '
+                                      f'do-not-send list - it bounced hard or '
+                                      f'asked to be removed'}
                 camp = (campaigns.get(lead['campaign_id'])
                         if lead.get('campaign_id') else {}) or {}
 

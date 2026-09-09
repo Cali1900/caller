@@ -92,6 +92,35 @@
       </form>
     {% endif %}
 
+    <h2>Archive</h2>
+    {% if lead.status == 'archived' %}
+      <p class="sentbar"><b>Resting.</b>
+         Archived {{ lead.archived_at.strftime('%b %-d') if lead.archived_at }}
+         &mdash; <b>{{ lead.archive_reason }}</b>.
+         Returns to the pool
+         {{ lead.returns_at.strftime('%b %-d, %Y') if lead.returns_at }}.</p>
+      <form method="post" action="/leads/{{ lead.lead_id }}/unarchive" class="toolbar">
+        <input type="hidden" name="unarchived_by" value="operator">
+        <button type="submit" class="ghost">Return to the pool now</button>
+        <span class="dim">Clears the campaign and the attempts. Does
+          <b>not</b> clear suppression or the email do-not-send list &mdash;
+          those are keyed on the number and the address, not this lead.</span>
+      </form>
+    {% else %}
+      <form method="post" action="/leads/{{ lead.lead_id }}/archive" class="toolbar"
+            style="margin-bottom:12px">
+        <input type="hidden" name="archived_by" value="operator">
+        <select name="reason">
+          {% for r in archive_reasons %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+        </select>
+        <input type="text" name="note" placeholder="note (optional)" style="width:220px">
+        <button type="submit" class="ghost">Archive</button>
+        <span class="dim">Rests the lead for six months, then it returns to
+          the pool. <b>The reason is the point</b> &mdash; in March, a firm
+          that ran out of no-answers is not a firm that said no.</span>
+      </form>
+    {% endif %}
+
     <h2>Status</h2>
     <form method="post" action="/leads/{{ lead.lead_id }}/status" class="toolbar"
           style="margin-bottom:12px">

@@ -41,6 +41,11 @@ SCORE_EVERY = 60
 ALERT_EVERY = 60
 # The digest goes out once, after the operator's day ends.
 DIGEST_EVERY = 600
+# The archive sweep. Hourly, not nightly: "nightly" needs a clock to be right
+# about, and an hourly idempotent sweep returns a lead within an hour of its
+# six-month mark without anyone reasoning about timezones or missed runs. It
+# returns nothing until leads actually reach returns_at, so it is free.
+ARCHIVE_EVERY = 3600
 DIGEST_AFTER_HOUR = 18
 
 _stop = False
@@ -118,7 +123,7 @@ def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
-    from api import alerts, dialer, drafts, drain, scorer
+    from api import alerts, archive, dialer, drafts, drain, scorer
     from api.config import load_config
 
     # Fail fast and loudly on bad config rather than idling in a loop that
@@ -152,6 +157,7 @@ def main():
     last_score = 0.0
     last_alert = 0.0
     last_digest = 0.0
+    last_archive = 0.0
 
     while not _stop:
         now = time.time()
@@ -183,6 +189,17 @@ def main():
         if now - last_digest >= DIGEST_EVERY:
             last_digest = now
             _safe('digest', _maybe_digest, cfg)
+
+        if now - last_archive >= ARCHIVE_EVERY:
+            last_archive = now
+            # Returns rested leads to the pool. Writes to `leads` ONLY -
+            # suppression and the email do-not-send list are keyed on the
+            # phone and the address, outlive the lead, and a lead coming
+            # back out of archive is not evidence either should be forgotten.
+            r = _safe('archive.return_due', archive.return_due)
+            if r and r['returned']:
+                print(f'[worker] returned {r["returned"]} lead(s) from archive '
+                      f'to the pool ({", ".join(r["reasons"])})', flush=True)
 
         if now - last_dial >= dial_gap:
             # Re-arm BEFORE dialing, and re-roll the jitter, so the next dial

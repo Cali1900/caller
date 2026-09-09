@@ -203,3 +203,56 @@ def test_the_bulk_add_still_respects_the_filter(db, client):
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM leads WHERE campaign_id=%s", (cid,))
             assert cur.fetchone()['n'] == 2, 'only the NC leads'
+
+
+# --------------------------------------------------------------------------
+# archived is out of every working view
+# --------------------------------------------------------------------------
+
+def test_archived_leads_are_hidden_from_the_list_and_the_count(client, db):
+    """
+    ISOLATED: both leads are identical but for status. No other filter is
+    applied, so status is the only thing that can exclude either of them.
+
+    The COUNT is asserted alongside the rows on purpose - a count that drifts
+    from the list is the recurring bug in this area, and it has shipped three
+    times. A header reading 2 above one row is worse than showing both.
+    """
+    _lead(company='Working Firm', phone_e164='+19195559001')
+    _lead(company='Resting Firm', phone_e164='+19195559002', status='archived')
+    body = client.get('/').text
+    assert 'Working Firm' in body
+    assert 'Resting Firm' not in body, \
+        'an archived lead appeared in the default working view'
+    assert '>1<' in body or ' 1 ' in body
+
+
+def test_asking_for_archived_shows_them_and_nothing_else(client, db):
+    """Reachable, but only by asking. Otherwise the reason a lead is resting
+    is invisible and the return queue cannot be worked."""
+    _lead(company='Working Firm', phone_e164='+19195559003')
+    _lead(company='Resting Firm', phone_e164='+19195559004',
+          status='archived', archive_reason='refused')
+    body = client.get('/?status=archived').text
+    assert 'Resting Firm' in body
+    assert 'Working Firm' not in body
+
+
+def test_the_bulk_add_never_sweeps_an_archived_lead_onto_a_campaign(client, db):
+    """
+    The bulk add reuses _lead_query's WHERE clause. If the archived filter
+    lived on the page rather than in the query, "add all N matching" would
+    quietly pull resting leads back onto a live campaign - undoing the whole
+    point of the archive, at scale, in one click.
+    """
+    from api import web as _web
+    _lead(company='Working Firm', phone_e164='+19195559005')
+    _lead(company='Resting Firm', phone_e164='+19195559006', status='archived')
+    _sql, params, where, cparams = _web._lead_query(
+        '', '', '', '', 100, 0)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) AS n {_web._LEAD_JOINS} "
+                        f"WHERE {' AND '.join(where)}", cparams)
+            assert cur.fetchone()['n'] == 1, \
+                'the bulk-add count included an archived lead'

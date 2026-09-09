@@ -17,10 +17,17 @@ exclusion is an email to the wrong person, not a red test:
   3  domain neither matches the firm's website nor is known free-mail
   4  needs_human flagged
   5  replied_at already set - they answered us once already
+  6  the ADDRESS is on the email do-not-send list
+  7  the lead is archived - it is resting, nothing should reach it
 
 5 is not on Sean's list; it is here because a lead can carry replied_at from
 earlier work, and "they already answered" is exactly the case auto-send must
 not walk into.
+
+6 is keyed on the ADDRESS, not the lead, which is the only reason it survives
+a lead being archived and returned to the pool. A hard bounce used to be a
+STATUS, and the archive sweep rewrites status - so the address would have come
+back fully sendable with nothing on the row remembering the bounce.
 
 WHAT THIS DOES NOT DO: send. It returns a decision. The sender is a separate
 caller so that the decision can be tested, logged and displayed without any
@@ -39,6 +46,8 @@ class HoldReason:
     NO_CAMPAIGN = 'lead is not on a campaign'
     NOT_AUTO = 'campaign email 1 is set to manual'
     NO_EMAIL = 'no email address'
+    DO_NOT_SEND = 'address is on the email do-not-send list'
+    ARCHIVED = 'lead is archived - it is resting'
     CHECK_FAILED = 'eligibility check could not run'
 
 
@@ -74,6 +83,10 @@ def eligibility(lead, campaign, validate=None) -> dict:
         if lead.get('replied_at') is not None:
             reasons.append(HoldReason.ALREADY_REPLIED)
 
+        # 7 - resting. Nothing automated reaches an archived lead.
+        if lead.get('status') == 'archived':
+            reasons.append(HoldReason.ARCHIVED)
+
         # 4
         if lead.get('status') == 'human_review' or lead.get('needs_human'):
             reasons.append(HoldReason.NEEDS_HUMAN)
@@ -90,6 +103,11 @@ def eligibility(lead, campaign, validate=None) -> dict:
         if not email:
             reasons.append(HoldReason.NO_EMAIL)
         else:
+            # 6 - the ADDRESS, checked before anything about the lead. This
+            # list outlives the lead row on purpose.
+            from api import archive as _archive
+            if _archive.is_do_not_send(email):
+                reasons.append(HoldReason.DO_NOT_SEND)
             # 3 - and the format / MX / role / disposable checks with it.
             v = validate(email, lead.get('website'))
             domain_class = v.get('domain_class')
