@@ -8,16 +8,30 @@ Everything that can stop a call is either a named SQL fragment in the
 selection query or a named assert_* before the dial, so the break pass can
 remove exactly one and watch exactly one test go red:
 
+SELECTION (a named SQL fragment; removing one is a single visible edit):
+
+    QUEUE_MEMBERSHIP            pool_status='active' - queued
+    CAMPAIGN_MEMBERSHIP         only the RUNNING campaign's leads dial
+    STAGE_DIALABLE              L1 only. A lead we owe an email is not called
+    REPLIED_GUARD               they answered; stop dialing
     SUPPRESSION_JOIN            a suppressed number is never a candidate
     windows.LEGAL_WINDOW        TCPA 8:00-20:30 in the CALLED PARTY's time
     windows.PREFERENCE_WINDOW   the operator's hours, also client-local
-    CAMPAIGN_JOIN               nothing dials outside a started campaign
+
+BEFORE THE DIAL (re-checked in the SAME transaction as the dial):
+
     assert_not_suppressed       re-check, for a number suppressed mid-batch
-    assert_dialable             the allowlist
     assert_campaign_running     exactly one campaign runs; none by default
     assert_under_daily_cap      the CAMPAIGN's new-leads-per-day cap
-    QUEUE_MEMBERSHIP            pool_status='active' - queued
-    CAMPAIGN_MEMBERSHIP         only the RUNNING campaign's leads dial
+    assert_dialable             the allowlist
+
+⚠️ THIS LIST IS LOAD-BEARING - keep it in step with the code. It previously
+omitted STAGE_DIALABLE and REPLIED_GUARD, both of which sit in the query
+twenty lines below, and named a CAMPAIGN_JOIN that does not exist anywhere in
+the repo. A module's own index of "everything that can stop a call" that is
+missing two things which stop calls is worse than no index: the archive return
+bug (a returned lead stuck at L2, undialable forever) was invisible partly
+because STAGE_DIALABLE was not listed here as a thing a lead has to pass.
 """
 
 import time

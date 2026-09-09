@@ -183,3 +183,58 @@ def test_no_test_writes_a_table_production_never_touches():
         + '\n'.join(f'  {t!r} <- {", ".join(sorted(f))}' for t, f in sorted(dead.items()))
         + '\n\nA dead table that still looks authoritative is worse than no '
           'table - the assertions built on it check nothing.')
+
+
+# ==========================================================================
+# AUTO-SEND IS BUILT AND DELIBERATELY NOT WIRED
+# ==========================================================================
+
+def test_the_worker_does_not_run_the_sender_loop():
+    """
+    ⚠️ THIS ASSERTS A DECISION, NOT A BUG.
+
+    api/sender.py is complete: due() selects leads whose campaign is on
+    email_1_mode='auto' and whose delay has elapsed, send_one() re-checks the
+    whole gate in-transaction, run_once() loops them. api/autosend.py is the
+    gate, with seven exclusions and their own break definitions (41-47).
+
+    NOTHING CALLS sender.run_once(). The worker ticks drain, scorer, drafts,
+    alerts, digest and the archive sweep - not the sender. The only production
+    caller of the module is web.py, which calls send_manual(): the "Send now"
+    button a person presses after reading the draft.
+
+    That is deliberate while the drip is parked. The brief is explicit that
+    reply detection is a HARD GATE - "nothing auto-sends if detection is
+    unavailable" - and reply ingest is not built. So email_1_mode='auto'
+    changes nothing today, and that is the safe state, not an oversight.
+
+    WITHOUT THIS TEST it reads as a missing line rather than a decision, and
+    the fix looks like a one-line addition to worker.main(). Adding that line
+    turns on automated outbound email to law firms. If you are here because
+    this test failed, you are making that decision - make it deliberately,
+    with the reply gate in place, and rewrite this test to say so.
+    """
+    src = open(os.path.join(ROOT, 'api', 'worker.py')).read()
+    tree = ast.parse(src)
+
+    # Static, not behavioural: ask whether the CODE references it at all,
+    # rather than whether one run happened not to reach it.
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            called.add(node.attr)
+        elif isinstance(node, ast.Name):
+            called.add(node.id)
+
+    assert 'sender' not in called, (
+        'api/worker.py now references the sender. If you have wired the '
+        'auto-send loop, that is a decision to turn on automated outbound '
+        'email to law firms - see this test\'s docstring, confirm reply '
+        'detection is in place, and update it deliberately.')
+
+    # And the positive half: the manual path IS wired, so this test cannot
+    # pass merely because the sender was deleted.
+    web = open(os.path.join(ROOT, 'api', 'web.py')).read()
+    assert 'send_manual' in web, \
+        'the "Send now" button lost its wiring - this test would then be ' \
+        'asserting nothing'

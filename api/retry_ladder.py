@@ -5,34 +5,41 @@ A ladder is an ordered list of rungs, one per attempt. After the Nth attempt
 the dialer waits rung N. Busy is deliberately the shortest - a busy signal
 means a human is there, which is the best signal in the list.
 
-A RUNG IS ONE OF TWO THINGS, and it has to be, because they are not
-interchangeable:
+A RUNG IS A DURATION AND NOTHING ELSE: '15m', '4h', '3d'.
 
-    '15m' '4h' '3d'   a duration from now
-    'next_day'        09:00 tomorrow in the CALLED PARTY's timezone
+THE CALLING WINDOW IS THE CLAMP, NOT THE LADDER. next_attempt_at is a
+NOT-BEFORE gate, never a scheduled dial time. windows.LEGAL_WINDOW and
+windows.PREFERENCE_WINDOW are ANDed into the selection query and evaluated in
+the called party's local time, so NO rung value can cause a call outside the
+allowed hours. A rung that lands at 03:00 simply waits until the window opens.
 
-"4 hours" cannot express "tomorrow morning their time", and a fixed '24h'
-lands at whatever hour the previous attempt happened to fall on - dial at
-19:50 and the next attempt is 19:50, which the calling window then pushes to
-the following morning anyway, a day later than intended.
+THIS IS WHY 'next_day' WAS REMOVED (2026-09-09). It computed 09:00 tomorrow in
+the lead's timezone, and the argument for it was that a plain '1d' after a
+19:50 dial lands at 19:50, which the window then pushes to the following
+morning - a day later than intended. That is true only when the preference
+window is WIDE enough to have dialed at 19:50 in the first place. Under the
+default 09:00-17:00 it cannot happen: the previous attempt was inside the
+window, so the same local time tomorrow is inside it too.
+
+So it bought nothing at the configured hours and cost the only raw-SQL
+fragment in this module, a special case in three functions, and its own break
+definition. If the evening window is ever widened, reconsider it - and bring
+it back with a test that widens the window, because that is the only condition
+under which it is observable at all. (Same shape as masked guard #1 in
+README.md.)
 
 EVERY VALUE IS BOUND, never interpolated. The old BACKOFF dict interpolated
-its intervals as SQL because the voicemail rule referenced l.timezone and a
-bound interval cannot. Naming the two shapes separately fixes that: the
-timezone expression is a fixed fragment with no caller data in it, and the
-duration is a bound ::interval.
+its intervals as SQL because the voicemail rule referenced l.timezone; with
+one rung shape there is no caller data in the fragment at all.
 """
 
 import re
 
-NEXT_DAY = 'next_day'
-NEXT_DAY_AT = '09:00'
-
 # Sean's values, and the defaults on every new campaign.
 DEFAULTS = {
-    'busy':      ['15m', '1h', '4h', NEXT_DAY],
+    'busy':      ['15m', '1h', '4h', '1d'],
     'no_answer': ['2h', '8h', '1d', '3d'],
-    'voicemail': [NEXT_DAY],
+    'voicemail': ['1d'],
 }
 
 # outcome -> the campaign column holding its ladder
@@ -51,40 +58,41 @@ _UNITS = {'m': 'minutes', 'h': 'hours', 'd': 'days'}
 _RUNG = re.compile(r'^(\d+)([mhd])$')
 
 
+# The gap used when a rung cannot be read at all. Deliberately the widest
+# rung in the defaults, not a tight one: an unreadable ladder is an UNKNOWN,
+# and unknown must never dial faster than configured.
+FALLBACK_RUNG = '1d'
+
+
 class BadLadder(ValueError):
     pass
 
 
-def parse(rung: str):
+def parse(rung: str) -> str:
     """
-    ('next_day', None) or ('interval', '15 minutes').
+    '15m' -> '15 minutes'. A Postgres interval string, ready to BIND.
 
     Raises rather than guessing. A rung nobody can parse must not silently
     become a default gap - that is how a firm gets called four times in a
     morning while the screen says four hours.
     """
     r = (rung or '').strip().lower()
-    if r == NEXT_DAY:
-        return (NEXT_DAY, None)
     m = _RUNG.match(r)
     if not m:
         raise BadLadder(
             f'{rung!r} is not a retry gap. Use a number with m, h or d '
-            f'(15m, 4h, 3d) or the word next_day.')
+            f'(15m, 4h, 3d).')
     n = int(m.group(1))
     if n < 1:
         raise BadLadder(f'{rung!r} is not a wait at all - a zero gap would '
                         f'redial immediately.')
-    return ('interval', f'{n} {_UNITS[m.group(2)]}')
+    return f'{n} {_UNITS[m.group(2)]}'
 
 
 def minutes(rung: str) -> int:
-    """Roughly how long a rung is, for ORDERING ONLY. next_day is treated as
-    a day because that is what it is for - it must not sort before 4h."""
-    kind, val = parse(rung)
-    if kind == NEXT_DAY:
-        return 24 * 60
-    n, unit = val.split()
+    """How long a rung is, for ORDERING ONLY - validate() uses it to refuse a
+    ladder that goes backwards."""
+    n, unit = parse(rung).split()
     return int(n) * {'minutes': 1, 'hours': 60, 'days': 1440}[unit]
 
 
@@ -130,16 +138,13 @@ def rung_for(ladder, attempts: int) -> str:
 
 def sql_for(rung: str):
     """
-    (sql_fragment, params) for next_attempt_at. `l` is the leads alias.
+    (sql_fragment, params) for next_attempt_at.
 
-    The fragment contains NO caller data - the duration and the hour are
-    bound. That is the whole reason the two shapes are named separately.
+    The fragment is a CONSTANT and contains no caller data whatsoever - the
+    duration is bound. There is exactly one rung shape, so there is exactly
+    one fragment; the calling window handles the hours.
     """
-    kind, val = parse(rung)
-    if kind == NEXT_DAY:
-        return ("(((now() AT TIME ZONE l.timezone)::date + 1) + %s::time)"
-                " AT TIME ZONE l.timezone", [NEXT_DAY_AT])
-    return ('now() + %s::interval', [val])
+    return ('now() + %s::interval', [parse(rung)])
 
 
 def reachable(ladder, max_attempts: int) -> int:

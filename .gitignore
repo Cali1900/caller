@@ -10,3 +10,5 @@ __pycache__/
 .break_pass_state/
 .break_pass_state.lock
 .break_pass_progress
+.test_run.lock
+.break_pass_last

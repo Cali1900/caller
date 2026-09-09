@@ -252,10 +252,12 @@ def _retry(conn, lead_id: str, reason: str) -> None:
                 retry_ladder.rung_for(ladder, attempts))
         except retry_ladder.BadLadder as exc:
             # FAIL SLOW, never fast. An unreadable rung must not become a
-            # tight gap; it becomes the widest rung we know.
+            # tight gap; it becomes the widest rung in the default ladders.
+            # UNKNOWN MUST NEVER DIAL FASTER THAN CONFIGURED - the same
+            # property worker.next_gap() holds for spacing.
             print(f'[drain] bad retry rung for {reason}: {exc} - '
-                  f'falling back to next_day', flush=True)
-            frag, frag_params = retry_ladder.sql_for(retry_ladder.NEXT_DAY)
+                  f'falling back to {retry_ladder.FALLBACK_RUNG}', flush=True)
+            frag, frag_params = retry_ladder.sql_for(retry_ladder.FALLBACK_RUNG)
 
         if attempts >= cap:
             cur.execute(

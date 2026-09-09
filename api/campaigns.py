@@ -41,8 +41,9 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  'sender_email', 'sender_name', 'sender_company_line',
                  'daily_cap', 'max_concurrent', 'dial_interval_min',
                  'dial_interval_max',
-                 # Retry ladders, per outcome. One rung per attempt; a rung is
-                 # a duration or next_day. See api/retry_ladder.py.
+                 # Retry ladders, per outcome. One rung per attempt; a rung
+                 # is a duration (15m/4h/3d). The calling window clamps the
+                 # hours, so the ladder never needs to. See api/retry_ladder.py.
                  'retry_busy', 'retry_no_answer', 'retry_voicemail',
                  'max_attempts',
                  # Email 1: manual or auto, and how long after the call.
@@ -167,7 +168,8 @@ def running_drips():
             return cur.fetchall()
 
 
-def create(name: str, template_from=None, type: str = 'call', **overrides):
+def create(name: str, template_from=None, campaign_type: str = 'call',
+           **overrides):
     """
     A new campaign, seeded Mon-Fri 09:00-17:00.
 
@@ -179,13 +181,18 @@ def create(name: str, template_from=None, type: str = 'call', **overrides):
     - so passing it through there would drop it silently and every drip would
     be created as a call campaign. That is the fault update() already raises
     for; here it is avoided by not routing it through the filter at all.
+
+    The parameter is `campaign_type`, not `type`: this is the one function that
+    decides a new campaign's whole shape, and shadowing a builtin inside it is
+    a trap for whoever grows it next. The COLUMN is still `type`.
     """
-    if type not in ('call', 'drip'):
-        raise ValueError(f"campaign type must be 'call' or 'drip', got {type!r}")
+    if campaign_type not in ('call', 'drip'):
+        raise ValueError(
+            f"campaign type must be 'call' or 'drip', got {campaign_type!r}")
     base = get(template_from) if template_from else None
     vals = {
         'name': name.strip(),
-        'type': type,
+        'type': campaign_type,
         'notes': overrides.get('notes') or '',
         'agent_l1_version': (base or {}).get('agent_l1_version', 9),
         'sender_email': (base or {}).get('sender_email',
@@ -213,7 +220,7 @@ def create(name: str, template_from=None, type: str = 'call', **overrides):
                 f'INSERT INTO campaign_configs ({cols}) VALUES ({ph}) RETURNING *',
                 list(vals.values()))
             row = cur.fetchone()
-            src = windows_for(row['campaign_id'], cur=cur, source=template_from)
+            src = seed_windows_from(source=template_from, cur=cur)
             for dow, enabled, start, end in src:
                 cur.execute(
                     """INSERT INTO campaign_windows
@@ -223,9 +230,15 @@ def create(name: str, template_from=None, type: str = 'call', **overrides):
             return row
 
 
-def windows_for(campaign_id, cur=None, source=None):
-    """Rows to seed a new campaign's week - copied from a template, else the
-    Mon-Fri default."""
+def seed_windows_from(source=None, cur=None):
+    """
+    Rows to seed a NEW campaign's week - copied from `source`, else the Mon-Fri
+    default.
+
+    Renamed from windows_for(campaign_id, ...), which took a campaign_id it
+    never used and read as "the windows for this campaign" - which is
+    windows(), a different function returning a different thing.
+    """
     if source and cur is not None:
         cur.execute("""SELECT dow, enabled, start_time, end_time
                          FROM campaign_windows WHERE campaign_id = %s

@@ -18,8 +18,48 @@ can reconstruct it.
     rows into one. A suppressed number coming back out of archive and being
     dialed is the failure this entire system exists to prevent.
 
-    The sweep therefore only ever writes to `leads`. It does not DELETE from
-    suppression or email_do_not_send, and it must never learn how.
+    The sweep therefore only ever writes to `leads` and `archived_contacts`.
+    It does not DELETE from suppression or email_do_not_send, and it must
+    never learn how.
+
+THE RETURN CLEARS GATES AND KEEPS FACTS.
+
+    A GATE decides whether something may happen next, and a stale gate is a
+    lead that can never be worked again. A FACT is something we paid a call to
+    learn, and six months does not make it untrue.
+
+      cleared   stage               blocks the dialer (STAGE_DIALABLE = L1)
+                emailed_at/_by      blocks mark_emailed() - it is write-once
+                dm_email_confirmed  read by autosend.eligibility(),
+                                    drafts.generate_for() and advance_to_l2().
+                                    Not a fact about the firm: it records that
+                                    WE verified the address, and that
+                                    verification is stale at six months even
+                                    when the address is not.
+
+      kept      dm_email, dm_name, dm_title, website, gatekeeper_name,
+                demands_per_month, notes, tags, first_dialed_at
+
+    The lead comes back holding the address and needing it re-confirmed, which
+    is what the next call is for: it either re-confirms the contact or updates
+    it. Nothing auto-advances a returned lead to L2 - advance_to_l2() is only
+    called on a fresh capture (drain) or a person ticking confirmed (web).
+
+    replied_at IS CLEARED TOO (2026-09-09), for the same reason and after the
+    same argument. dialer.REPLIED_GUARD is "AND l.replied_at IS NULL", so a
+    lead that replied once, was archived and returned could never be dialed
+    again - identical shape to the stage bug, in this same function.
+
+    Six months on, a firm that said "not interested" is a legitimate prospect
+    again; that is the whole premise of archive_reason='refused' having a
+    return date at all. And it defeats NO exclusion list, because neither list
+    is keyed on the lead: someone who asked to be REMOVED is held by
+    suppression (phone) or email_do_not_send (address) and stays held.
+
+    The FACT survives the gate: replied_at, reply_note and replied_by are
+    snapshotted into archived_contacts, so "they told us no in March, and here
+    is what they said" is still readable on the lead that just came back -
+    which is exactly what a person needs before dialing it again.
 """
 
 import datetime
@@ -100,6 +140,65 @@ def archive(lead_id, reason: str, by: str = 'system', note: str = ''):
             return out
 
 
+# What the return is about to destroy, kept as history. NOT a gate: nothing
+# reads archived_contacts to decide whether to dial or send. The email_clicks
+# rows are NOT deleted - minutes_since_sent was computed and stored at click
+# time, so those timings stay true after emailed_at is cleared.
+_SNAPSHOT = """
+    INSERT INTO archived_contacts
+        (lead_id, company, dm_name, dm_email, dm_email_confirmed,
+         emailed_at, emailed_by, click_count, first_click_minutes,
+         replied_at, reply_note, replied_by,
+         archive_reason, archived_at)
+    SELECT l.lead_id, l.company, l.dm_name, l.dm_email, l.dm_email_confirmed,
+           l.emailed_at, l.emailed_by,
+           coalesce(c.n, 0), c.first_minutes,
+           l.replied_at, l.reply_note, l.replied_by,
+           l.archive_reason, l.archived_at
+      FROM leads l
+      LEFT JOIN (SELECT lead_id, count(*) AS n,
+                        min(minutes_since_sent) AS first_minutes
+                   FROM email_clicks GROUP BY lead_id) c
+             ON c.lead_id = l.lead_id
+     WHERE l.lead_id = ANY(%s::uuid[])
+       -- Only worth a row if something actually happened worth remembering:
+       -- a send, an address we hold, or a reply we are about to clear.
+       AND (l.emailed_at IS NOT NULL OR l.dm_email IS NOT NULL
+            OR l.replied_at IS NOT NULL)
+"""
+
+# The gates the return clears. Kept as ONE fragment used by both the sweep and
+# unarchive(), because two copies of this list is how they drift apart.
+_CLEAR_GATES = """
+                          -- GATES, cleared. Each of these blocks the lead
+                          -- FOREVER if it survives the return:
+                          --   stage      -> dialer.STAGE_DIALABLE is L1-only,
+                          --                 and nothing ever writes L1 back
+                          --   emailed_at -> mark_emailed() is write-once
+                          --   dm_email_confirmed -> autosend, drafts, L1->L2
+                          --   replied_at -> dialer.REPLIED_GUARD, and
+                          --                 autosend exclusion 5
+                          stage = 'L1',
+                          stage_changed_at = now(),
+                          emailed_at = NULL,
+                          emailed_by = NULL,
+                          dm_email_confirmed = NULL,
+                          replied_at = NULL,
+                          reply_note = NULL,
+                          replied_by = NULL,
+                          -- FACTS are kept: dm_email, dm_name, dm_title,
+                          -- website, gatekeeper_name, demands_per_month,
+                          -- notes and tags. We paid a call to learn them.
+"""
+
+
+def _snapshot_contacts(cur, lead_ids) -> None:
+    """Preserve the send record for these leads before the return clears it."""
+    if not lead_ids:
+        return
+    cur.execute(_SNAPSHOT, ([str(i) for i in lead_ids],))
+
+
 def due(limit: int = 500):
     """Leads past returns_at. Read-only - the sweep is the only writer."""
     with db.get_conn() as conn:
@@ -136,6 +235,24 @@ def return_due(limit: int = 500) -> dict:
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
+            # Claim the due rows FIRST, so the snapshot and the clear act on
+            # exactly the same set and a second sweep cannot take them.
+            cur.execute(
+                """SELECT lead_id FROM leads
+                    WHERE status = 'archived'
+                      AND returns_at IS NOT NULL AND returns_at <= now()
+                    ORDER BY returns_at
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED""", (limit,))
+            claimed = [r['lead_id'] for r in cur.fetchall()]
+            if not claimed:
+                return {'returned': 0, 'reasons': []}
+
+            # HISTORY BEFORE THE CLEAR. "We emailed this firm in September and
+            # heard nothing" has to survive the return, or the reason the lead
+            # was archived is unreconstructable the moment it comes back.
+            _snapshot_contacts(cur, claimed)
+
             cur.execute(
                 """UPDATE leads
                       SET status = 'new',
@@ -147,16 +264,11 @@ def return_due(limit: int = 500) -> dict:
                           -- not "no next attempt", it is a constraint error.
                           next_attempt_at = now(),
                           archived_at = NULL,
-                          returns_at = NULL,
+                          returns_at = NULL,""" + _CLEAR_GATES + """
                           updated_at = now()
-                    WHERE lead_id IN (
-                        SELECT lead_id FROM leads
-                         WHERE status = 'archived'
-                           AND returns_at IS NOT NULL AND returns_at <= now()
-                         ORDER BY returns_at
-                         LIMIT %s
-                         FOR UPDATE SKIP LOCKED)
-                RETURNING lead_id, archive_reason""", (limit,))
+                    WHERE lead_id = ANY(%s::uuid[])
+                RETURNING lead_id, archive_reason""",
+                ([str(i) for i in claimed],))
             rows = cur.fetchall()
             for r in rows:
                 cur.execute(
@@ -165,10 +277,29 @@ def return_due(limit: int = 500) -> dict:
                                %s)""",
                     (r['lead_id'],
                      f'rested {RETURN_AFTER.days} days after being archived '
-                     f'({r["archive_reason"]}). Suppression and the email '
-                     f'do-not-send list are untouched.'))
+                     f'({r["archive_reason"]}). Back at L1 and dialable; the '
+                     f'address is kept but needs re-confirming. The old send '
+                     f'record is in archived_contacts. Suppression and the '
+                     f'email do-not-send list are untouched.'))
             return {'returned': len(rows),
                     'reasons': sorted({r['archive_reason'] for r in rows})}
+
+
+def contacts(lead_id):
+    """
+    Every send record this lead had before a return cleared it, newest first.
+
+    HISTORY, NEVER A GATE. Nothing may read this to decide whether to dial or
+    send - that is what suppression, email_do_not_send and the live row are
+    for. It exists so "we emailed this firm in September and heard nothing"
+    is still answerable after the lead comes back looking fresh.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT * FROM archived_contacts
+                            WHERE lead_id = %s
+                            ORDER BY returned_at DESC""", (lead_id,))
+            return cur.fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +342,20 @@ def unarchive(lead_id, by: str = 'operator'):
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
+            # Same order as the sweep: history first, then clear. A hand pull
+            # and the nightly sweep must leave a lead in the SAME state, or
+            # "why is this one different" becomes unanswerable.
+            cur.execute("SELECT lead_id FROM leads WHERE lead_id = %s "
+                        "AND status = 'archived' FOR UPDATE", (lead_id,))
+            if cur.fetchone() is None:
+                return None
+            _snapshot_contacts(cur, [lead_id])
             cur.execute(
                 """UPDATE leads
                       SET status = 'new', pool_status = 'pool',
                           campaign_id = NULL, attempts = 0,
                           next_attempt_at = now(),
-                          archived_at = NULL, returns_at = NULL,
+                          archived_at = NULL, returns_at = NULL,""" + _CLEAR_GATES + """
                           updated_at = now()
                     WHERE lead_id = %s AND status = 'archived'
                 RETURNING lead_id, archive_reason""", (lead_id,))
@@ -227,6 +366,8 @@ def unarchive(lead_id, by: str = 'operator'):
                 """INSERT INTO activity (lead_id, kind, summary, detail)
                    VALUES (%s, 'archive', %s, %s)""",
                 (lead_id, f'returned from archive by {by}',
-                 f'was archived ({row["archive_reason"]}). Suppression and '
+                 f'was archived ({row["archive_reason"]}). Back at L1 and '
+                 f'dialable; the address is kept but needs re-confirming. The '
+                 f'old send record is in archived_contacts. Suppression and '
                  f'the email do-not-send list are untouched.'))
             return row

@@ -34,6 +34,12 @@ done
 [[ "$SIZE" =~ ^[0-9]+$ && $SIZE -ge 1 ]] || { echo "--size must be >= 1" >&2; exit 2; }
 
 PROGRESS=.break_pass_progress
+# THE COMPLETION RECORD. Without it, deleting PROGRESS on success made
+# "nothing recorded" mean BOTH "never ran" and "ran clean" - the two states you
+# most need to tell apart, indistinguishable. Same family as the GREEN with no
+# count and the pause that paused nothing: a report that reads as a
+# verification and carries no evidence.
+LAST=.break_pass_last
 TOTAL=$(ls scripts/breaks/*.py | wc -l)
 # The checkpoint is only valid for the set of definitions it was made against.
 # Adding or renaming a break shifts every index after it, so a resume against a
@@ -66,10 +72,22 @@ fi
 if [[ "$MODE" == status ]]; then
   if [[ $done_through -ge $TOTAL ]]; then
     echo "all $TOTAL breaks passed; no chunk outstanding"
-  elif [[ $done_through -eq 0 ]]; then
-    echo "nothing recorded - the next run starts at break 1 of $TOTAL"
+  elif [[ $done_through -gt 0 ]]; then
+    echo "IN PROGRESS: breaks 1-$done_through of $TOTAL passed; the next run starts at $((done_through + 1))"
+  elif [[ -f "$LAST" ]]; then
+    # A COMPLETED pass, not an absent one.
+    read -r l_when l_fp l_total l_suite < "$LAST" || true
+    if [[ "$l_fp" == "$FINGERPRINT" ]]; then
+      echo "COMPLETE: all $l_total breaks green at $l_when ($l_suite)"
+      echo "  the break set is unchanged since, so that result still stands"
+    else
+      echo "STALE: last complete pass was $l_when ($l_total breaks, $l_suite),"
+      echo "  but the break set has CHANGED since - $TOTAL definitions now."
+      echo "  That result does not cover the current set. Re-run."
+    fi
   else
-    echo "breaks 1-$done_through of $TOTAL passed; the next run starts at $((done_through + 1))"
+    echo "NEVER RUN TO COMPLETION - no checkpoint and no completion record."
+    echo "  The next run starts at break 1 of $TOTAL."
   fi
   exit 0
 fi
@@ -97,5 +115,26 @@ for ((from = done_through + 1; from <= TOTAL; from += SIZE)); do
 done
 
 rm -f "$PROGRESS"
+# RECORD THE COMPLETION rather than only erasing the progress. Fingerprinted,
+# so a later run can say "that result no longer covers the current break set"
+# instead of quietly implying it does.
+# MATCH THE BARE FORM. pytest prints "==== 607 passed ====" on a terminal and
+# a bare "607 passed, 1 skipped in 250s" under -q with no tty. Expecting only
+# the decorated form is precisely the bug 9752863 fixed one line up the stack -
+# and this record reproduced it on its first real run, writing
+# "suite-count-unknown" after a genuinely green pass. A completion record with
+# no count is the thing this file exists to stop.
+suite=$(grep -oE '[0-9]+ passed[^)]*' /tmp/bp_out 2>/dev/null | tail -1 \
+        | sed 's/ (.*$//; s/[[:space:]]*$//')
+if [[ -z "$suite" || ! "$suite" =~ ^[0-9]+\ passed ]]; then
+  echo "REFUSING TO RECORD COMPLETION: the suite passed but its count could" >&2
+  echo "not be parsed from /tmp/bp_out. A record with no number cannot tell a" >&2
+  echo "full suite from a collection error that ran three tests." >&2
+  exit 1
+fi
+printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$FINGERPRINT" \
+       "$TOTAL" "$suite" > "$LAST"
+sync
 echo
 echo "BREAK PASS COMPLETE - all $TOTAL breaks, and the full suite green."
+echo "recorded in $LAST"

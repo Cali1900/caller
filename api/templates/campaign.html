@@ -102,10 +102,11 @@
       {% endif %}
       {% endfor %}
       <p class="dim" style="margin-bottom:0">One rung per attempt, in order.
-         A rung is a gap (<code>15m</code>, <code>4h</code>, <code>3d</code>)
-         or <code>next_day</code> &mdash; 09:00 the next morning in
-         <b>their</b> timezone, not ours. Busy is shortest on purpose: a busy
-         signal means a human is there.</p>
+         A rung is a gap &mdash; <code>15m</code>, <code>4h</code>,
+         <code>3d</code>. The calling window already clamps the hours, so a
+         rung never has to: a gap landing outside your hours just waits for
+         them to open. Busy is shortest on purpose: a busy signal means a
+         human is there.</p>
     </div>
   </div>
 

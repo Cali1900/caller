@@ -120,6 +120,14 @@ Starting values: 0, 4, 10, 21 days.
 
 ### Clicks are tracked PER STEP
 
+⚠️ **TODAY'S CODE IS PER-LEAD, AND THIS SECTION IS THE CHANGE REQUIRED.**
+`leads.click_token` is a single column and `clicks.token_for()` generates ONE
+token per lead, reused for every send. That was the right call for a single
+manual email and it is not settled — building the drip means moving the token
+onto the send, which is a schema change, not a tweak. Decided 2026-09-09: the
+per-step design below wins, because step attribution answers a question
+time-since-send cannot. Parked with the rest of the drip.
+
 Each step's sample link carries its own token, so a click attributes to the
 step that produced it. If step 1 pulls every click, the follow-ups are noise;
 if step 3 does, the opener needs rewriting. A per-lead count cannot tell those

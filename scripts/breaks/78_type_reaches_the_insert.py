@@ -9,5 +9,5 @@ TARGET = 'api/campaigns.py'
 EXPECT = 'test_type_is_not_silently_dropped_by_the_override_filter'
 LABEL = 'route campaign type through the CONFIG_FIELDS filter'
 OLD = """        'name': name.strip(),
-        'type': type,"""
+        'type': campaign_type,"""
 NEW = """        'name': name.strip(),"""

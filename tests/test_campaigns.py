@@ -395,8 +395,8 @@ def test_many_drips_run_at_once(db):
     instead of a reason. A lead's sequence belongs to the lead, not to
     whichever call campaign sourced it, so many drips is the normal case.
     """
-    a = campaigns.create('T-drip-a', type='drip')
-    b = campaigns.create('T-drip-b', type='drip')
+    a = campaigns.create('T-drip-a', campaign_type='drip')
+    b = campaigns.create('T-drip-b', campaign_type='drip')
     campaigns.start(a['campaign_id'])
     campaigns.start(b['campaign_id'])      # must NOT raise
     assert {c['name'] for c in campaigns.running_drips()} == {'T-drip-a', 'T-drip-b'}
@@ -411,7 +411,7 @@ def test_a_running_drip_does_not_block_or_masquerade_as_the_call_campaign(db):
     three mean "the campaign that is dialing". Handing them a drip gives the
     dialer a drip's cap and windows.
     """
-    d = campaigns.create('T-drip-solo', type='drip')
+    d = campaigns.create('T-drip-solo', campaign_type='drip')
     campaigns.start(d['campaign_id'])
     assert campaigns.running() is None, 'a drip is not the dialing campaign'
 
@@ -425,7 +425,7 @@ def test_a_running_drip_does_not_block_or_masquerade_as_the_call_campaign(db):
 def test_bare_stop_stops_dialing_and_leaves_the_drips_running(db):
     """stop() with no argument has always meant "stop dialing". Without the
     type scope it would silently stop every drip as well."""
-    d = campaigns.create('T-drip-keep', type='drip')
+    d = campaigns.create('T-drip-keep', campaign_type='drip')
     c = campaigns.create('T-call-go')
     campaigns.start(d['campaign_id'])
     campaigns.start(c['campaign_id'])
@@ -445,7 +445,7 @@ def test_type_cannot_be_edited_after_creation(db):
 
 def test_create_refuses_a_type_that_is_not_call_or_drip(db):
     with pytest.raises(ValueError):
-        campaigns.create('T-bad', type='email')
+        campaigns.create('T-bad', campaign_type='email')
 
 
 def test_type_is_not_silently_dropped_by_the_override_filter(db):
@@ -455,6 +455,6 @@ def test_type_is_not_silently_dropped_by_the_override_filter(db):
     every drip would be created as a call campaign, and the only symptom
     would be a drip that refuses to start alongside another one.
     """
-    c = campaigns.create('T-drip-kw', type='drip')
+    c = campaigns.create('T-drip-kw', campaign_type='drip')
     assert campaigns.get(c['campaign_id'])['type'] == 'drip', \
         'type must reach the INSERT, not be filtered out on the way'

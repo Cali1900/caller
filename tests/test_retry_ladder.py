@@ -3,8 +3,11 @@ RETRY LADDERS.
 
 The bug this replaces: BACKOFF was flat. busy 15m and no_answer 2h whatever
 the attempt, so four attempts meant four calls to one firm inside eight
-hours. The ladder has to actually escalate, and 'next_day' has to land in the
-CALLED PARTY's morning rather than ours.
+hours. The ladder has to actually escalate.
+
+A RUNG IS A DURATION AND NOTHING ELSE. The 'next_day' rung was removed on
+2026-09-09: the calling window is the clamp, not the ladder, so no rung value
+can place a call outside the allowed hours and none of them needs to try.
 """
 import datetime
 
@@ -49,12 +52,15 @@ def _retry_after(db, lid, attempts, reason):
 # the grammar
 # --------------------------------------------------------------------------
 
-def test_a_rung_is_a_duration_or_next_day_and_nothing_else():
-    assert rl.parse('15m') == ('interval', '15 minutes')
-    assert rl.parse('4h') == ('interval', '4 hours')
-    assert rl.parse('3d') == ('interval', '3 days')
-    assert rl.parse('next_day')[0] == 'next_day'
-    for bad in ('4 hours', 'tomorrow', '', 'h', '0m', '-2h', 'next day'):
+def test_a_rung_is_a_duration_and_nothing_else():
+    assert rl.parse('15m') == '15 minutes'
+    assert rl.parse('4h') == '4 hours'
+    assert rl.parse('3d') == '3 days'
+    # 'next_day' was a rung until 2026-09-09 and must now be refused like any
+    # other unreadable value - accepting it silently would leave live ladders
+    # parsing to nothing after the migration.
+    for bad in ('4 hours', 'tomorrow', '', 'h', '0m', '-2h', 'next_day',
+                'next day'):
         with pytest.raises(rl.BadLadder):
             rl.parse(bad)
 
@@ -80,12 +86,27 @@ def test_a_ladder_that_goes_backwards_is_refused(db):
         campaigns.update(running_campaign_id(), retry_no_answer=['2h', '8h', '1h'])
 
 
-def test_next_day_sorts_as_a_day_not_as_zero():
-    """It has no number in it. Treated as 0 it would make every ladder
-    ending in next_day read as going backwards and be refused."""
-    assert rl.minutes('next_day') > rl.minutes('4h')
-    assert rl.validate(['15m', '1h', '4h', 'next_day']) == \
-        ['15m', '1h', '4h', 'next_day']
+def test_the_default_ladders_are_valid_and_escalate():
+    """The defaults have to survive validate() - a shipped ladder that the
+    validator refuses is a campaign that cannot be saved."""
+    for outcome, ladder in rl.DEFAULTS.items():
+        assert rl.validate(ladder) == ladder, outcome
+    assert rl.DEFAULTS['busy'][0] == '15m', 'busy is shortest: a human is there'
+
+
+def test_the_fallback_rung_is_the_widest_not_the_tightest():
+    """An unreadable rung is an UNKNOWN, and unknown must never dial faster
+    than configured - the same property worker.next_gap() holds for spacing."""
+    assert rl.minutes(rl.FALLBACK_RUNG) >= max(
+        rl.minutes(r) for r in rl.DEFAULTS['busy'][:-1])
+
+
+def test_the_sql_fragment_carries_no_caller_data():
+    """One rung shape means one constant fragment. The duration is BOUND."""
+    frag, params = rl.sql_for('4h')
+    assert frag == 'now() + %s::interval'
+    assert params == ['4 hours']
+    assert '4' not in frag and 'timezone' not in frag
 
 
 # --------------------------------------------------------------------------
@@ -131,70 +152,59 @@ def test_the_ladder_holds_at_its_last_rung_rather_than_falling_off(db):
 
 
 # --------------------------------------------------------------------------
-# next_day, in THEIR timezone
+# the ladder does NOT clamp the hour - the calling window does
 # --------------------------------------------------------------------------
 
-def test_next_day_lands_in_the_called_partys_morning_not_ours(db):
+def test_the_ladder_is_timezone_free(db):
     """
-    ⚠️ THE ONE THAT CANNOT BE A PLAIN NUMBER OF HOURS.
+    ⚠️ THIS REPLACES test_next_day_lands_in_the_called_partys_morning_not_ours.
 
-    A fixed 24h lands at whatever hour the last attempt fell on - dial at
-    19:50 and the retry is 19:50, which the calling window then pushes to the
-    following morning, a day later than intended.
+    The 'next_day' rung computed 09:00 tomorrow in the lead's timezone. It was
+    removed on 2026-09-09 because the CALLING WINDOW is the clamp: next_attempt_at
+    is a NOT-BEFORE gate, and windows.LEGAL_WINDOW / PREFERENCE_WINDOW are ANDed
+    into the selection query in the called party's local time. No rung value can
+    place a call outside the allowed hours, so no rung needs to try.
 
-    Two leads, same moment, three timezones apart. Each must land at 09:00
-    in ITS OWN zone, and the two must be different INSTANTS - if next_day
-    were computed once, in the server's zone, both rows would hold the same
-    timestamptz.
-
-    Note what is NOT asserted: a fixed three-hour gap. At 04:30 UTC it is
-    already tomorrow in New York and still today in Los Angeles, so "the
-    next day" is a different calendar day in each. Assuming a constant offset
-    is the same one-clock thinking this code exists to avoid.
+    Two leads three timezones apart, same rung, same moment, must now get the
+    SAME instant. This is the exact inverse of the old assertion, and it goes
+    red the moment anyone reintroduces timezone arithmetic into a rung.
     """
-    campaigns.update(running_campaign_id(), retry_voicemail=['next_day'],
+    campaigns.update(running_campaign_id(), retry_voicemail=['1d'],
                      max_attempts=5)
     east = _lead(db, phone_e164='+15552250020', timezone=NY)
     west = _lead(db, phone_e164='+15552250021', timezone=LA)
     e = _retry_after(db, east, 1, 'voicemail')
     w = _retry_after(db, west, 1, 'voicemail')
 
-    assert e['next_attempt_at'] != w['next_attempt_at'], \
-        'both leads got the same instant - next_day was computed once, in ' \
-        'one timezone, rather than in each lead\'s own'
-
-    with db.cursor() as cur:
-        for lid, tz in ((east, NY), (west, LA)):
-            cur.execute("""SELECT (next_attempt_at AT TIME ZONE %s)::time AS t,
-                                  (next_attempt_at AT TIME ZONE %s)::date AS d,
-                                  (now() AT TIME ZONE %s)::date AS today
-                             FROM leads WHERE lead_id = %s""",
-                        (tz, tz, tz, lid))
-            r = cur.fetchone()
-            assert str(r['t']) == '09:00:00', \
-                f'{tz} lead is due at {r["t"]} local, not 09:00'
-            assert r['d'] == r['today'] + datetime.timedelta(days=1), \
-                f'{tz} lead is due {r["d"]}, not the day after {r["today"]}'
+    delta = abs((e['next_attempt_at'] - w['next_attempt_at']).total_seconds())
+    assert delta < 5, (
+        'the two leads got different instants for the same rung - a rung is a '
+        'duration from now and must not depend on the lead\'s timezone')
 
 
-def test_next_day_is_nine_in_the_morning_there(db):
-    campaigns.update(running_campaign_id(), retry_voicemail=['next_day'],
+def test_a_rung_lands_exactly_one_interval_from_now(db):
+    """
+    No rounding, no clamping, no shifting to an hour someone considers
+    reasonable. The ladder says how long to WAIT; where that lands is the
+    calling window's business.
+    """
+    campaigns.update(running_campaign_id(), retry_voicemail=['4h'],
                      max_attempts=5)
     lid = _lead(db, phone_e164='+15552250022', timezone=NY)
-    _retry_after(db, lid, 1, 'voicemail')
+    row = _retry_after(db, lid, 1, 'voicemail')
     with db.cursor() as cur:
-        cur.execute("""SELECT (next_attempt_at AT TIME ZONE %s)::time AS t
-                         FROM leads WHERE lead_id = %s""", (NY, lid))
-        assert str(cur.fetchone()['t']) == '09:00:00'
+        cur.execute("SELECT now() + interval '4 hours' AS want")
+        want = cur.fetchone()['want']
+    assert abs((row['next_attempt_at'] - want).total_seconds()) < 60
 
 
 def test_no_caller_data_is_interpolated_into_the_sql():
     """
     BACKOFF interpolated its intervals because the voicemail rule referenced
-    l.timezone and a bound interval cannot. Naming the two shapes separately
-    is what removed that - so the fragment must carry no values at all.
+    l.timezone and a bound interval cannot. With one rung shape there is no
+    caller data in the fragment at all - so it must carry no values.
     """
-    for rung in ('15m', '4h', '3d', 'next_day'):
+    for rung in ('15m', '4h', '3d', '1d'):
         frag, params = rl.sql_for(rung)
         assert '%s' in frag and params, f'{rung} did not bind its value'
         for tok in ('15', '4', '3', 'minutes', 'hours', 'days', '09:00'):
@@ -214,7 +224,7 @@ def test_a_rung_only_counts_if_an_attempt_follows_it():
     of a setting - the exact fault that made deploy.sh report a pause it was
     not performing.
     """
-    ladder = ['15m', '1h', '4h', 'next_day']
+    ladder = ['15m', '1h', '4h', '1d']
     assert rl.reachable(ladder, 4) == 3
     assert rl.reachable(ladder, 5) == 4
     assert rl.reachable(ladder, 1) == 0
@@ -251,7 +261,7 @@ def test_the_screen_says_which_rungs_can_never_fire(client, db):
     like it did something.
     """
     cid = running_campaign_id()
-    campaigns.update(cid, retry_busy=['15m', '1h', '4h', 'next_day'],
+    campaigns.update(cid, retry_busy=['15m', '1h', '4h', '1d'],
                      max_attempts=4)
     # Whitespace-normalised: the template wraps, and asserting on the raw
     # bytes would make this test about line length rather than about what
@@ -269,7 +279,7 @@ def test_the_screen_says_which_rungs_can_never_fire(client, db):
 def test_a_ladder_is_typed_with_commas_or_spaces(client, db):
     cid = running_campaign_id()
     from api.web import _split_ladder
-    assert _split_ladder('15m, 1h,4h  next_day') == ['15m', '1h', '4h', 'next_day']
+    assert _split_ladder('15m, 1h,4h  1d') == ['15m', '1h', '4h', '1d']
     assert _split_ladder('') == []
 
 
@@ -286,9 +296,9 @@ def test_saving_a_bad_rung_says_which_one_and_changes_nothing(client, db):
         'dial_interval_min': c['dial_interval_min'],
         'dial_interval_max': c['dial_interval_max'],
         'max_attempts': c['max_attempts'],
-        'retry_busy': '15m, 1h, 4h, next_day',
+        'retry_busy': '15m, 1h, 4h, 1d',
         'retry_no_answer': '2h, tomorrow, 1d',
-        'retry_voicemail': 'next_day',
+        'retry_voicemail': '1d',
     }, follow_redirects=False)
     assert r.status_code == 303
     assert 'REJECTED' in r.headers['location']

@@ -840,8 +840,8 @@ def _retry_fields(max_attempts, busy, no_answer, voicemail) -> dict:
 
 
 def _split_ladder(raw: str):
-    """"15m, 1h, 4h, next_day" -> the rungs. Commas or spaces; a person
-    typing a ladder should not have to think about which."""
+    """"15m, 1h, 4h, 1d" -> the rungs. Commas or spaces; a person typing a
+    ladder should not have to think about which."""
     return [p for p in re.split(r'[,\s]+', (raw or '').strip()) if p]
 
 

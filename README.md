@@ -13,9 +13,14 @@ BUILD_BRIEF.md for the three load-bearing reasons.
 
 ## Dial spacing and windows — operator-controlled, no deploy
 
-Both live in the `settings` table and the `dialing_windows` table, edited on
-`/campaign`. **Env is only the first-boot seed** — changing an env var needs a
-container recreate, which is a deploy step.
+⚠️ **THE `settings` TABLE IS DELETED** (migration 015), and so is
+`api/settings.py`. Every one of these values now lives on the CAMPAIGN
+(`campaign_configs`), with the week in `campaign_windows`, edited on
+`/campaigns`. `tests/test_no_dead_config.py` asserts the module stays deleted.
+
+**Env is only the first-boot seed** — changing an env var needs a container
+recreate, which is a deploy step, and a recreate during calling hours is how
+you drop a call.
 
 | control | default | why |
 |---|---|---|
@@ -76,10 +81,15 @@ Removing the start button removed the thing that stopped *"add 500 leads"*
 becoming *"dial 500 now"*. **That was a guard by omission, and a guard by
 omission disappears the moment the ritual it depended on does.**
 
-It is replaced by one explicit setting, `dialing_enabled`, which **defaults to
-false**. Queueing a thousand leads with the switch off places zero calls — a
-test asserts exactly that with 500. It is checked in the selection query *and*
-before each dial, so pausing mid-batch stops leads already claimed.
+It is replaced by STARTING A CAMPAIGN, which is a deliberate act on
+`/campaigns` and **defaults to stopped**. (It was briefly a `dialing_enabled`
+settings key; that store is gone — see above.) Queueing a thousand leads with
+nothing running places zero calls — a test asserts exactly that with 500. It is
+checked in the selection query *and* before each dial, so pausing mid-batch
+stops leads already claimed.
+
+Exactly one CALL campaign runs at a time, enforced by the unique partial index
+`one_running_campaign`, scoped to `type='call'` so drips are not caught by it.
 
 `scripts/deploy.sh` is the only way to restart: it **pauses before restarting
 and resumes after**, with a `trap` so it resumes even if the build fails.
@@ -89,9 +99,17 @@ and resumes after**, with a `trap` so it resumes even if the build fails.
 **A guard is only tested if the test constructs a row that every OTHER filter
 would pass, so only the guard under test can exclude it.**
 
-Six times now a guard has been removed and the suite stayed green, because
+Repeatedly now, a guard has been removed and the suite stayed green because
 something else already excluded the same row. A test that passes for the wrong
 reason is worse than no test: it reports coverage that does not exist.
+
+**THE TABLE BELOW IS THE COUNT — it is exactly the rows you can read, and
+every row names the specific thing that masked the guard.** Do not restate the
+number in prose. It was written as six, nine and eleven in three different
+places, each stale the moment a row was added, and no record survived saying
+what the tenth and eleventh had been. A count nobody can reconstruct is the
+same failure as a GREEN with no number. Add a row, or the instance did not
+happen.
 
 | # | guard | what masked it |
 |---|---|---|
@@ -102,11 +120,16 @@ reason is worse than no test: it reports coverage that does not exist.
 | 5 | the switch (selection) | **the test itself** claimed the leads on a first call, leaving them `status='dialing'`, so the second selection returned nothing either way. Only observable on **unclaimed** leads. |
 | 6 | carry-over cap exemption | the cap counts `first_dialed_at::date = today`, and the test's carry-overs carried **yesterday's** date, so they never counted. Only observable with a carry-over first dialed **today** against a spent cap. |
 | 7 | the in-transaction campaign re-check | `dial_one` trusted the campaign row captured on the lead at **selection** time, so a pause mid-batch — the one case that re-check exists for — was invisible. Worse, stopping A and starting B let A's claimed lead dial under **B's** cap, spacing and prompt version. Only observable on a lead **claimed under A and dialed after the switch**. |
-
 | 8 | `QUEUE_MEMBERSHIP` (`pool_status='active'`) | the named-campaign change added `CAMPAIGN_MEMBERSHIP`, and the test's leads were never assigned to a campaign — so they were excluded before queue membership was consulted. Only observable on a lead **assigned to the running campaign but left in the pool**. |
 | 9 | carry-over cap exemption, again | the test set `settings['daily_cap'] = 1`, which nothing has read since the cap moved onto the campaign. The real cap stayed at the default 100, so it never bound and the exemption was never exercised. Only observable with the cap set **where the dialer reads it**. |
+| 10 | the archive return's **stage** reset | every lead in `tests/test_archive.py` is built at `stage='L1'` — which is what makes the suppression test properly isolated. But the three EMAIL-derived archive reasons (`no_reply`, `bad_email`, `unsubscribed`) can only be reached from **L2**, so "a returned lead is dialable" was only ever asserted for leads that never reach the state that breaks it. `return_due()` never reset `stage`, nothing writes `'L1'` back, and `STAGE_DIALABLE` is L1-only — the lead came back unreachable down **both** wires. Only observable on a lead archived **from L2**. Fixed 2026-09-09, breaks 91–93. |
+| 11 | `REPLIED_GUARD` across the archive return | the same fixture shape, found by asking the same question of the next gate: no test set `replied_at` on a lead that was archived and returned, so the permanent block it created was unobserved. A firm that said "not interested", archived `refused`, could never be dialed again. Only observable on a returned lead with `replied_at` set. Fixed 2026-09-09, break 95 — and a companion test proves clearing it does **not** let a suppressed number through, because suppression is keyed on the phone. |
 
 Note #5: the *test* was wrong, not the code. That is the usual shape.
+
+Note #10 and #11: the *fixture* was wrong — it built a state production never
+produces at that point in a lead's life. That is the shape to watch for in any
+test whose subject is a TRANSITION rather than a filter.
 
 ### A second failure shape: a BREAK that cannot fail
 
@@ -254,7 +277,7 @@ ssh -L 4100:localhost:4100 root@ssh.demand.legaltoolsgpt.com
 |---|---|
 | `/` | **the landing page** — searchable leads list, one row per firm, last scores and last quote |
 | `/leads/{id}` | full activity timeline: every call, both scores, deductions, what they said, transcript; editable contact; mark DNC |
-| `/campaign` | today's run — enrol / start / pause / resume / rollover / cap, CSV upload |
+| `/campaigns` | the named configurations — create, start / stop, cap, spacing, windows, sender, email copy, retry ladders, CSV upload |
 | `/today` | the digest as it currently stands, plus the needs-you queue |
 | `/export.csv` | CSV export, respects the current filter |
 

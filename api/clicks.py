@@ -36,9 +36,24 @@ def token_for(lead_id) -> str:
     """
     The lead's click token, generated once and reused.
 
-    ONE TOKEN PER LEAD, not per email. The drip sends up to four; a click is a
-    click, and which email it came from is answered by the timing. A per-email
-    token would also mean anyone holding one could reason about the others.
+    ONE TOKEN PER LEAD today. That is a CURRENT-STATE CHOICE, not a settled
+    one, and the drip will have to change it.
+
+    ⚠️ DRIP_ARCHIVE_BRIEF.md specifies clicks tracked PER STEP, and that design
+    wins (decided 2026-09-09). Per-lead cannot answer the question the drip is
+    built to ask: is step 1 pulling every click, or is step 3? If step 1 does,
+    the follow-ups are noise; if step 3 does, the opener needs rewriting. Time
+    since send cannot separate those - only attribution to the step that
+    produced the click can, and a per-lead count has no step to attribute to.
+
+    Per-lead is right for TODAY, where there is exactly one manual email per
+    lead, and it keeps one property worth carrying forward: anyone holding a
+    token cannot reason about a lead's other sends, because there are none.
+
+    Moving to per-step means the token belongs to the SEND, not the lead -
+    a schema change (leads.click_token is a single column), so it is parked
+    with the rest of the drip rather than half-done. Do not read this function
+    as a settled decision against the brief.
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:

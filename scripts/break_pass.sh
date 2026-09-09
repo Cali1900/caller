@@ -181,6 +181,12 @@ preflight || exit 1
 # That produced hours of results that looked like code regressions: breaks
 # reappearing after being restored, deadlocked TRUNCATEs, and a suite whose
 # failures moved between runs. An exclusive lock, not a courtesy check.
+# Tell scripts/test.sh that WE are the caller. It has its own exclusive lock
+# and refuses to run while .break_pass_state exists; without this the pass
+# would be refused by the very guard it invokes - a safety check firing on
+# itself, which is how the old pgrep guard trained people to bypass it.
+export BREAK_PASS=1
+
 exec 9>"$STATE.lock"
 if ! flock -n 9; then
   echo "ANOTHER BREAK PASS IS ALREADY RUNNING (lock: $STATE.lock) - refusing."
