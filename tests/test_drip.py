@@ -326,3 +326,111 @@ def test_an_unknown_stop_reason_is_refused(db, dripc):
     lid = _lead(db, days_ago=1)
     with pytest.raises(ValueError):
         drip.stop(lid, 'because', by='test')
+
+
+# ==========================================================================
+# the screens render WITH DATA
+#
+# A 200 on a page with no drip proves nothing about the branches that only
+# appear once there is one. Templates fail at RENDER time, so an untested branch
+# is a 500 in front of Sean the first time he uses the feature.
+# ==========================================================================
+
+@pytest.fixture
+def client(db, cfg_env):
+    from fastapi.testclient import TestClient
+    import api.web            # noqa: F401
+    from api.main import app
+    return TestClient(app)
+
+
+def test_the_sequence_editor_renders_for_a_drip_campaign(db, dripc, client):
+    r = client.get(f"/campaign/{dripc['campaign_id']}")
+    assert r.status_code == 200, r.text[:400]
+    assert 'The sequence' in r.text
+    # Every saved step is editable, and the preview is rendered.
+    for st in drip.steps(dripc['campaign_id']):
+        assert f'value="{st["delay_days"]}"' in r.text, \
+            f'step at day {st["delay_days"]} has no delay input'
+    assert 'Save the sequence' in r.text
+    assert 'after the last step' in r.text.lower()
+
+
+def test_the_editor_says_a_call_campaign_has_no_sequence(db, client):
+    """Rendering the editor on a call campaign must explain, not offer a form
+    that cannot work."""
+    r = client.get(f'/campaign/{running_campaign_id()}')
+    assert r.status_code == 200, r.text[:400]
+    assert 'drip campaigns only' in r.text
+    assert 'Save the sequence' not in r.text
+
+
+def test_saving_a_bad_sequence_is_refused_on_the_screen(db, dripc, client):
+    """The refusal has to reach the person, not just the log."""
+    steps = drip.steps(dripc['campaign_id'])
+    r = client.post(f"/campaign/{dripc['campaign_id']}/steps", data={
+        'step_id_0': str(steps[0]['step_id']), 'delay_0': '0',
+        'subject_0': 'a', 'body_0': 'a',
+        'step_id_1': str(steps[1]['step_id']), 'delay_1': '0',
+        'subject_1': 'b', 'body_1': 'b',
+    }, follow_redirects=False)
+    assert 'REJECTED' in r.headers['location']
+    # And nothing was half-saved.
+    assert len(drip.steps(dripc['campaign_id'])) == 4
+
+
+def test_the_lead_page_renders_the_drip_and_the_send_history(db, dripc, client):
+    lid = _lead(db, days_ago=11)
+    _join(db, lid, dripc['campaign_id'], sent_steps=2)
+    r = client.get(f'/leads/{lid}')
+    assert r.status_code == 200, r.text[:400]
+    assert 'The drip' in r.text
+    assert dripc['name'] in r.text
+    assert 'Emails sent' in r.text
+    assert 'Stop the drip for this lead' in r.text, \
+        'the control the digest checkpoint points at is missing'
+
+
+def test_the_lead_page_renders_the_archived_contact_history(db, dripc, client):
+    """
+    ⚠️ THE WHOLE POINT OF archived_contacts IS THAT SOMEBODY CAN SEE IT.
+    It had a reader and tests and no template until 2026-09-09 - data that
+    survives a return and cannot be read is the same fault as an inventory
+    nobody updates.
+    """
+    lid = _lead(db, days_ago=200)
+    stages.record_reply(lid, note='not interested this quarter', by='sean')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='new' WHERE lead_id=%s", (lid,))
+    archive.archive(lid, 'no_reply', by='test')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET returns_at = now() - interval '1 day' "
+                        "WHERE lead_id = %s", (lid,))
+    assert archive.return_due()['returned'] == 1
+
+    r = client.get(f'/leads/{lid}')
+    assert r.status_code == 200, r.text[:400]
+    assert 'Before it was returned' in r.text
+    assert 'no_reply' in r.text
+    assert 'not interested this quarter' in r.text, \
+        'the reply that was cleared as a GATE must still be readable as a FACT'
+
+
+def test_the_digest_names_tomorrows_sends_by_firm(db, dripc, cfg_env):
+    """
+    THE CHECKPOINT FOR A GATE THAT CANNOT FAIL CLOSED.
+
+    Reply detection is manual, so this block is what makes the race visible: a
+    COUNT is not actionable, a firm name is. It must also name the control -
+    stopping one lead rather than pausing the drip.
+    """
+    from api import digest
+    lid = _lead(db, days_ago=11, company='Whitfield Law')
+    _join(db, lid, dripc['campaign_id'], sent_steps=2)
+    body = digest.build(cfg_env)['body']
+    assert 'GOING OUT IN THE NEXT 24 HOURS' in body
+    assert 'Whitfield Law' in body, 'a count is not actionable; a firm name is'
+    assert 'step 3' in body
+    assert 'stop' in body.lower()

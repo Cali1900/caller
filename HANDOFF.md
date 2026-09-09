@@ -15,7 +15,7 @@ Last updated 2026-09-09. Every number in the table below was read from
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260909_037_prepared_sends.sql` |
-| Tests | 632 passed, 1 skipped |
+| Tests | 638 passed, 1 skipped |
 | Break pass | **103 definitions** (97–104 added for the drip). Full pass GREEN across all 103 at 2026-09-09T17:23Z, suite 632. The FIRST run of that pass FAILED — break 100 reported GREEN because a drip test was passing with zero clicks; see masked-guard row 12 in README.md |
 | Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
 | Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
