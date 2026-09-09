@@ -167,32 +167,74 @@ preflight() {
 case "$MODE" in
   check)
     echo "BREAK PASS - state check"
-    dirty_report; exit $?
+    # ⚠️ A STATE DIRECTORY ONLY DETECTS A *KILLED* RUN. A run that completed
+    # while FAILING TO RESTORE leaves no state dir at all, so dirty_report says
+    # "nothing was left applied" and means nothing by it. That is exactly what
+    # happened on 2026-09-09, and it is why a live break survived four
+    # subsequent runs and a full suite.
+    #
+    # The anchor check reads api/ against every break definition and does not
+    # care whether any state exists, so it catches a live break however it got
+    # there. It is the real answer to "is a break live right now?".
+    dirty_report; rc=$?
+    echo
+    echo "--- api/ against every break definition ---"
+    python3 scripts/breaks_anchor_check.py || rc=1
+    exit $rc
     ;;
   recover)
     preflight; exit $?
     ;;
 esac
 
-preflight || exit 1
-
-# --- ONE AT A TIME -------------------------------------------------------
-# Two concurrent runs mutate the same files and share one test database.
-# That produced hours of results that looked like code regressions: breaks
-# reappearing after being restored, deadlocked TRUNCATEs, and a suite whose
-# failures moved between runs. An exclusive lock, not a courtesy check.
-# Tell scripts/test.sh that WE are the caller. It has its own exclusive lock
-# and refuses to run while .break_pass_state exists; without this the pass
-# would be refused by the very guard it invokes - a safety check firing on
-# itself, which is how the old pgrep guard trained people to bypass it.
+# --- ONE AT A TIME, AND THIS MUST COME BEFORE preflight ------------------
+#
+# ⚠️  IT USED TO COME AFTER, AND THAT DESTROYED A RUNNING PASS.
+#
+# preflight() treats an existing .break_pass_state as a crashed run: it restores
+# api/ from that snapshot and `rm -rf`s the directory. Run second while a pass is
+# in flight, it therefore DELETED THE LIVE PASS'S ONLY COPY of the originals -
+# and the lock that would have refused the second invocation was checked
+# afterwards, so it never got the chance.
+#
+# What that produced on 2026-09-09: the running pass could not find
+# .break_pass_state/originals/drip.py, correctly stopped rather than continue
+# with a break live, and left ALREADY_SENT_STOP = '' in api/drip.py. Its FINAL
+# VERIFY then reported "no state directory - nothing was left applied", because
+# with no state dir it had nothing to compare against. Four later --only runs
+# each snapshotted the broken file and reported RESTORE VERIFIED against it.
+#
+# A CONCURRENCY GUARD CHECKED AFTER THE THING IT GUARDS IS NOT A GUARD.
 export BREAK_PASS=1
 
 exec 9>"$STATE.lock"
 if ! flock -n 9; then
   echo "ANOTHER BREAK PASS IS ALREADY RUNNING (lock: $STATE.lock) - refusing."
   echo "It mutates api/ and shares the test database; two at once corrupts both."
+  echo "Refusing BEFORE touching any state: an earlier version recovered first"
+  echo "and deleted the running pass's originals."
   exit 1
 fi
+
+# ⚠️ REFUSE TO START WITH A BREAK ALREADY LIVE IN api/.
+#
+# break_pass_all.sh has always done this; break_pass.sh did not, so an --only or
+# --from run would snapshot a broken file as its "original" and faithfully
+# restore api/ to that broken state, reporting RESTORE VERIFIED every time. The
+# tool laundered the corruption instead of catching it.
+#
+# Reads api/ directly, so it does not depend on any state surviving. Costs a
+# second.
+if ! python3 scripts/breaks_anchor_check.py; then
+  echo
+  echo "REFUSING TO RUN: a break definition does not match api/, which usually"
+  echo "means a break is LIVE right now. Snapshotting this state would make it"
+  echo "the 'original' that every restore then verifies against."
+  echo "  git diff -- api/     to see it"
+  exit 1
+fi
+
+preflight || exit 1
 # Look for the test CONTAINER, not a process name. `pgrep -f scripts/test.sh`
 # matched the invoking shell, whose command line merely CONTAINED that string,
 # so the guard refused to let the break pass start at all. A safety check that

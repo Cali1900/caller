@@ -126,8 +126,20 @@ happen.
 | 11 | `REPLIED_GUARD` across the archive return | the same fixture shape, found by asking the same question of the next gate: no test set `replied_at` on a lead that was archived and returned, so the permanent block it created was unobserved. A firm that said "not interested", archived `refused`, could never be dialed again. Only observable on a returned lead with `replied_at` set. Fixed 2026-09-09, break 95 — and a companion test proves clearing it does **not** let a suppressed number through, because suppression is keyed on the phone. |
 
 | 12 | `drip.REPLIED_STOP`, via a test that never clicked | ⚠️ **A NEW SUB-SHAPE: the test's SETUP silently no-opped.** `test_a_click_does_NOT_stop_the_sequence` asserted that a click leaves the drip running — while never producing a click. Its fixture inserted `email_sends` rows with no `click_token`, so `clicks.record()` had nothing to look up and returned `None`, and the test's own `if row and row['click_token']:` made the skip invisible. Break 100 removed the guard, nothing failed, and the pass reported GREEN. Only observable by asserting the click was RECORDED before asserting the consequence. Found 2026-09-09. |
+| 13 | **the break pass itself**, laundering a live break | ⚠️ **THE TOOL, NOT A TEST.** `preflight` ran BEFORE the concurrency lock. It treats an existing `.break_pass_state` as a crashed run — restores from that snapshot and `rm -rf`s it — so a second invocation, *even one the lock would have refused*, deleted the running pass's only copy of the originals. The running pass then couldn't restore, correctly stopped, and left `ALREADY_SENT_STOP = ''` live in `api/drip.py`. Its FINAL VERIFY reported *"no state directory — nothing was left applied"* (with no state dir it had nothing to compare against) and four later `--only` runs each snapshotted the **broken** file as their original and reported `RESTORE VERIFIED ✓` against it. `--check` said clean. A full suite passed. Caught only by `breaks_anchor_check.py`, when break 98's `OLD` stopped matching. Fixed 2026-09-09: lock before preflight, `--check` runs the anchor check, and `break_pass.sh` refuses to start with a live break. |
 
 Note #5: the *test* was wrong, not the code. That is the usual shape.
+
+Note #13 is the one to internalise: **a concurrency guard checked after the
+thing it guards is not a guard**, and **"verified" against a snapshot you took
+of a broken state verifies nothing.** Every report in that chain was truthful
+about what it measured and wrong about what it implied. The only check that
+caught it reads `api/` directly and depends on no state at all — which is the
+property to prefer in a safety check.
+
+Also: a break reporting `BASELINE: ... is ALREADY RED` reads as "your test is
+order-dependent". It can equally mean **a guard is genuinely missing from
+`api/`**. Check `api/` before suspecting the test.
 
 Note #12 is worth reading on its own: **defensive coding inside a test can
 turn an assertion into a no-op.** `if row and row['click_token']:` looks careful

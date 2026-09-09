@@ -104,6 +104,28 @@ next run recovers and refuses to proceed until clean.
 ./scripts/break_pass.sh --only=19   # one break
 ```
 
+**⚠️ NEVER RUN TWO BREAK PASSES, AND THE LOCK NOW ACTUALLY PREVENTS IT.**
+Until 2026-09-09 `preflight` ran BEFORE the lock, so a second invocation
+"recovered" from the RUNNING pass's state directory and deleted it. The running
+pass then could not restore, stopped correctly, and left a break live in
+`api/drip.py` — and every subsequent run snapshotted the broken file as its
+"original" and reported `RESTORE VERIFIED ✓` against it. `--check` said clean
+and a full suite passed. Only `breaks_anchor_check.py` caught it.
+
+Three fixes: the lock comes first, `--check` runs the anchor check (a state
+directory only detects a KILLED run, not a completed one that failed to
+restore), and `break_pass.sh` refuses to start when a break is already live.
+
+**`./scripts/break_pass.sh --check` is the answer to "is a break live?"** — it
+reads `api/` against every definition and does not depend on any state
+surviving. `git diff -- api/` is the other. A "RESTORE VERIFIED" is only as good
+as the snapshot it verifies against.
+
+**⚠️ Break numbers ≥100 sort BEFORE two-digit ones.** `100_…` sorts right after
+`09_…`, so `--from=N` and the chunk banners are POSITIONS, not break numbers.
+`--only=N` matches by name and is reliable. Zero-padding the filenames would fix
+it and has not been done.
+
 **One test run at a time.** Three concurrent runs against one test database
 produced hours of results that looked like code regressions — breaks
 reappearing after restore, deadlocked TRUNCATEs, failures moving between runs.
