@@ -1,0 +1,12 @@
+-- ⚠️ A DEFAULT, NOT JUST NOT NULL.
+--
+-- 043 backfilled status_changed_at and set NOT NULL. That fixes the rows that
+-- exist and breaks every INSERT that follows: nothing creating a lead knows about
+-- the column, and nothing should have to - the upload, the CSV loader and every
+-- test fixture would each need to learn it.
+--
+-- The trigger maintains it on UPDATE; the DEFAULT is what makes a new lead valid.
+-- Its own migration rather than an edit to 044, because an applied migration does
+-- not run again - the dev database took the fix by hand and the test database,
+-- built from these files, would have silently kept the broken version.
+ALTER TABLE leads ALTER COLUMN status_changed_at SET DEFAULT now();

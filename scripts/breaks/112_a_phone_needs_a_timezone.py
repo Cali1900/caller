@@ -1,5 +1,10 @@
 # A PHONE AND A TIMEZONE ARE SAVED TOGETHER OR NOT AT ALL.
 #
+# ⚠️ UPDATED 2026-09-10: the timezone is now DERIVED from the state rather than
+# asked for, so this branch does two things - derive, or refuse when there is no
+# state to derive from. Removing it skips both, which is the same failure it
+# always guarded: a number saved with no timezone.
+#
 # An imported lead has neither. Adding just the number makes it LOOK dialable - a
 # phone, on a campaign, queued - while windows.PREFERENCE_WINDOW joins on
 # l.timezone, so a NULL there matches no window and the lead is silently excluded

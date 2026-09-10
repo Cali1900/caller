@@ -311,7 +311,11 @@ def preview_candidates(campaign_id=None, limit: int = 30):
             cur.execute("""SELECT lead_id, company, dm_name, dm_email
                              FROM leads
                             WHERE company IS NOT NULL AND company <> ''
-                            ORDER BY (drip_campaign_id = %s) DESC NULLS LAST,
+                            -- leads this drip would actually mail come first
+                            ORDER BY (status = ANY(coalesce(
+                                        (SELECT accepted_statuses
+                                           FROM campaign_configs
+                                          WHERE campaign_id = %s), '{}'))) DESC,
                                      (campaign_id = %s) DESC NULLS LAST,
                                      (dm_name IS NOT NULL AND dm_name <> '') DESC,
                                      (dm_email IS NOT NULL) DESC,

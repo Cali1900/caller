@@ -58,16 +58,25 @@ def _windows(cid, enabled=True, start='00:00', end='23:59'):
                         (enabled, start, end, cid))
 
 
-def _sent(lid, when='now()', seq=99):
-    """A send that COUNTS against the caps: sent_at is what both caps read."""
+def _sent(lid, when='now()', seq=99, from_email='info@counselorai.io'):
+    """
+    A send that COUNTS against the caps.
+
+    ⚠️ from_email IS WHAT THE CAPS COUNT ON. They used to reach the mailbox
+    through the lead's drip_campaign_id, a join the status gate deleted - and a
+    guess in any case, because it asked which campaign the lead belongs to NOW
+    rather than which address the mail went from. A fixture without it inserts
+    sends that no cap can see.
+    """
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
             # sent_by alongside sent_at - email_sends_sent_is_attributed.
             cur.execute(f"""INSERT INTO email_sends
                                 (lead_id, seq, to_email, sent_at, sent_by,
-                                 click_token)
-                            VALUES (%s, %s, 'x@y.test', {when}, 'operator', %s)""",
-                        (lid, seq, f'tok-cap-{lid}-{seq}'))
+                                 from_email, click_token)
+                            VALUES (%s, %s, 'x@y.test', {when}, 'operator',
+                                    %s, %s)""",
+                        (lid, seq, from_email, f'tok-cap-{lid}-{seq}'))
 
 
 def _due_ids(cid=None):
@@ -132,10 +141,10 @@ def test_the_caps_count_per_mailbox_not_per_campaign(db, dripc):
     _join(db, mine, cid)
     assert mine in _due_ids()
 
-    # A send on the OTHER campaign, same mailbox, spends this one's budget.
+    # A send from the SAME MAILBOX, whoever sent it, spends this one's budget.
     theirs = _mk(db)
     _join(db, theirs, other)
-    _sent(theirs)
+    _sent(theirs, from_email=dripc['sender_email'])
     assert mine not in _due_ids(), \
         'a send from another campaign on the same mailbox did not count'
 
@@ -154,7 +163,7 @@ def test_a_different_mailbox_does_not_spend_this_ones_budget(db, dripc):
     _join(db, mine, cid)
     theirs = _mk(db)
     _join(db, theirs, other)
-    _sent(theirs)
+    _sent(theirs, from_email='someone-else@counselorai.io')
     assert mine in _due_ids(), \
         'a send from a DIFFERENT mailbox was counted against this one'
 
@@ -427,3 +436,25 @@ def test_history_at_the_same_position_is_allowed_and_is_not_corruption(db, dripc
     assert at_two > 1, 'the deleted row at position 2 should still be there'
     assert len([s for s in drip.steps(cid) if s['position'] == 2]) == 1, \
         'the editor must see exactly one live step at position 2'
+
+
+def test_a_REAL_send_is_counted_by_the_caps(db, dripc):
+    """
+    ⚠️ THE CAPS COUNT ON email_sends.from_email, so a send that does not record
+    the mailbox is invisible to them - they would read zero forever and the pace
+    would exist only in the configuration. record_send() is the only writer on the
+    drip path, and this pins that it fills the column in.
+    """
+    cid = dripc['campaign_id']
+    lid = _mk(db)
+    _join(db, lid, cid)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            drip.record_send(cur, lid, None, 7, 'a@b.test', 's', 'operator',
+                             from_email=dripc['sender_email'])
+            cur.execute("""UPDATE email_sends SET sent_at = now()
+                            WHERE lead_id = %s AND seq = 7""", (lid,))
+    counts = drip.sent_counts(cid)
+    assert counts['sent_hour'] >= 1, \
+        f'a real send was not counted against the hourly cap: {counts}'
+    assert counts['sent_today'] >= 1, counts

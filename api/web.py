@@ -35,6 +35,7 @@ from api import (archive as _archive_mod,
                  digest as digest_mod, drafts as drafts_mod,
                  senders as senders_mod,
                  prompts as prompts_mod, stages, drip as _drip_mod,
+                 timezones as timezones_mod,
                  upload as upload_mod)
 from api.config import load_config
 
@@ -62,7 +63,11 @@ STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'email_path', 'demo_pending', 'dnc', 'max_attempts', 'failed',
             'human_review', 'paused',
             'emailed', 'engaged', 'demo_booked', 'won', 'lost',
-            'lost_no_response', 'bad_email', 'archived']
+            'lost_no_response', 'bad_email', 'archived',
+            # An email-only lead: never called, never mailed. Its own status
+            # rather than 'new' (which means waiting to be dialled, and these
+            # have no phone) or 'emailed' (which would be a lie).
+            'imported']
 # THE FILTER STILL READS L1 / L2, because that is the vocabulary on the screen
 # and on every past call and score record. The COLUMN behind it is
 # leads.has_confirmed_email, a boolean (migration 035) - L2 means "we have a
@@ -109,8 +114,8 @@ def _header(conn, cfg):
 # no invite sent (phase 6 - the row already counts).
 # ⚠️ 'EMAILED AND ON NO DRIP' IS THE SAFETY NET FOR A STALLED SEQUENCE.
 #
-# drip.drip_for() routes a lead to its call campaign's default_drip_id, falling
-# back to only_drip(). When neither answers - no drip running, several running
+# Membership is DERIVED from status: a lead is on every running drip whose
+# accepted_statuses contain its status. When none do - no drip running, or none
 # and no default set, or a default pointing at a stopped one - email 1 goes out
 # and NOTHING FOLLOWS UP. There is no error and no failed send: the lead simply
 # sits at 'emailed' forever.
@@ -129,7 +134,13 @@ _DRIP_SEND_SUMMARY = re.compile(r'^drip step \d+ sent$')
 
 _STALLED_AFTER_EMAIL = """
     (l.emailed_at IS NOT NULL
-     AND l.drip_campaign_id IS NULL
+     -- ⚠️ "NO DRIP ACCEPTS THIS LEAD" replaces "drip_campaign_id IS NULL".
+     -- Membership is derived, so the question is no longer "was it assigned"
+     -- but "does any RUNNING drip take its status" - the same failure, asked of
+     -- the mechanism that now decides it.
+     AND NOT EXISTS (SELECT 1 FROM campaign_configs dc
+                      WHERE dc.type = 'drip' AND dc.is_running
+                        AND l.status = ANY(dc.accepted_statuses))
      AND l.replied_at IS NULL
      AND l.status NOT IN ('archived','dnc','won','lost','bad_email',
                           'demo_booked','lost_no_response'))
@@ -778,10 +789,13 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
         'archive_reasons': _archive_mod.REASONS,
         'clicks': clicks_mod.summary(lead['lead_id']),
         # THE DRIP: which sequence, where in it, and what has actually gone.
-        'drip': (campaigns.get(lead['drip_campaign_id'])
-                 if lead.get('drip_campaign_id') else None),
-        'drip_steps': (_drip_mod.steps(lead['drip_campaign_id'])
-                       if lead.get('drip_campaign_id') else []),
+        # ⚠️ MEMBERSHIP IS NEVER A MYSTERY. Derived means there is no column to
+        # read, so the page has to SAY which drips this lead is in and why -
+        # otherwise "why is this firm getting mail" has no answer on the screen.
+        'qualifies': _drip_mod.qualifies_for(lead),
+        # WHICH STATUSES WOULD PUT THIS LEAD ON A RUNNING DRIP, so the dropdown
+        # can warn before the change rather than after the mail.
+        'status_sends': _drip_mod.sending_statuses(),
         'sends': _drip_mod.sends(lead['lead_id']),
         'stop_reasons': _drip_mod.STOP_REASONS,
         # ⚠️ DATA THAT SURVIVES A RETURN AND CANNOT BE SEEN IS THE SAME FAULT AS
@@ -808,7 +822,8 @@ def _int_or_none(v):
 def lead_edit(lead_id: str, dm_name: str = Form(None), dm_title: str = Form(None),
               dm_email: str = Form(None), dm_email_confirmed: str = Form(None),
               demands_per_month: str = Form(None), notes: str = Form(None),
-              phone_e164: str = Form(''), timezone: str = Form('')):
+              phone_e164: str = Form(''), timezone: str = Form(''),
+              move_to: str = Form('')):
     """
     Fix a wrong email, or give an email-only lead a number. Every edit lands on
     the timeline.
@@ -826,13 +841,28 @@ def lead_edit(lead_id: str, dm_name: str = Form(None), dm_title: str = Form(None
     """
     confirmed = {'true': True, 'false': False}.get(dm_email_confirmed, None)
     phone_e164, timezone = phone_e164.strip(), timezone.strip()
+
+    # ⚠️ THE TIMEZONE IS DERIVED FROM THE STATE, never asked for. Every other
+    # entry path derives it (upload, add_lead), and asking here would make the
+    # same fact arrive two ways - one of which a person can get wrong. If there
+    # is no state there is nothing to derive from, and that is what blocks the
+    # phone: said plainly, rather than offering a move that cannot work.
     if phone_e164 and not timezone:
-        msg = ('REJECTED: a phone needs a timezone too. The calling window is '
-               'evaluated in the CALLED PARTY\'s local time, so a lead with a '
-               'number and no timezone matches no window - it would look '
-               'dialable and never be dialed, with nothing saying why.')
-        return RedirectResponse(
-            f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT state FROM leads WHERE lead_id = %s',
+                            (lead_id,))
+                st = (cur.fetchone() or {}).get('state')
+        if (st or '').strip():
+            timezone, _src, _review = timezones_mod.for_state(st)
+        else:
+            msg = ('REJECTED: this lead has no STATE, so its timezone cannot be '
+                   'derived - and the calling window is evaluated in the called '
+                   'party\'s local time, so a number without one would look '
+                   'dialable and never dial. Add the state first.')
+            return RedirectResponse(
+                f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                status_code=303)
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute('SELECT dm_email, phone_e164 FROM leads '
@@ -847,6 +877,31 @@ def lead_edit(lead_id: str, dm_name: str = Form(None), dm_title: str = Form(None
                               tz_source = 'hand', updated_at = now()
                         WHERE lead_id = %s""",
                     (phone_e164, timezone, lead_id))
+                # ⚠️ A PHONE MAKES IT CALLABLE, AND CALLABLE IS A DECISION.
+                # 'imported' is not a dialable status, so adding a number alone
+                # changes nothing about dialling - which is correct, and would be
+                # invisible without this. Moving sets 'new' and assigns the call
+                # campaign; the lead then falls out of every drip whose gate no
+                # longer matches, automatically, because the gate recalculates.
+                if move_to.strip():
+                    target = campaigns.get(move_to.strip())
+                    if target is None or target['type'] != 'call':
+                        pass
+                    else:
+                        cur.execute(
+                            """UPDATE leads SET status = 'new',
+                                      campaign_id = %s, updated_at = now()
+                                WHERE lead_id = %s""",
+                            (target['campaign_id'], lead_id))
+                        cur.execute(
+                            """INSERT INTO activity
+                                   (lead_id, kind, summary, detail)
+                               VALUES (%s,'note','moved to a call campaign',%s)""",
+                            (lead_id,
+                             f'{target["name"]}. Status is now `new`, so it '
+                             f'leaves any drip that accepted its old status - '
+                             f'the gate recalculates, nothing had to remember '
+                             f'to remove it.'))
                 if not (prev or {}).get('phone_e164'):
                     cur.execute(
                         """INSERT INTO activity (lead_id, kind, summary, detail)
@@ -1255,9 +1310,12 @@ def campaigns_list(request: Request, msg: str = '', confirm: str = ''):
                              FROM drip_steps WHERE deleted_at IS NULL
                             GROUP BY campaign_id""")
             step_counts = {r['cid']: r['n'] for r in cur.fetchall()}
-            cur.execute("""SELECT drip_campaign_id::text AS cid, count(*) AS n
-                             FROM leads WHERE drip_campaign_id IS NOT NULL
-                            GROUP BY drip_campaign_id""")
+            cur.execute("""SELECT c.campaign_id::text AS cid, count(l.lead_id) AS n
+                             FROM campaign_configs c
+                             LEFT JOIN leads l
+                                    ON l.status = ANY(c.accepted_statuses)
+                            WHERE c.type = 'drip'
+                            GROUP BY c.campaign_id""")
             drip_counts = {r['cid']: r['n'] for r in cur.fetchall()}
     return templates.TemplateResponse(request, 'campaigns.html', {
         'hdr': hdr, 'campaigns': rows, 'msg': msg,
@@ -1319,22 +1377,12 @@ def lead_drip_stop(lead_id: str, reason: str = Form('by_hand'),
         f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
 
 
-@router.post('/leads/{lead_id}/drip/assign')
-def lead_drip_assign(lead_id: str, drip_campaign_id: str = Form(...)):
-    """
-    Put a lead on a named drip by hand.
-
-    Needed when SEVERAL drips run: mark_emailed() auto-assigns only when there
-    is exactly one, because a picker for a list of one is a decision nobody
-    would make differently. With a choice, a person makes it here.
-    """
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            ok = _drip_mod.enter(cur, lead_id, drip_campaign_id)
-    msg = ('Put on the drip.' if ok
-           else 'Already on a drip - stop it first.')
-    return RedirectResponse(
-        f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+# ⚠️ THERE IS NO "ADD TO DRIP" ROUTE ANY MORE, and that is the whole point of
+# the redesign: a lead cannot be put on a drip by hand, because membership is not
+# a thing that can be set. Change its STATUS and it joins every drip accepting
+# that status; change it again and it leaves. The status dropdown on lead detail
+# is the control, and it says which drips a change would qualify the lead for
+# before you make it.
 
 
 @router.post('/campaign/{campaign_id}/steps/preview')
@@ -1617,14 +1665,18 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     # EVERY drip, running or not, so a stopped one can still be chosen - and the
     # screen says which are stopped, because drip_for() refuses to route into a
     # stopped drip and that would otherwise look like the setting not working.
-    drip_options = [c for c in campaigns.list_all() if c['type'] == 'drip']
+
     # WHO FEEDS THIS DRIP - the relationship read from the other end, so the
     # wiring is auditable from both screens rather than only from the call side.
-    fed_by = campaigns.feeders(campaign_id) if camp['type'] == 'drip' else []
+    # ⚠️ "FED BY" IS GONE BECAUSE NOTHING FEEDS A DRIP. Its successor is the
+    # GATE: which statuses this drip accepts, how many leads hold each, and
+    # which other running drips accept the same status.
+    is_drip = camp['type'] == 'drip'
+    gate_counts = _drip_mod.gate_counts() if is_drip else {}
+    overlaps = _drip_mod.overlaps(campaign_id) if is_drip else []
     # The chosen one, resolved here so the template can say "stopped" without
     # searching the list itself.
-    drip_chosen = (campaigns.get(camp['default_drip_id'])
-                   if camp.get('default_drip_id') else None)
+
     gap_avg = ((camp['email_gap_min_seconds'] + camp['email_gap_max_seconds'])
                / 2.0) or 1
     # The REAL rate is whichever binds first: the gap or the hourly cap. Showing
@@ -1639,14 +1691,22 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     # silent behaviour change for exactly the leads a drip holds most of.
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT count(*) AS n FROM leads'
-                        ' WHERE drip_campaign_id = %s AND timezone IS NULL',
+            # coalesce, because a CALL campaign has no accepted_statuses and
+            # `= ANY(NULL)` is NULL rather than false - which is an error here,
+            # not an empty count.
+            cur.execute("""SELECT count(*) AS n FROM leads l
+                            WHERE l.timezone IS NULL
+                              AND l.status = ANY(coalesce(
+                                    (SELECT accepted_statuses
+                                       FROM campaign_configs
+                                      WHERE campaign_id = %s), '{}'))""",
                         (campaign_id,))
             tz_fallback = cur.fetchone()['n']
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
-        'drip_options': drip_options, 'drip_chosen': drip_chosen,
-        'fed_by': fed_by, 'stop_confirm': stop_confirm,
+        'gate_counts': gate_counts, 'overlaps': overlaps,
+        'statuses': STATUSES, 'caution': _drip_mod.CAUTION_STATUSES,
+        'stop_confirm': stop_confirm,
         'pace': pace, 'emails_per_hour': emails_per_hour,
         'hours_to_clear': hours_to_clear, 'tz_fallback': tz_fallback,
         'operator_tz': cfg.OPERATOR_TIMEZONE,
@@ -1723,7 +1783,7 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
         # WHO FEEDS IT. The wiring lives on the CALL campaign, so without this
         # the drip area cannot answer "where do these leads come from" - and it
         # is the screen the drip work actually happens on.
-        'fed_by': campaigns.feeders(cid),
+        'overlaps': _drip_mod.overlaps(cid),
         # ⚠️ THE SEQUENCE EDITOR IS AN INCLUDE, so it needs exactly the context
         # the campaign page gives it. Anything missing renders as empty rather
         # than erroring, which is how a template silently loses a control.
@@ -1823,7 +1883,7 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(Non
                   email_gap_max_seconds: int = Form(None),
                   email_hourly_cap: int = Form(None),
                   email_daily_cap: int = Form(None),
-                  default_drip_id: str = Form(None)):
+                  accepted_statuses: list = Form(None)):
     """
     ⚠️ THE CALL FIELDS ARE OPTIONAL BECAUSE A DRIP SCREEN DOES NOT RENDER THEM.
 
@@ -1849,14 +1909,17 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(Non
     # WHAT THIS TYPE'S SCREEN RENDERS IS WHAT THIS TYPE MUST POST. Absent means
     # the form was incomplete, which is a bug worth refusing rather than a
     # value worth guessing.
-    # ⚠️ THE FOLLOW-UP DRIP. An EMPTY STRING is a real answer here - "none",
-    # chosen on purpose - and None means the field was not on the form at all.
-    # Collapsing the two would make "none" unsettable, which is the state that
-    # caused this: null was silent, so C1 sat wired to nothing.
-    if default_drip_id is not None and default_drip_id.strip():
-        target = campaigns.get(default_drip_id.strip())
-        if target is None or target['type'] != 'drip':
-            return _refuse('the follow-up drip must be a drip campaign')
+    # ⚠️ THE GATE. An EMPTY list is a real answer - a drip that accepts nobody -
+    # and None means the field was not on the form at all. The form posts a
+    # hidden marker so "all unticked" arrives as [] rather than as absent, or
+    # clearing the last status would be indistinguishable from not submitting it.
+    if accepted_statuses is not None:
+        # The hidden marker posts '' so that "all unticked" arrives as a list
+        # rather than as an absent field. It is a marker, not a status.
+        accepted_statuses = [x for x in accepted_statuses if x]
+        bad = [x for x in accepted_statuses if x not in STATUSES]
+        if bad:
+            return _refuse(f'not a lead status: {", ".join(bad)}')
     if camp['type'] == 'call':
         missing = [n for n, v in (('prompt version', agent_l1_version),
                                   ('daily cap', daily_cap),
@@ -1921,10 +1984,8 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(Non
                      ('email_daily_cap', email_daily_cap)):
             if v is not None:
                 fields[k] = v
-        # Written as NULL when the operator picked "none", so the choice sticks
-        # rather than silently keeping the old drip.
-        if default_drip_id is not None:
-            fields['default_drip_id'] = default_drip_id.strip() or None
+        if accepted_statuses is not None:
+            fields['accepted_statuses'] = accepted_statuses
         if camp['type'] == 'call':
             fields.update(_retry_fields(max_attempts, retry_busy,
                                         retry_no_answer, retry_voicemail))
@@ -2038,26 +2099,23 @@ def campaign_stop(campaign_id: str, confirm: str = Form('')):
     """
     Stop a campaign.
 
-    ⚠️ STOPPING A DRIP THAT A CALL CAMPAIGN FEEDS IS NEVER SILENT. drip_for()
-    refuses to route a lead into a stopped drip - deliberately, so a lead never
-    lands on whatever copy happens to be running instead - which means stopping
-    a drip quietly changes what happens to every future lead of every campaign
-    pointing at it: email 1 goes out and nothing follows.
+    ⚠️ STOPPING A DRIP WITH LEADS IN IT IS NEVER SILENT. Only a RUNNING drip
+    sends, so stopping one means every lead currently qualifying receives
+    nothing - mid-sequence, with no error and no queue to look at.
 
-    So it bounces to a confirmation naming the campaigns affected, the same shape
-    as starting a call campaign while another runs. Nothing is orphaned in the
-    database - default_drip_id still points here and takes effect again when it
-    restarts - but the CONSEQUENCE is invisible without this.
+    The confirmation used to name the CALL CAMPAIGNS that fed it. Nothing feeds a
+    drip now, so it names the count of leads that qualify right now instead:
+    the same consequence, measured by the mechanism that actually decides it.
 
-    There is no delete route for a campaign, so a drip cannot be deleted out from
-    under a wiring; stopping is the only way to break the chain.
+    Nothing is lost by stopping - the gate is unchanged and the same leads
+    qualify again the moment it restarts. There is no delete route for a
+    campaign, so stopping is the only way to break the chain.
     """
     row = campaigns.get(campaign_id)
     if row is None:
         return HTMLResponse('<p>no such campaign</p>', status_code=404)
     if row['type'] == 'drip' and confirm != 'yes':
-        fed = campaigns.feeders(campaign_id)
-        if fed:
+        if _drip_mod.roster(campaign_id, limit=1):
             return RedirectResponse(
                 f'/campaign/{campaign_id}?stop_confirm=1', status_code=303)
     row = campaigns.stop(campaign_id)
@@ -2100,7 +2158,10 @@ def today_page(request: Request, sent: str = ''):
                             -- NAMED FIRST among the email cases, because it is
                             -- the one nothing else would ever tell you about.
                             WHEN l.emailed_at IS NOT NULL
-                                 AND l.drip_campaign_id IS NULL
+                                 AND NOT EXISTS (
+                                       SELECT 1 FROM campaign_configs dc
+                                        WHERE dc.type = 'drip' AND dc.is_running
+                                          AND l.status = ANY(dc.accepted_statuses))
                                  AND l.replied_at IS NULL
                                  THEN 'emailed, on no drip - the sequence stalled'
                             WHEN l.dm_email IS NOT NULL

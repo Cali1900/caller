@@ -263,7 +263,7 @@ def parse_email_csv(text: str):
     return ok, rejects
 
 
-def upload_emails(text: str, drip_campaign_id=None):
+def upload_emails(text: str):
     """
     Insert email-only leads into the POOL. Returns a report.
 
@@ -275,7 +275,7 @@ def upload_emails(text: str, drip_campaign_id=None):
 
     LANDS IN THE POOL, never queued and never on a drip by this function alone.
     Uploading has never been the thing that starts contact and it is not going to
-    become it: `drip_campaign_id` is accepted so a batch CAN be routed in one
+    become it: the batch lands as `imported` and is picked up by whichever
     act, and when it is given the leads are put on that drip explicitly and the
     activity line says so.
 
@@ -286,7 +286,7 @@ def upload_emails(text: str, drip_campaign_id=None):
     second row for it.
     """
     rows, rejects = parse_email_csv(text)
-    inserted = skipped = routed = 0
+    inserted = skipped = 0
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             for r in rows:
@@ -300,7 +300,11 @@ def upload_emails(text: str, drip_campaign_id=None):
                               %(city)s, %(state)s, COALESCE(%(segment)s,'default'),
                               %(external_ref)s, %(demands_per_month)s,
                               %(demands_per_month_raw)s,
-                              'import', 'pool', 'new'
+                              -- ⚠️ 'imported', NOT 'new'. 'new' means "waiting to
+                              -- be dialled", and these have no phone. The status
+                              -- IS the drip gate now, so it has to say what the
+                              -- lead actually is.
+                              'import', 'pool', 'imported'
                         WHERE NOT EXISTS (
                               SELECT 1 FROM leads l
                                WHERE lower(btrim(l.dm_email)) = %(dm_email)s)
@@ -316,10 +320,18 @@ def upload_emails(text: str, drip_campaign_id=None):
                        VALUES (%s,'uploaded','added to pool (email only)',%s)""",
                     (lid, f"{r['company']} <{r['dm_email']}> - no phone, so not "
                           f"dialable until a number and a timezone are added"))
-                if drip_campaign_id:
-                    from api import drip as _drip
-                    if _drip.enter(cur, lid, drip_campaign_id):
-                        routed += 1
+                # ⚠️ THE STATUS IS THE ENTRY. An imported lead lands as
+                # 'imported' and whichever running drips accept that status pick
+                # it up - there is no routing decision to make here and no
+                # campaign to name.
+                #
+                # NOT 'emailed': nothing has been emailed to them and emailed_at
+                # is NULL. Reusing the label would be one word meaning two
+                # things, which is the shape this codebase keeps paying for. It
+                # also keeps the choice open - one gate accepting both, or
+                # separate drips with different copy, which is wanted anyway
+                # because "I called your office" is a lie for an imported lead.
     return {'parsed': len(rows), 'inserted': inserted, 'duplicates': skipped,
             'rejected': len(rejects), 'rejects': rejects[:50],
-            'routed_to_drip': routed}
+            # Nothing is "routed" any more: the status is the entry.
+            'imported_status': 'imported'}

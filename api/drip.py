@@ -313,139 +313,138 @@ def save_steps(campaign_id, rows):
 # entry: sending email 1 is the ONLY way in
 # ---------------------------------------------------------------------------
 
-def drip_for(campaign):
+def link_email_1(cur, lead_id, step_id) -> bool:
     """
-    WHICH DRIP A CALL CAMPAIGN'S LEADS ENTER when email 1 is sent.
+    Attach email 1's send row to step 1, if there is one to attach. True when it
+    linked - and a link means step 1 must NOT be sent.
 
-    THE CAMPAIGN DECIDES (default_drip_id). A campaign already owns email 1's
-    copy, so owning what FOLLOWS email 1 is the same shape rather than a new
-    concept - and it is the only thing that survives a second drip existing.
+    ⚠️ THIS IS THE HALF OF enter() THAT COULD NOT DIE. Assignment is gone, but
+    the link is what stops a CALL-SOURCED lead receiving the cold opener twice:
+    email 1 already went to that firm, its email_sends row carries step_id NULL
+    because no drip existed when it went, and ALREADY_SENT_STOP matches on
+    step_id. Without the link, step 1 is unsent with delay_days 0 and
+    `emailed_at + 0 days <= now()` is true, so a firm we CALLED receives an
+    opener that says nothing about the call.
 
-    ⚠️ only_drip() USED TO BE THE MECHANISM AND IT DOES NOT SCALE PAST ONE. It
-    assigns only when exactly ONE drip runs, so the moment there are two - a
-    call-sourced sequence and an imported one, for any reason at all - every
-    call-sourced lead that got email 1 joined NO DRIP: email 1 out, lead at
-    'emailed', nothing following up, and nothing saying so until somebody opened
-    that lead. It is a FALLBACK now, for the single-drip case where naming one
-    would be ceremony.
+    It used to happen once, at assignment. Membership is derived now, so there is
+    no assignment to hang it on - it happens LAZILY, at selection, which is the
+    same rule triggered by a different event. The two entry paths still agree:
 
-    Returns a campaign row, or None. A None here is not silent: the lead shows
-    up in /today's needs-you queue as emailed and on no drip.
+      call-sourced   email 1 IS step 1 -> linked here, next due is step 2
+      imported       no email 1 -> nothing to link, step 1 sends normally
     """
-    from api import campaigns
-    want = (campaign or {}).get('default_drip_id')
-    if want:
-        named = campaigns.get(want)
-        # Only if it is still a RUNNING drip. A campaign pointing at a stopped
-        # or deleted sequence must not silently fall back to whatever else is
-        # running - that is how a lead lands on the wrong copy.
-        if named and named['type'] == 'drip' and named['is_running']:
-            return named
-        return None
-    return only_drip()
-
-
-def only_drip():
-    """
-    The single running drip, or None when there is none or several.
-
-    A FALLBACK, not the mechanism - see drip_for(). Auto-assigning from a list
-    of one is a decision nobody would make differently; auto-assigning from a
-    list of two is a guess.
-    """
-    from api import campaigns
-    running = campaigns.running_drips()
-    return running[0] if len(running) == 1 else None
-
-
-def enter(cur, lead_id, drip_campaign_id) -> bool:
-    """
-    Put a lead on a drip. Takes a CURSOR: this runs inside mark_emailed()'s
-    transaction, so entering the drip and stamping emailed_at commit together.
-    A lead with emailed_at and no drip, or a drip and no emailed_at, is a state
-    the schedule cannot be computed from.
-
-    ⚠️  leads.campaign_id IS NOT TOUCHED. It stays the CALL campaign that
-    sourced this lead, because it is the daily cap's counting key and the
-    funnel's attribution key - see migration 036. The dialer needs no change:
-    STAGE_DIALABLE is `AND NOT l.has_confirmed_email`, so a lead that has had
-    email 1 is already not a candidate.
-    """
-    if not drip_campaign_id:
-        return False
-    # STAMP WHEN IT ENTERED. Step 1's delay is measured from here, so without
-    # this a 15-minute step 1 would have nothing to count from.
     cur.execute(
-        """UPDATE leads SET drip_campaign_id = %s,
-                          drip_entered_at = now(), updated_at = now()
-            WHERE lead_id = %s AND drip_campaign_id IS NULL
-        RETURNING lead_id""", (drip_campaign_id, lead_id))
-    if cur.fetchone() is None:
+        """UPDATE email_sends SET step_id = %s
+            WHERE lead_id = %s AND seq = 1 AND step_id IS NULL
+              AND sent_at IS NOT NULL""", (step_id, lead_id))
+    if not cur.rowcount:
         return False
-    # ⚠️ STEP 1 IS THE FIRST EMAIL, WHOEVER SENT IT.
-    #
-    # A call-sourced lead has already had email 1 - that send is what let it in
-    # here - and its email_sends row carries step_id NULL because no drip existed
-    # when it went. ALREADY_SENT_STOP matches on step_id, so without this the
-    # drip's step 1 (delay 0) would be unsent and due IMMEDIATELY: the firm gets
-    # the same opener twice, minutes apart.
-    #
-    # Linking email 1 to step 1 makes both entry paths agree:
-    #
-    #   call-sourced   email 1 IS step 1 -> next due is step 2, at its delay
-    #   imported       no email 1 -> step 1 is due now, and sending it stamps
-    #                  emailed_at (see DUE_NOW and send_step)
-    # ⚠️ RESOLVE STEP 1 FIRST, and only claim a link if there IS one.
-    #
-    # The previous version put the lookup in the UPDATE's SET clause. On a drip
-    # with NO STEPS YET that subquery returns NULL, so it set step_id = NULL - a
-    # no-op - while cur.rowcount was still 1 because the WHERE matched. The code
-    # believed it had linked email 1 to step 1 and wrote "email 1 counts as step
-    # 1" to the timeline. It had not.
-    #
-    # THE CONSEQUENCE WAS A WRONG EMAIL TO A REAL FIRM. Add the sequence later and
-    # step 1 has no send row for that lead, delay_days is 0, emailed_at is set -
-    # so `emailed_at + 0 days <= now()` is true, nothing excludes it, and a firm
-    # we CALLED receives step 1's cold opener, which says nothing about the call.
-    #
-    # rowcount answers "did the UPDATE match a row", never "did it find a step".
-    cur.execute(
-        """SELECT step_id FROM drip_steps
-            WHERE campaign_id = %s AND deleted_at IS NULL
-            ORDER BY position LIMIT 1""", (drip_campaign_id,))
-    first_step = cur.fetchone()
-    linked = 0
-    if first_step:
-        cur.execute(
-            """UPDATE email_sends SET step_id = %s
-                WHERE lead_id = %s AND seq = 1 AND step_id IS NULL
-                  AND sent_at IS NOT NULL""",
-            (first_step['step_id'], lead_id))
-        linked = cur.rowcount
     cur.execute(
         """INSERT INTO activity (lead_id, kind, summary, detail)
-           VALUES (%s, 'drip', 'entered the drip', %s)""",
-        (lead_id, _entry_detail(linked, bool(first_step))))
+           VALUES (%s,'drip','email 1 counts as step 1',%s)""",
+        (lead_id, 'linked when the drip first considered this lead, so the '
+                  'opener is not sent twice'))
     return True
 
 
-def _entry_detail(linked, has_steps) -> str:
+def qualifies_for(lead) -> list:
     """
-    What actually happened, in the three cases that exist. The old message
-    covered two and asserted the wrong one in the third.
+    The RUNNING drips this lead currently qualifies for, and why.
+
+    Membership is never a mystery: the answer is always "because status is X".
     """
-    if linked:
-        return 'email 1 counts as step 1; the sequence is scheduled from that send'
-    if not has_steps:
-        # ⚠️ THE CASE THAT SENT A WRONG EMAIL. Say it plainly on the timeline so
-        # the lead is findable, rather than recording a link that did not happen.
-        return ('⚠️ this drip has NO STEPS YET, so email 1 could not be recorded '
-                'against step 1. Write the sequence before this lead is due, or '
-                'it will receive step 1 as if it had never been called.')
-    return 'no email has gone yet - step 1 is due now and will start the clock'
+    if not lead or not lead.get('status'):
+        return []
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT campaign_id, name, is_running, accepted_statuses
+                     FROM campaign_configs
+                    WHERE type = 'drip' AND %s = ANY(accepted_statuses)
+                    ORDER BY name""", (lead['status'],))
+            return [dict(r, why=f"status is {lead['status']}")
+                    for r in cur.fetchall()]
 
 
-def record_send(cur, lead_id, step_id, seq, to_email, subject, sent_by):
+def sending_statuses() -> dict:
+    """
+    {status: [drip names]} for every status a RUNNING drip accepts.
+
+    ⚠️ THE STATUS DROPDOWN IS A SEND CONTROL NOW. It used to mostly govern
+    dialling, where a change is cheap. Membership is derived from it, so setting
+    a lead to an accepted status can put mail on the wire within the hour, and
+    every other control here that can do that says so before it is used.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT name, accepted_statuses FROM campaign_configs
+                            WHERE type = 'drip' AND is_running
+                            ORDER BY name""")
+            out = {}
+            for r in cur.fetchall():
+                for st in r['accepted_statuses'] or []:
+                    out.setdefault(st, []).append(r['name'])
+            return out
+
+
+def gate_counts(statuses=None) -> dict:
+    """
+    {status: how many leads have it} - so a gate change can be read BEFORE it is
+    made. A checkbox whose effect is invisible until you save is a guess.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT status, count(*) AS n FROM leads GROUP BY status')
+            return {r['status']: r['n'] for r in cur.fetchall()}
+
+
+def overlaps(campaign_id=None) -> list:
+    """
+    Statuses accepted by MORE THAN ONE running drip, with the drips that share
+    them. A lead with such a status receives every one of those sequences.
+
+    ⚠️ A WARNING, NOT A REFUSAL. Product news and a follow-up sequence are
+    different conversations and both can be legitimate for one firm. The point is
+    that it is a decision made at CONFIG time rather than a discovery made when a
+    firm gets two emails in one afternoon.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT campaign_id, name, accepted_statuses
+                             FROM campaign_configs
+                            WHERE type = 'drip' AND is_running""")
+            drips = [dict(r) for r in cur.fetchall()]
+    by_status = {}
+    for d in drips:
+        for st in d['accepted_statuses'] or []:
+            by_status.setdefault(st, []).append(d)
+    out = []
+    for st, ds in sorted(by_status.items()):
+        if len(ds) < 2:
+            continue
+        if campaign_id and not any(str(d['campaign_id']) == str(campaign_id)
+                                   for d in ds):
+            continue
+        out.append({'status': st, 'drips': ds,
+                    'names': [d['name'] for d in ds]})
+    return out
+
+
+# ⚠️ `engaged` MEANS THEY ANSWERED. A drip accepting it keeps emailing someone
+# who replied or clicked, which is the opposite of what the reply-stop is for.
+# That can be deliberate - a nurture sequence for warm leads - so it WARNS.
+CAUTION_STATUSES = {
+    'engaged': ('they replied or clicked - a drip accepting this keeps emailing '
+                'someone who already answered, which is the opposite of the '
+                'reply-stop'),
+    'demo_pending': ('a demo is already booked with them - a cold sequence '
+                     'reads badly at that point'),
+    'human_review': 'these are flagged for you to look at, not to be mailed',
+}
+
+
+def record_send(cur, lead_id, step_id, seq, to_email, subject, sent_by,
+                from_email=None):
     """
     One row per email that actually WENT, with its OWN click token.
 
@@ -463,13 +462,17 @@ def record_send(cur, lead_id, step_id, seq, to_email, subject, sent_by):
     if not (to_email or '').strip():
         raise ValueError(f'lead {lead_id} has no email address - a send row '
                          f'without a recipient is not a send')
+    # ⚠️ from_email IS WHAT THE CAPS COUNT ON. Without it a real send is invisible
+    # to the hourly and daily limits - they would read zero forever and the pace
+    # would exist only in the configuration.
     cur.execute(
         """INSERT INTO email_sends
-               (lead_id, step_id, seq, to_email, subject, sent_by, click_token)
-           VALUES (%s,%s,%s,%s,%s,%s,%s)
+               (lead_id, step_id, seq, to_email, subject, sent_by, from_email,
+                click_token)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING *""",
         (lead_id, step_id, seq, to_email.strip(), subject, sent_by,
-         secrets.token_urlsafe(16)))
+         from_email, secrets.token_urlsafe(16)))
     return cur.fetchone()
 
 
@@ -494,7 +497,9 @@ def source_split(campaign_id) -> dict:
                 """SELECT count(*) AS total,
                           count(*) FILTER (WHERE lead_source = 'import') AS imported,
                           count(*) FILTER (WHERE lead_source <> 'import') AS call
-                     FROM leads WHERE drip_campaign_id = %s""", (campaign_id,))
+                     FROM leads l
+                     JOIN campaign_configs c ON c.campaign_id = %s
+                    WHERE l.status = ANY(c.accepted_statuses)""", (campaign_id,))
             return dict(cur.fetchone())
 
 
@@ -534,6 +539,23 @@ ARCHIVED_STOP = "AND l.status <> 'archived'"
 # exactly as it is for a call campaign, and one_running_campaign is scoped to
 # type='call' so many drips run at once.
 RUNNING_STOP = "AND c.is_running AND c.type = 'drip'"
+# ⚠️ THE GATE. Membership is DERIVED from status, continuously - there is no
+# assignment column and nothing routes a lead into a drip.
+#
+# The old model stored drip_campaign_id at email-1 time and the lead stayed there
+# whatever happened next, so `status` and `drip_campaign_id` were two facts
+# saying one thing and could disagree. A lead marked `engaged` was still queued
+# for the next step, because nothing consulted the status. Guarding that needs a
+# gate per disagreement; DERIVING membership makes the disagreement impossible.
+#
+# Re-evaluated on EVERY selection, which is what makes a status change take
+# effect mid-sequence with nothing having to notice and act.
+#
+# accepted_statuses is a LIST: a drip may accept `emailed` and `max_attempts`
+# together, and a lead matching ANY of them qualifies. Two running drips
+# accepting one status BOTH send - deliberate, and warned about at config time
+# rather than refused.
+GATE = 'AND l.status = ANY(c.accepted_statuses)'
 # Terminal states a person or the system has already reached.
 TERMINAL_STOP = ("AND l.status NOT IN ('dnc','bad_email','won','lost',"
                  "'demo_booked','unsubscribed')")
@@ -561,12 +583,13 @@ ALREADY_SENT_STOP = ('AND NOT EXISTS (SELECT 1 FROM email_sends es '
 # ONE ANCHOR, not two. The alternative was a separate sequence_started_at
 # column, which would mean two columns that must agree forever; emailed_at
 # already means "when the sequence started" and keeps meaning exactly that.
-# STEP 1's clock runs from drip_entered_at, NOT from emailed_at - emailed_at
+# STEP 1's clock runs from status_changed_at, NOT from emailed_at - emailed_at
 # does not exist yet, because step 1 is what creates it. Steps 2+ run from
 # emailed_at. Different events, so different anchors; see migration 040 for why
 # that is not the duplicate-anchor fault rejected when the import was designed.
 #
-# coalesce on drip_entered_at so a lead that predates the column still works:
+# status_changed_at is NOT NULL (backfilled and trigger-maintained), so no
+# coalesce is needed and a NULL cannot silently exclude a lead:
 # an absent entry time reads as "already elapsed", never as "never due", which
 # is the direction that fails loudly rather than silently.
 # ⚠️ STEP 1 IS NEVER SCHEDULED BY DAYS. It IS the first send, so "N days
@@ -581,15 +604,22 @@ ALREADY_SENT_STOP = ('AND NOT EXISTS (SELECT 1 FROM email_sends es '
 # THIS is what makes it safe: position > 1 means step 1 cannot be reached
 # down the days path at all, whatever happened at entry.
 #
-#   step 1     only for a lead with NO emailed_at, timed from drip_entered_at
+#   step 1     only for a lead with NO emailed_at, timed from status_changed_at
 #   steps 2+   from emailed_at, which step 1 (or the call campaign) created
 DUE_NOW = ("AND ((l.emailed_at IS NOT NULL AND s.position > 1"
            "      AND l.emailed_at + (s.delay_days || ' days')::interval"
            "          <= now())"
            "  OR (l.emailed_at IS NULL AND s.position = 1"
-           "      AND coalesce(l.drip_entered_at, 'epoch'::timestamptz)"
+           "      AND l.status_changed_at"
            "          + (coalesce(s.delay_minutes, 0) || ' minutes')::interval"
            "          <= now()))")
+# ⚠️ STEP 1 ANCHORS TO status_changed_at, not to an entry event. Joining a drip
+# used to be an EVENT that stamped drip_entered_at; with membership derived
+# there is no event - a lead simply qualifies or does not. The moment it BEGAN to
+# qualify is the moment its status last changed, which is what a "N days after
+# joining" delay has always meant. Maintained by trigger, because status is
+# written from six places and a column depending on all of them remembering is a
+# column that is wrong.
 
 # ---------------------------------------------------------------------------
 # PACING. Four layers, and they gate SELECTION - never the send.
@@ -607,8 +637,8 @@ DUE_NOW = ("AND ((l.emailed_at IS NOT NULL AND s.position > 1"
 
 # ⚠️ BUSINESS HOURS IN THE CONTACT'S TIMEZONE, REUSING THE CALL LOGIC VERBATIM.
 # This is windows.PREFERENCE_WINDOW with one substitution: the drip's windows
-# belong to the DRIP campaign, so it keys on l.drip_campaign_id instead of
-# l.campaign_id. A derived string rather than a copy, because two copies of a
+# belong to the DRIP campaign, and with membership derived the drip in scope is
+# `c` in the query itself - there is no drip column on the lead to key on. A derived string rather than a copy, because two copies of a
 # timezone rule are two rules, and the first time they disagree one of them is
 # mailing a firm at 4am.
 #
@@ -628,7 +658,7 @@ def _email_window() -> str:
     from api import windows
     return (windows.PREFERENCE_WINDOW
             .replace('w.campaign_id = l.campaign_id',
-                     'w.campaign_id = l.drip_campaign_id')
+                     'w.campaign_id = c.campaign_id')
             .replace('l.timezone', "coalesce(l.timezone, %(op_tz)s)"))
 
 
@@ -639,10 +669,7 @@ def _email_window() -> str:
 # purpose: the wrong answer costs delay, the other wrong answer costs a domain.
 _MAILBOX_SENDS = """
         SELECT count(*) FROM email_sends es
-          JOIN leads ml            ON ml.lead_id = es.lead_id
-          JOIN campaign_configs mc ON mc.campaign_id
-               = coalesce(ml.drip_campaign_id, ml.campaign_id)
-         WHERE mc.sender_email = c.sender_email
+         WHERE es.from_email = c.sender_email
            AND es.sent_at IS NOT NULL
 """
 
@@ -666,7 +693,9 @@ SELECT_DUE = """
            c.campaign_id AS drip_campaign_id, c.name AS drip_name,
            (l.emailed_at + (s.delay_days || ' days')::interval) AS due_at
       FROM leads l
-      JOIN campaign_configs c ON c.campaign_id = l.drip_campaign_id
+      -- NO JOIN KEY ON THE LEAD. Every drip is considered for every lead and the
+      -- GATE below decides, which is what "membership is derived" means in SQL.
+      JOIN campaign_configs c ON c.type = 'drip'
       JOIN drip_steps s       ON s.campaign_id = c.campaign_id
                              AND s.deleted_at IS NULL
      -- NOT "emailed_at IS NOT NULL": an imported lead is on a drip before any
@@ -679,6 +708,7 @@ SELECT_DUE = """
        {do_not_send}
        {enabled}
        {already_sent}
+       {gate}
        {due_now}
        {pacing}
      -- The EARLIEST unsent due step for each lead, so a sequence cannot skip
@@ -711,7 +741,7 @@ def _build_select(due_clause=DUE_NOW, pacing=True, pace_sql=None):
         running=RUNNING_STOP, replied=REPLIED_STOP, archived=ARCHIVED_STOP,
         terminal=TERMINAL_STOP, do_not_send=DO_NOT_SEND_STOP,
         enabled=ENABLED_STOP, already_sent=ALREADY_SENT_STOP,
-        due_now=due_clause,
+        gate=GATE, due_now=due_clause,
         pacing=(pace_sql if pace_sql is not None
                 else ((HOURLY_CAP + DAILY_CAP + _email_window())
                       if pacing else '')))
@@ -730,9 +760,23 @@ def due(limit: int = 50):
             cur.execute(_build_select(), {'op_tz': _op_tz()})
             seen, out = set(), []
             for r in cur.fetchall():
-                if r['lead_id'] in seen:
+                # ⚠️ ONE STEP PER LEAD PER DRIP, NOT ONE PER LEAD. Within a drip
+                # the rule is unchanged: after a pause several steps can be due
+                # and sending them all puts three emails in front of one firm.
+                #
+                # ACROSS drips it has to be per (lead, drip), or a lead
+                # qualifying for two sequences would only ever receive the
+                # earlier-due one and the other would starve. Overlap is
+                # deliberate, so it has to be reachable.
+                #
+                # Safe only because pacing exists: the worker sends ONE email per
+                # jittered gap, so two drips' mail to one firm is 60-300s apart
+                # rather than simultaneous. Before the gap, this key would have
+                # been a burst.
+                key = (r['lead_id'], r['drip_campaign_id'])
+                if key in seen:
                     continue
-                seen.add(r['lead_id'])
+                seen.add(key)
                 out.append(r)
                 if len(out) >= limit:
                     break
@@ -840,7 +884,7 @@ def roster(campaign_id, limit: int = 500) -> list:
     row onto three lines.
 
     `next_due` is the SCHEDULE, computed the same way DUE_NOW computes it - step 1
-    from drip_entered_at, later steps from emailed_at. It deliberately ignores the
+    from status_changed_at, later steps from emailed_at. It deliberately ignores the
     pace layers: a cap shifts when a mail goes out, and a roster that showed
     "next: never" for a lead behind a cap would be lying about the sequence.
     """
@@ -872,7 +916,7 @@ def roster(campaign_id, limit: int = 500) -> list:
                 nxt AS (
                     SELECT l.lead_id,
                            min(CASE WHEN st.position = 1
-                                    THEN coalesce(l.drip_entered_at, now())
+                                    THEN l.status_changed_at
                                          + (coalesce(st.delay_minutes, 0)
                                             || ' minutes')::interval
                                     ELSE l.emailed_at
@@ -880,16 +924,17 @@ def roster(campaign_id, limit: int = 500) -> list:
                                END) AS due_at,
                            min(st.position) AS next_step
                       FROM leads l
+                      JOIN campaign_configs gc ON gc.campaign_id = %(cid)s
                       JOIN drip_steps st ON st.campaign_id = %(cid)s
                                         AND st.deleted_at IS NULL AND st.enabled
-                     WHERE l.drip_campaign_id = %(cid)s
+                     WHERE l.status = ANY(gc.accepted_statuses)
                        AND NOT EXISTS (SELECT 1 FROM email_sends es
                                         WHERE es.lead_id = l.lead_id
                                           AND es.step_id = st.step_id)
                      GROUP BY l.lead_id
                 )
                 SELECT l.lead_id, l.company, l.dm_name, l.dm_email, l.status,
-                       l.emailed_at, l.replied_at, l.drip_entered_at,
+                       l.emailed_at, l.replied_at, l.status_changed_at,
                        l.lead_source, l.timezone,
                        coalesce(p.steps_sent, 0) AS steps_sent,
                        p.last_sent, p.last_step,
@@ -902,8 +947,12 @@ def roster(campaign_id, limit: int = 500) -> list:
                   LEFT JOIN per_lead p ON p.lead_id = l.lead_id
                   LEFT JOIN clicks   cl ON cl.lead_id = l.lead_id
                   LEFT JOIN nxt      n  ON n.lead_id = l.lead_id
-                 WHERE l.drip_campaign_id = %(cid)s
-                 ORDER BY coalesce(p.last_sent, l.drip_entered_at) DESC NULLS LAST
+                  JOIN campaign_configs gc2 ON gc2.campaign_id = %(cid)s
+                 -- ⚠️ WHO IS ON THIS DRIP IS A QUESTION ABOUT STATUS. There is no
+                 -- membership column to read; the roster asks the same question
+                 -- the sender asks, so the two cannot disagree about who is here.
+                 WHERE l.status = ANY(gc2.accepted_statuses)
+                 ORDER BY coalesce(p.last_sent, l.status_changed_at) DESC NULLS LAST
                  LIMIT %(lim)s""", {'cid': campaign_id, 'lim': limit})
             rows = [dict(r) for r in cur.fetchall()]
     return _with_drip_state(campaign_id, rows)
@@ -1088,10 +1137,7 @@ def sent_counts(campaign_id=None) -> dict:
                          WHERE (es.sent_at AT TIME ZONE %(tz)s)::date
                              = (now() AT TIME ZONE %(tz)s)::date) AS today
                   FROM email_sends es
-                  JOIN leads ml            ON ml.lead_id = es.lead_id
-                  JOIN campaign_configs mc ON mc.campaign_id
-                       = coalesce(ml.drip_campaign_id, ml.campaign_id)
-                 WHERE mc.sender_email = %(se)s
+                 WHERE es.from_email = %(se)s
                    AND es.sent_at IS NOT NULL""",
                 {'tz': _op_tz(), 'se': camp['sender_email']})
             n = cur.fetchone()
@@ -1161,12 +1207,36 @@ def send_step(cfg, row) -> dict:
                 if lead is None:
                     return {'sent': False, 'detail': 'no such lead'}
                 lead = dict(lead)
-                camp = campaigns.get(lead.get('drip_campaign_id'))
+                # THE DRIP IS THE ONE THAT SELECTED THIS ROW. A lead may
+                # qualify for several, so "the lead's drip" is not a thing that
+                # exists any more.
+                camp = campaigns.get(row.get('drip_campaign_id'))
 
                 # 1. THE GATE. The same seven exclusions email 1 uses, reused
                 #    verbatim - the brief requires them on EVERY step, not just
                 #    the first. `step=True` swaps the email-1 mode check for the
                 #    drip's own switch; nothing else differs.
+                # ⚠️ STEP 1 OF A LEAD THAT ALREADY HAD EMAIL 1 IS A LINK, NOT
+                # A SEND. This is enter()'s surviving half, moved from assignment
+                # time to selection time. Without it a call-sourced lead receives
+                # the cold opener a second time - step 1 unsent, delay_days 0,
+                # emailed_at set, nothing excluding it.
+                # ⚠️ ATTRIBUTE EMAIL 1 TO STEP 1 BEFORE SENDING ANYTHING ELSE.
+                # This is enter()'s surviving half, and it runs on whichever step
+                # is selected first - NOT on step 1, because DUE_NOW never selects
+                # position 1 for a lead that already has emailed_at. That is also
+                # why it cannot cause a duplicate opener, and why believing it
+                # could was wrong.
+                #
+                # Unlinked, email 1's row carries step_id NULL forever: step 1
+                # reads "0 sent" for every call-sourced lead, and _maybe_finish
+                # counts done steps by joining to drip_steps, so `done < total`
+                # holds permanently and the lead never leaves the drip.
+                if lead.get('emailed_at'):
+                    _first = steps(row['drip_campaign_id'])
+                    if _first:
+                        link_email_1(cur, lead_id, _first[0]['step_id'])
+
                 decision = autosend.eligibility(lead, camp, drip_step=True)
                 if not decision['ok']:
                     reason = '; '.join(decision['reasons'])
@@ -1194,7 +1264,8 @@ def send_step(cfg, row) -> dict:
                 try:
                     send = record_send(cur, lead_id, step_id, seq, to_email,
                                        row['subject'],
-                                       f'auto:drip:{cfg.SENDER_DOMAIN}')
+                                       f'auto:drip:{cfg.SENDER_DOMAIN}',
+                                       from_email=(camp or {}).get('sender_email'))
                 except Exception:
                     # The UNIQUE (lead_id, step_id) index refused it: this step
                     # has already gone to this lead. Not an error - a race with
@@ -1250,7 +1321,7 @@ def send_step(cfg, row) -> dict:
                            VALUES (%s,'note','drip send FAILED - needs a person',%s)""",
                         (lead_id, str(result.get('detail'))[:400]))
         if result.get('ok'):
-            _maybe_finish(cfg, lead_id)
+            _maybe_finish(cfg, lead_id, row['drip_campaign_id'])
         return {'sent': bool(result.get('ok')),
                 'detail': str(result.get('detail'))[:200]}
 
@@ -1271,7 +1342,7 @@ def _audit(cur, lead_id, to_email, outcome, detail=''):
            VALUES (%s,%s,%s,%s)""", (lead_id, to_email, outcome, detail[:500]))
 
 
-def _maybe_finish(cfg, lead_id) -> bool:
+def _maybe_finish(cfg, lead_id, drip_campaign_id) -> bool:
     """
     THE SEQUENCE TERMINATES. After the last step, silence means archive
     (no_reply) - or hold, if the campaign says so.
@@ -1284,23 +1355,24 @@ def _maybe_finish(cfg, lead_id) -> bool:
     from api import archive, campaigns
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT l.drip_campaign_id,
+            cur.execute("""SELECT %(cid)s::uuid AS drip_campaign_id,
                                   -- ENABLED ONLY. A disabled tail step would
                                   -- otherwise never be 'done', so the sequence
                                   -- would never terminate and the lead would
                                   -- sit in the drip forever - the limbo the
                                   -- whole model refuses.
                                   (SELECT count(*) FROM drip_steps s
-                                    WHERE s.campaign_id = l.drip_campaign_id
+                                    WHERE s.campaign_id = %(cid)s
                                       AND s.deleted_at IS NULL
                                       AND s.enabled)             AS total,
                                   (SELECT count(*) FROM email_sends es
                                     JOIN drip_steps s2 ON s2.step_id = es.step_id
                                    WHERE es.lead_id = l.lead_id
-                                     AND s2.campaign_id = l.drip_campaign_id
+                                     AND s2.campaign_id = %(cid)s
                                      AND s2.deleted_at IS NULL
                                      AND s2.enabled)            AS done
-                             FROM leads l WHERE l.lead_id = %s""", (lead_id,))
+                             FROM leads l WHERE l.lead_id = %(lid)s""",
+                        {'cid': drip_campaign_id, 'lid': lead_id})
             r = cur.fetchone()
     if not r or not r['drip_campaign_id'] or r['done'] < r['total']:
         return False
@@ -1334,6 +1406,22 @@ def run_once(cfg, limit: int = 50) -> dict:
 STOP_REASONS = ('replied', 'bounced', 'unsubscribed', 'demo_booked',
                 'by_hand', 'no_reply')
 
+# ⚠️ WHICH STATUS EACH STOP MEANS. With membership derived from status, stopping
+# a lead IS setting a status no running drip accepts - there is no assignment to
+# clear. Mapping rather than a single "stopped" value because the reason has to
+# survive: six months on, "it said no" and "it never answered" are different
+# facts and only the status records which.
+STOP_STATUS = {
+    'replied': 'engaged',
+    'bounced': 'bad_email',
+    'unsubscribed': 'archived',
+    'demo_booked': 'demo_booked',
+    'no_reply': 'lost_no_response',
+    # A hand stop has no outcome to record, so it parks the lead: out of every
+    # gate, still visible, still workable.
+    'by_hand': 'paused',
+}
+
 
 def stop(lead_id, reason: str, by: str = 'operator') -> bool:
     """
@@ -1354,17 +1442,25 @@ def stop(lead_id, reason: str, by: str = 'operator') -> bool:
     from api import archive
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT drip_campaign_id, dm_email FROM leads
+            cur.execute("""SELECT status, dm_email FROM leads
                             WHERE lead_id = %s FOR UPDATE""", (lead_id,))
             row = cur.fetchone()
             if row is None:
                 return False
-            # drip_entered_at goes with it: if this lead is ever put on a drip
-            # again, step 1 must be timed from THAT entry, not the old one.
-            cur.execute(
-                """UPDATE leads SET drip_campaign_id = NULL,
-                          drip_entered_at = NULL, updated_at = now()
-                    WHERE lead_id = %s""", (lead_id,))
+            # ⚠️ STOPPING A LEAD IS A STATUS CHANGE NOW, because membership is
+            # derived from status and there is nothing else to clear. Each reason
+            # maps to the status that MEANS it, so the stop and the pipeline
+            # cannot disagree - and the lead falls out of every drip whose gate
+            # no longer matches, which is the same mechanism doing the work
+            # rather than a second one.
+            #
+            # The status carries the reason, so a lead is never "stopped, but
+            # nobody can say why" - the fault archive_reason exists to prevent.
+            new_status = STOP_STATUS.get(reason)
+            if new_status:
+                cur.execute(
+                    """UPDATE leads SET status = %s, updated_at = now()
+                        WHERE lead_id = %s""", (new_status, lead_id))
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, summary, detail)
                    VALUES (%s,'drip',%s,%s)""",

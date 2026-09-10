@@ -8,12 +8,13 @@
 # Nothing is orphaned in the database and the wiring is kept, so this is a warning
 # rather than a refusal. Without it the change is invisible: no error, no lead in
 # any queue, just openers with no sequence behind them.
+# ⚠️ RETARGETED 2026-09-10: nothing FEEDS a drip now, so the confirmation counts
+# the leads that currently QUALIFY instead of the campaigns that pointed at it.
+# Same consequence, measured by the mechanism that decides it.
 TARGET = 'api/web.py'
 EXPECT = 'test_stopping_a_fed_drip_asks_first'
 LABEL = 'stop a fed drip silently'
 OLD = """    if row['type'] == 'drip' and confirm != 'yes':
-        fed = campaigns.feeders(campaign_id)
-        if fed:
-            return RedirectResponse(
-                f'/campaign/{campaign_id}?stop_confirm=1', status_code=303)"""
-NEW = """    pass"""
+        if _drip_mod.roster(campaign_id, limit=1):"""
+NEW = """    if False:
+        if False:"""

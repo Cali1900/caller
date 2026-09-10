@@ -173,32 +173,30 @@ def mark_emailed(lead_id, emailed_by: str, when=None):
                 cur.execute("""SELECT 1 FROM email_sends
                                 WHERE lead_id = %s AND seq = 1""", (lead_id,))
                 if cur.fetchone() is None:
+                    from api import campaigns as _c
+                    _src = (_c.get(row['campaign_id'])
+                            if row.get('campaign_id') else None)
                     _drip.record_send(cur, lead_id, None, 1,
                                       row.get('dm_email') or '', None,
-                                      emailed_by)
+                                      emailed_by,
+                                      from_email=(_src or {}).get('sender_email'))
                     cur.execute("""UPDATE email_sends SET sent_at = %s
                                     WHERE lead_id = %s AND seq = 1""",
                                 (when, lead_id))
 
-            # ENTER THE DRIP. Sending email 1 is the ONLY way in, and it commits
-            # with the emailed_at stamp: a lead with emailed_at and no drip, or
-            # a drip and no emailed_at, is a state the schedule cannot be
-            # computed from. Auto-assigned when exactly ONE drip is running -
-            # no picker for a list of one. With several, a person chooses on the
-            # lead, and drip_campaign_id stays NULL until they do.
+            # ⚠️ NOTHING ROUTES A LEAD INTO A DRIP HERE ANY MORE, and nothing
+            # anywhere else does either. Sending email 1 used to be "the only way
+            # in", assigning drip_campaign_id from the call campaign's
+            # default_drip_id. Membership is DERIVED from status now: the
+            # pipeline.advance() call below sets 'emailed', and every running
+            # drip accepting 'emailed' picks the lead up on the next selection.
+            #
+            # That is the whole entry mechanism, and it is why a status change
+            # later takes the lead straight back out again.
             #
             # leads.campaign_id IS NOT TOUCHED - it stays the CALL campaign that
             # sourced the lead, because it is the daily cap's counting key and
             # the funnel's attribution key. See migration 036.
-            # THE CALL CAMPAIGN DECIDES which sequence follows its email 1;
-            # only_drip() is the fallback when it has not said. See
-            # drip.drip_for() for why the fallback cannot be the mechanism.
-            from api import campaigns as _camps
-            src = (_camps.get(row['campaign_id'])
-                   if row.get('campaign_id') else None)
-            target = _drip.drip_for(src)
-            if target:
-                _drip.enter(cur, lead_id, target['campaign_id'])
 
             # The pipeline stage moves with the send, so the forecast reads
             # a real status instead of deriving one.

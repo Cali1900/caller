@@ -37,65 +37,45 @@ from api import db, senders as _senders
 TEMPLATE_FIELDS = ('subject_with_name', 'subject_without',
                    'body_with_name', 'body_without')
 
-def feeders(drip_campaign_id) -> list:
-    """
-    The CALL campaigns whose leads enter this drip after email 1.
-
-    ⚠️ THE RELATIONSHIP READ FROM THE OTHER END. default_drip_id lives on the
-    call campaign, so the drip itself had no way to say who feeds it - and a
-    wiring you can only see from one side is a wiring nobody can audit. Many
-    call campaigns may point at one drip; that is allowed and normal.
-    """
-    from api import db as _db
-    with _db.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""SELECT campaign_id, name, is_running
-                             FROM campaign_configs
-                            WHERE type = 'call'
-                              AND default_drip_id = %s
-                            ORDER BY name""", (drip_campaign_id,))
-            return [dict(r) for r in cur.fetchall()]
-
-
 def wiring_problems() -> list:
     """
-    Call campaigns whose follow-up drip will not receive anyone, and why.
+    Statuses that will receive NO follow-up, and why.
 
-    ⚠️ THIS IS THE PROACTIVE HALF, AND IT IS WHY THE /today NET WAS NOT ENOUGH.
-    That net finds leads with emailed_at set and no drip - it can only fire AFTER
-    a lead has already been affected. The failure it was meant to catch was a
-    campaign CONFIGURED to send people nowhere, which is observable before anyone
-    is harmed and was completely silent.
+    ⚠️ THE SUCCESSOR TO "emailed and on no drip", rewritten against the gate. It
+    used to look for call campaigns whose default_drip_id was null or stopped.
+    Nothing routes now, so the question is asked of the STATUS instead: a lead
+    reaching `emailed` with no running drip accepting `emailed` gets an opener
+    and nothing after it, exactly as before, and nothing says so.
 
-    Two shapes, and both matter because email 1 can be sent BY HAND from a lead
-    page whether or not the campaign is running:
-
-      no drip        default_drip_id IS NULL - the lead joins nothing
-      stopped drip   the drip exists but is stopped, and drip_for() refuses to
-                     route into a stopped drip rather than falling back to
-                     whatever else happens to be running
+    Reported per STATUS rather than per campaign because that is what decides it.
+    Only statuses that leads actually hold are worth warning about - a warning
+    about a status nobody is in is noise that trains you to ignore the panel.
     """
     from api import db as _db
+    watch = ('emailed', 'imported')
     with _db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT c.campaign_id, c.name, c.is_running,
-                       d.campaign_id AS drip_id, d.name AS drip_name,
-                       d.is_running  AS drip_running,
-                       (SELECT count(*) FROM leads l
-                         WHERE l.campaign_id = c.campaign_id) AS leads
-                  FROM campaign_configs c
-                  LEFT JOIN campaign_configs d
-                         ON d.campaign_id = c.default_drip_id
-                 WHERE c.type = 'call'
-                   AND (c.default_drip_id IS NULL OR NOT d.is_running)
-                 ORDER BY c.is_running DESC, c.name""")
+                SELECT l.status, count(*) AS leads,
+                       (SELECT count(*) FROM campaign_configs d
+                         WHERE d.type = 'drip' AND d.is_running
+                           AND l.status = ANY(d.accepted_statuses)) AS running,
+                       (SELECT count(*) FROM campaign_configs d
+                         WHERE d.type = 'drip'
+                           AND l.status = ANY(d.accepted_statuses)) AS any_drip
+                  FROM leads l
+                 WHERE l.status = ANY(%s)
+                 GROUP BY l.status
+                 ORDER BY l.status""", (list(watch),))
             out = []
             for r in cur.fetchall():
-                r = dict(r)
-                r['why'] = ('no follow-up drip' if not r['drip_id']
-                            else f'{r["drip_name"]} is stopped')
-                out.append(r)
+                if r['running']:
+                    continue
+                out.append({
+                    'status': r['status'], 'leads': r['leads'],
+                    'why': ('a drip accepts it but is stopped' if r['any_drip']
+                            else 'no drip accepts it'),
+                })
             return out
 
 
@@ -117,7 +97,7 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  'email_1_mode', 'email_1_delay_minutes',
                  # Which DRIP campaign this call campaign's leads enter when
                  # email 1 goes out. See drip.drip_for().
-                 'default_drip_id',
+                 'accepted_statuses',
                  # Pipeline forecast. The probabilities are GUESSES and are
                  # per campaign, because two campaigns aimed at different
                  # segments will not convert alike.

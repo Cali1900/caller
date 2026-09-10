@@ -136,10 +136,24 @@
     {% endif %}
 
     <h2>The drip</h2>
-    {% if drip %}
-      <p class="sentbar"><b>{{ drip.name }}</b> &mdash;
-         {{ sends|length }} of {{ drip_steps|length + 1 }} email(s) sent.
-         {% if drip.is_running %}running{% else %}<b>stopped</b>{% endif %}.</p>
+    {# ⚠️ MEMBERSHIP IS DERIVED, SO THE PAGE HAS TO SAY WHY. There is no column
+       to read: this lead is on a drip because its STATUS is accepted there, and
+       "why is this firm getting mail" must have an answer on the screen. #}
+    {% if qualifies %}
+      {% for d in qualifies %}
+      <p class="sentbar"><b>{{ d.name }}</b> &mdash; in it because
+         {{ d.why }}.
+         {% if d.is_running %}running{% else %}<b>stopped</b>, so it sends
+         nothing{% endif %}.</p>
+      {% endfor %}
+      {% if qualifies|length > 1 %}
+      <p class="dim">⚠️ This lead qualifies for <b>{{ qualifies|length }}</b>
+         sequences and will receive all of them. Both accept
+         <code>{{ lead.status }}</code>.</p>
+      {% endif %}
+      <p class="dim">{{ sends|length }} email(s) sent so far. To take this lead
+         off, change its <b>status</b> below &mdash; there is nothing else to
+         change, and a status no drip accepts is what "off" means.</p>
       <form method="post" action="/leads/{{ lead.lead_id }}/drip/stop" class="toolbar">
         <select name="reason">
           {% for r in stop_reasons %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
@@ -149,12 +163,13 @@
           running for everyone else. Every stop records why.</span>
       </form>
     {% elif lead.emailed_at %}
-      <p class="dim">Not on a drip. Email 1 went out
-         {{ lead.emailed_at.strftime('%b %-d') }} and no sequence picked it up
-         &mdash; either none is running, or several are and nobody chose.</p>
+      <p class="dim">On no drip. Email 1 went out
+         {{ lead.emailed_at.strftime('%b %-d') }} and nothing followed it:
+         no running drip accepts <code>{{ lead.status }}</code>.</p>
     {% else %}
-      <p class="dim">A lead joins a drip when <b>email 1</b> is sent. That is the
-         only way in.</p>
+      <p class="dim">On no drip &mdash; no running drip accepts
+         <code>{{ lead.status }}</code>. Membership follows the status: change it
+         below and this lead joins every drip that accepts the new one.</p>
     {% endif %}
 
     {% if sends %}
@@ -263,6 +278,17 @@
       <span class="dim">Your choice overrules the system, and lands on the
         timeline as a hand change.</span>
     </form>
+    {# ⚠️ STATUS IS A SEND CONTROL NOW. It used to mostly govern dialling and a
+       change was cheap. Membership in every drip is derived from it, so setting
+       a lead to a status a running drip accepts can put mail on the wire within
+       the hour - and every other control here that can do that says so. #}
+    {% if status_sends %}
+    <p class="dim" style="margin-top:-6px">⚠️ <b>This is a send control.</b>
+      {% for st, names in status_sends.items() %}
+      Setting this to <code>{{ st }}</code> puts the lead into
+      <b>{{ names | join(' and ') }}</b>.{% endfor %}
+      Its next due step would send once the pace and business hours allow.</p>
+    {% endif %}
     {% if lead.status == 'human_review' %}
       <p class="dim"><b>Flagged human_review.</b> Clear it once you have dealt
          with what flagged it &mdash; nothing else will, so it holds forever

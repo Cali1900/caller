@@ -259,8 +259,8 @@ def test_a_prepared_but_unsent_row_says_so_rather_than_looking_sent(db, dripc, c
     lid = _lead(db, days_ago=11, company='Pending', phone_e164='+15553330093')
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute('UPDATE leads SET drip_campaign_id=%s WHERE lead_id=%s',
-                        (cid, lid))
+            cur.execute("UPDATE leads SET status='emailed' WHERE lead_id=%s",
+                        (lid,))
             cur.execute("""INSERT INTO email_sends
                                (lead_id, step_id, seq, to_email, click_token)
                            VALUES (%s,%s,1,'p@pending.test','tok-pending-1')""",
@@ -357,51 +357,69 @@ def test_clearing_a_lead_field_on_purpose_still_works(db, client):
 # the wiring, visible from BOTH ends and warned about before it bites
 # ==========================================================================
 
-def test_a_drip_says_which_call_campaigns_feed_it(db, dripc, client):
+def test_a_drip_says_which_statuses_it_accepts(db, dripc, client):
     """
     ⚠️ default_drip_id LIVES ON THE CALL CAMPAIGN, so the drip had no way to say
     who feeds it. A relationship visible from one side only is one nobody can
     audit - and auditing it meant running a query, which is not a UI.
     """
-    from tests.conftest import running_campaign_id
     cid = dripc['campaign_id']
-    call_id = running_campaign_id()
-    campaigns.update(call_id, default_drip_id=cid)
-
-    fed = campaigns.feeders(cid)
-    assert [f['campaign_id'] for f in fed] == [call_id], fed
-
-    # on the drip's own config page AND in the drip area
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    # ⚠️ "FED BY" IS GONE - nothing feeds a drip. The successor question, asked on
+    # both screens, is which STATUSES it accepts.
     for url in (f'/campaign/{cid}', f'/drips?drip={cid}'):
         body = client.get(url).text
-        assert 'Fed by' in body, f'{url} does not say who feeds this drip'
-        assert campaigns.get(call_id)['name'] in body, \
-            f'{url} does not name the feeding campaign'
+        assert 'ccepts' in body, f'{url} does not say what this drip accepts'
+        assert 'emailed' in body, f'{url} does not name the accepted status'
 
 
-def test_many_call_campaigns_can_feed_one_drip(db, dripc, client):
-    """Many-to-one is allowed and normal - nothing enforces exclusivity."""
-    from tests.conftest import running_campaign_id
+def test_two_drips_accepting_one_status_both_send_and_it_warns(db, dripc, client):
+    """
+    ⚠️ OVERLAP IS ALLOWED AND WARNED ABOUT. Product news and a follow-up sequence
+    are different conversations, so a lead can legitimately be in both - but that
+    is a decision to make at CONFIG time, not a discovery made when a firm gets
+    two emails in one afternoon.
+    """
     cid = dripc['campaign_id']
-    a = running_campaign_id()
-    b = campaigns.create('C-SECOND', campaign_type='call')['campaign_id']
-    campaigns.update(a, default_drip_id=cid)
-    campaigns.update(b, default_drip_id=cid)
-    assert len(campaigns.feeders(cid)) == 2, campaigns.feeders(cid)
-    body = client.get(f'/campaign/{cid}').text
-    assert 'C-SECOND' in body
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    other = campaigns.create('DRIP-NEWS', campaign_type='drip')['campaign_id']
+    campaigns.start(other)
+    campaigns.update(other, accepted_statuses=['emailed'])
+
+    ov = drip.overlaps(cid)
+    assert ov and ov[0]['status'] == 'emailed', ov
+    assert set(ov[0]['names']) == {dripc['name'], 'DRIP-NEWS'}, ov
+
+    # both select the same lead
+    lid = _lead(db, days_ago=11, phone_e164='+15553330301')
+    _join(db, lid, cid)
+    # TWO steps: for a lead that has had email 1, position 1 is never due
+    # (DUE_NOW requires emailed_at IS NULL there), so a one-step drip would
+    # select nobody and the overlap would look like it did not happen.
+    drip.save_steps(other, [
+        {'delay_minutes': 0, 'subject': 'news 1', 'body': 'b'},
+        {'delay_days': 1, 'subject': 'news 2', 'body': 'b'}])
+    open_all_hours(other)
+    picked = {str(r['drip_campaign_id']) for r in drip.due()
+              if str(r['lead_id']) == str(lid)}
+    assert picked == {str(cid), str(other)}, \
+        f'a lead qualifying for two drips was not selected by both: {picked}'
+
+    for url in (f'/campaign/{cid}', f'/drips?drip={cid}'):
+        assert 'both accept' in client.get(url).text, \
+            f'{url} does not warn about the overlap'
 
 
-def test_stopping_a_fed_drip_asks_first(db, dripc, client):
+def test_stopping_a_drip_with_leads_asks_first(db, dripc, client):
     """
     ⚠️ STOPPING A DRIP QUIETLY CHANGES WHAT HAPPENS TO EVERY FUTURE LEAD of every
     campaign pointing at it: drip_for() refuses to route into a stopped drip, so
     email 1 goes out and nothing follows. Nothing is orphaned in the database -
     the wiring is kept - but the CONSEQUENCE is invisible without a confirmation.
     """
-    from tests.conftest import running_campaign_id
     cid = dripc['campaign_id']
-    campaigns.update(running_campaign_id(), default_drip_id=cid)
+    lid = _lead(db, days_ago=11, phone_e164='+15553330302')
+    _join(db, lid, cid)
     assert campaigns.get(cid)['is_running'], 'the fixture drip should be running'
 
     r = client.post(f'/campaign/{cid}/stop', follow_redirects=False)
@@ -410,17 +428,19 @@ def test_stopping_a_fed_drip_asks_first(db, dripc, client):
         'the drip stopped without asking, and its feeders were not named'
 
     body = client.get(f'/campaign/{cid}?stop_confirm=1').text
-    assert 'no drip at all' in body, 'the confirmation does not say what breaks'
+    assert 'receive' in body and 'nothing' in body, \
+        'the confirmation does not say what breaks'
 
     r = client.post(f'/campaign/{cid}/stop', data={'confirm': 'yes'},
                     follow_redirects=False)
     assert not campaigns.get(cid)['is_running'], 'confirming did not stop it'
 
 
-def test_stopping_an_unfed_drip_does_not_ask(db, dripc, client):
+def test_stopping_an_empty_drip_does_not_ask(db, dripc, client):
     """No feeders, nothing to warn about - a confirmation nobody needs is noise."""
     cid = dripc['campaign_id']
-    assert campaigns.feeders(cid) == []
+    campaigns.update(cid, accepted_statuses=[])   # accepts nobody
+    assert drip.roster(cid) == []
     r = client.post(f'/campaign/{cid}/stop', follow_redirects=False)
     assert 'stop_confirm' not in r.headers['location'], r.headers['location']
     assert not campaigns.get(cid)['is_running']
@@ -434,34 +454,35 @@ def test_today_warns_about_the_CONFIG_before_any_lead_is_affected(db, dripc, cli
     follows it. The failure was a campaign CONFIGURED to send people nowhere,
     which is observable before anyone is harmed and was completely silent.
     """
-    from tests.conftest import running_campaign_id
-    call_id = running_campaign_id()
-    campaigns.update(call_id, default_drip_id=None)
+    # ⚠️ REPORTED PER STATUS, because the status is what decides. A lead reaching
+    # `emailed` with no running drip accepting `emailed` gets an opener and
+    # nothing after it - and that is knowable before any lead is affected, which
+    # the per-lead net could not do.
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['engaged'])   # nothing takes emailed
+    _lead(db, days_ago=1, company='Orphan Firm', phone_e164='+15553330401')
 
     problems = campaigns.wiring_problems()
-    assert any(w['campaign_id'] == call_id and 'no follow-up drip' in w['why']
+    assert any(w['status'] == 'emailed' and 'no drip accepts it' in w['why']
                for w in problems), problems
     body = client.get('/today').text
-    assert 'put the lead on no drip' in body, '/today does not warn on the config'
-    assert campaigns.get(call_id)['name'] in body
+    assert 'no follow-up' in body or 'receive no' in body, \
+        '/today does not warn about a status nothing accepts'
 
-    # AND THE STOPPED-DRIP VARIANT, which is the shape that actually bit: the
-    # wiring is set and the destination is off.
-    campaigns.update(call_id, default_drip_id=dripc['campaign_id'])
-    campaigns.stop(dripc['campaign_id'])
+    # AND THE STOPPED-DRIP VARIANT, which is the shape that actually bit: a drip
+    # accepts the status and is switched off.
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    campaigns.stop(cid)
     problems = campaigns.wiring_problems()
-    assert any('is stopped' in w['why'] for w in problems), problems
-    assert 'is stopped' in client.get('/today').text
+    assert any('stopped' in w['why'] for w in problems), problems
 
 
-def test_a_correctly_wired_campaign_produces_no_warning(db, dripc, client):
+def test_a_status_a_running_drip_accepts_produces_no_warning(db, dripc, client):
     """The other half: a warning that never clears is a warning nobody reads."""
-    from tests.conftest import running_campaign_id
-    call_id = running_campaign_id()
-    campaigns.update(call_id, default_drip_id=dripc['campaign_id'])
-    assert campaigns.get(dripc['campaign_id'])['is_running']
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed', 'imported'])
+    assert campaigns.get(cid)['is_running']
     assert campaigns.wiring_problems() == [], campaigns.wiring_problems()
-    assert 'put the lead on no drip' not in client.get('/today').text
 
 
 # ==========================================================================
@@ -478,11 +499,19 @@ def test_the_status_column_is_the_DRIPS_not_the_CALLS(db, dripc, client):
     and the sender cannot disagree about where a lead is.
     """
     cid = dripc['campaign_id']
+    # ⚠️ A GATE ON THE CALL STATUS ITSELF, which is the sharpest form of this
+    # test: the lead's status IS 'completed' and it IS mid-sequence, so a column
+    # that echoed the status would read "completed" for a lead with three steps to
+    # go. There is only one status now, so the two facts cannot be separated by
+    # fixture - they have to be separated by the column's meaning.
+    campaigns.update(cid, accepted_statuses=['completed'])
     lid = _lead(db, days_ago=11, company='Done Calling',
                 phone_e164='+15553330200', status='completed')
     _join(db, lid, cid, sent_steps=1)
     row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
     assert row['status'] == 'completed', 'the call status should be unchanged'
+    assert row['drip_state'] != 'completed', \
+        'the column is echoing the call status instead of the drip state'
     assert row['drip_state'] in ('waiting', 'sending', 'queued', 'held'), \
         f"a mid-sequence lead reads as {row['drip_state']!r}"
 

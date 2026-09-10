@@ -23,12 +23,10 @@
 {% endif %}
 {% if stop_confirm %}
 <div class="banner warn">
-  <b>Stop {{ c.name }}?</b> {{ fed_by|length }} call campaign{{ '' if fed_by|length == 1 else 's' }}
-  feed{{ 's' if fed_by|length == 1 else '' }} this drip
-  &mdash; {% for f in fed_by %}<b>{{ f.name }}</b>{% if not loop.last %}, {% endif %}{% endfor %}.
-  While it is stopped, a lead of theirs that gets email&nbsp;1 joins
-  <b>no drip at all</b>: nothing follows the opener. The wiring is kept and takes
-  effect again when this drip restarts.
+  <b>Stop {{ c.name }}?</b> Leads currently qualify for it &mdash; only a
+  <b>running</b> drip sends, so while it is stopped they receive
+  <b>nothing</b>, mid-sequence, with no error and no queue to look at. The gate is
+  kept: the same leads qualify again the moment it restarts.
   <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/stop"
         style="margin-left:10px">
     <input type="hidden" name="confirm" value="yes">
@@ -99,31 +97,53 @@
     </div>
 
     {% if c.type == 'drip' %}
-    {# ⚠️ THE WIRING, READ FROM THIS END. default_drip_id lives on the CALL
-       campaign, so without this a drip could not say who feeds it - and a
-       relationship visible from one side only is one nobody can audit. #}
+    {# ⚠️ "FED BY" IS GONE BECAUSE NOTHING FEEDS A DRIP. Membership is derived
+       from status, so the equivalent question - who is in here and why - is
+       answered by the ACCEPTS gate below. #}
     <div class="card">
-      <h2>Fed by</h2>
-      {% if fed_by %}
-      <p class="dim" style="margin-top:0">These call campaigns put their leads on
-         this drip when email&nbsp;1 is sent. Many may point here; that is normal.</p>
-      <table style="box-shadow:none;max-width:520px">
-        <tr><th>Call campaign</th><th></th></tr>
-        {% for f in fed_by %}
-        <tr><td><a href="/campaign/{{ f.campaign_id }}">{{ f.name }}</a></td>
-            <td>{% if f.is_running %}<span class="pill completed">RUNNING</span>
-                {% else %}<span class="dim">stopped</span>{% endif %}</td></tr>
+      <h2>Accepts</h2>
+      <p class="dim" style="margin-top:0">A lead is on this drip while its
+         <b>status</b> is one of these. Nothing is assigned and nothing routes:
+         tick a status and every lead holding it joins; untick it and they leave,
+         mid-sequence, on the next tick.</p>
+      {# The hidden marker makes "all unticked" arrive as an empty list rather
+         than as an absent field - otherwise clearing the last status would be
+         indistinguishable from not submitting the form. #}
+      <input type="hidden" name="accepted_statuses" value="">
+      <div class="gate">
+        {% for st in statuses %}
+        <label class="dim" style="display:block">
+          <input type="checkbox" name="accepted_statuses" value="{{ st }}"
+                 {% if st in (c.accepted_statuses or []) %}checked{% endif %}>
+          <code>{{ st }}</code>
+          <span class="dim">{{ gate_counts.get(st, 0) }} lead{{ '' if gate_counts.get(st, 0) == 1 else 's' }}</span>
+          {% if st in caution %}<span class="pill human_review">caution</span>{% endif %}
+        </label>
         {% endfor %}
-      </table>
-      {% if not c.is_running %}
-      <p class="dim" style="margin-bottom:0">⚠️ <b>This drip is stopped</b>, so
-        their leads currently join <b>nothing</b> after email&nbsp;1.</p>
-      {% endif %}
-      {% else %}
-      <p class="dim" style="margin-bottom:0">No call campaign points here. Leads
-         reach this drip only by being <b>imported</b> onto it, or added by hand
-         from a lead page. Set a call campaign's <b>Follow-up drip</b> to this one
-         to feed it.</p>
+      </div>
+      <p class="dim">
+        {% set qualifying = namespace(n=0) %}
+        {% for st in (c.accepted_statuses or []) %}{% set qualifying.n = qualifying.n + gate_counts.get(st, 0) %}{% endfor %}
+        <b>{{ qualifying.n }}</b> lead{{ '' if qualifying.n == 1 else 's' }} qualify right now.</p>
+
+      {# ⚠️ `engaged` MEANS THEY ANSWERED. A drip accepting it keeps emailing
+         someone who replied or clicked - the opposite of the reply-stop. That
+         can be deliberate (a nurture sequence for warm leads), so this warns
+         and does not refuse. #}
+      {% for st in (c.accepted_statuses or []) %}{% if st in caution %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ st }}</b> &mdash; {{ caution[st] }}.</p>
+      {% endif %}{% endfor %}
+
+      {# ⚠️ OVERLAP IS ALLOWED AND WARNED ABOUT, at config time rather than when
+         a firm gets two emails in one afternoon. #}
+      {% for o in overlaps %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ o.names | join(' and ') }}</b>
+         both accept <code>{{ o.status }}</code> &mdash; a lead with that status
+         will receive <b>both</b> sequences.</p>
+      {% endfor %}
+      {% if not c.accepted_statuses %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>This drip accepts nobody</b>
+         &mdash; no status is ticked, so it sends nothing at all.</p>
       {% endif %}
     </div>
 
@@ -176,41 +196,11 @@
 
     {# BOTH TYPES have a sender: a drip mails as somebody too. #}
     {% if c.type == 'call' %}
-    <div class="card">
-      <h2>Follow-up drip</h2>
-      <div class="field">
-        <label for="dd">Leads enter this drip after email&nbsp;1 is sent</label>
-        <select id="dd" name="default_drip_id">
-          <option value="" {% if not c.default_drip_id %}selected{% endif %}>none
-            &mdash; leads will not enter a drip after email 1</option>
-          {% for d in drip_options %}
-          <option value="{{ d.campaign_id }}"
-                  {% if c.default_drip_id and c.default_drip_id|string == d.campaign_id|string %}selected{% endif %}>
-            {{ d.name }}{% if not d.is_running %} (stopped){% endif %}</option>
-          {% endfor %}
-        </select>
-      </div>
-      {# ⚠️ NULL WAS SILENT, AND THAT IS HOW A CALL CAMPAIGN ENDED UP WIRED TO
-         NOTHING. Email 1 went out, the lead sat at 'emailed', and no sequence
-         followed - visible only by opening that lead. It says so now. #}
-      {% if not c.default_drip_id %}
-      <p class="dim" style="margin-bottom:0">⚠️ <b>No follow-up drip.</b> Leads
-        will not enter a drip after email&nbsp;1 &mdash; email 1 goes out and
-        nothing follows it. They appear in <a href="/today">Today</a> as
-        <b>emailed and on no drip</b>.</p>
-      {% elif drip_chosen and not drip_chosen.is_running %}
-      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ drip_chosen.name }} is
-        stopped.</b> Nothing enters a stopped drip &mdash; leads that get
-        email&nbsp;1 while it is stopped join no drip at all, rather than waiting
-        for it to start.</p>
-      {% else %}
-      <p class="dim" style="margin-bottom:0">Changing this affects leads entering
-        <b>afterwards only</b>. Anyone already on a drip finishes that sequence:
-        this is read when email&nbsp;1 is sent, and entry only fires for a lead
-        with no drip yet.</p>
-      {% endif %}
-    </div>
-
+    {# ⚠️ THE FOLLOW-UP DRIP SELECTOR IS GONE. A call campaign no longer chooses
+       what follows its email 1 - sending email 1 sets the status to `emailed`,
+       and every running drip accepting `emailed` picks the lead up. The choice
+       moved from "which drip does this campaign feed" to "which statuses does
+       this drip accept", which is one fact instead of two that could disagree. #}
     <div class="card">
       <h2>Daily cap</h2>
       <div class="field"><label for="cap">New leads per day</label>

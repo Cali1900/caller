@@ -53,6 +53,10 @@ def dripc(db):
     cid = c['campaign_id']
     campaigns.start(cid)
     open_all_hours(cid)
+    # ⚠️ THE GATE IS THE MEMBERSHIP. A drip with no accepted_statuses accepts
+    # nobody, so a fixture that forgot this would test a drip that can never
+    # send - and every assertion about selection would pass for the wrong reason.
+    campaigns.update(cid, accepted_statuses=['emailed'])
     drip.save_steps(cid, [
         {'delay_days': 0,  'subject': 'Following up', 'body': 'One {{first_name}} {{sample_link}}'},
         {'delay_days': 4,  'subject': 'Second',       'body': 'Two {{sample_link}}'},
@@ -89,11 +93,19 @@ def _get_lead(db, lid):
 
 
 def _join(db, lid, cid, sent_steps=0):
-    """Put the lead on the drip and mark the first `sent_steps` steps as sent."""
+    """
+    Make the lead QUALIFY for the drip, and mark the first `sent_steps` sent.
+
+    ⚠️ THERE IS NOTHING TO ASSIGN. Membership is derived from status, so joining
+    a drip means holding a status it accepts - this sets the drip's first accepted
+    status on the lead. It used to write drip_campaign_id, which is the column the
+    redesign removed precisely because it could disagree with the status.
+    """
     steps = drip.steps(cid)
+    accepted = (campaigns.get(cid) or {}).get('accepted_statuses') or ['emailed']
     with db.cursor() as cur:
-        cur.execute('UPDATE leads SET drip_campaign_id=%s WHERE lead_id=%s',
-                    (cid, lid))
+        cur.execute('UPDATE leads SET status = %s WHERE lead_id = %s',
+                    (accepted[0], lid))
         for i, st in enumerate(steps[:sent_steps], start=1):
             # WITH A TOKEN. A send row without one cannot be clicked, and a
             # click test whose click silently does not happen passes for the
@@ -295,8 +307,22 @@ def test_a_click_does_NOT_stop_the_sequence(db, dripc):
     """
     A click is interest, not an answer. Stopping on one would silence the
     sequence exactly when it is working. ONLY A REPLY STOPS IT.
+
+    ⚠️ AND THE STATUS GATE CHANGED WHAT THAT DEPENDS ON. clicks.record() promotes
+    the lead to `engaged` (api/clicks.py, pipeline.advance), so under a gate
+    accepting only `emailed` a CLICK now takes the lead out of the drip - the
+    click stops the sequence after all, by a route nobody chose.
+
+    `engaged` conflates two different facts: they replied, or they clicked. That
+    was harmless while status only governed dialling. Now that status governs
+    SENDING it decides whether a warm lead keeps hearing from us, and the drip
+    accepting `engaged` is what preserves the original rule. That is a decision
+    about who receives mail, so the gate here states it explicitly rather than
+    inheriting it.
     """
     lid = _lead(db, days_ago=40)
+    campaigns.update(dripc['campaign_id'],
+                     accepted_statuses=['emailed', 'engaged'])
     _join(db, lid, dripc['campaign_id'], sent_steps=1)
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
@@ -514,7 +540,11 @@ def test_a_bounce_is_visible_in_the_status_filter(db, dripc, client):
 
     row = _get_lead(db, lid)
     assert row['status'] == 'bad_email', 'the bounce left no visible trace'
-    assert row['drip_campaign_id'] is None, 'the drip did not stop'
+    # ⚠️ THE STATUS *IS* THE STOP. There is no assignment to clear: 'bad_email' is
+    # not in any drip's accepted_statuses, so the lead falls out of every one of
+    # them by the same mechanism that put it in. One fact, not two.
+    assert not drip.qualifies_for(dict(row)), \
+        'a bounced lead still qualifies for a drip'
     # The ADDRESS is blocked, which is the half that stops another send.
     assert archive.is_do_not_send('pat@whitfield.test')
     # NOT archived: a bounce wants a corrected address, from a person.
@@ -772,9 +802,13 @@ def test_step_1_waits_for_its_delay_before_sending(db, dripc):
                 lead_source='import')
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
+            # QUALIFY IT, and stamp the clock step 1 runs from. status_changed_at
+            # replaced drip_entered_at: with membership derived there is no entry
+            # event, and the moment the lead began to qualify is the moment its
+            # status changed.
             cur.execute("""UPDATE leads SET emailed_at = NULL, emailed_by = NULL,
-                                  drip_campaign_id = %s, drip_entered_at = now()
-                            WHERE lead_id = %s""", (cid, lid))
+                                  status = 'emailed', status_changed_at = now()
+                            WHERE lead_id = %s""", (lid,))
     assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
         'step 1 sent immediately despite a 30-minute delay'
 
@@ -782,32 +816,56 @@ def test_step_1_waits_for_its_delay_before_sending(db, dripc):
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE leads
-                              SET drip_entered_at = now() - interval '31 minutes'
+                              SET status_changed_at = now() - interval '31 minutes'
                             WHERE lead_id = %s""", (lid,))
     mine = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
     assert [r['position'] for r in mine] == [1], 'step 1 never became due'
 
 
-def test_entering_a_drip_stamps_when(db, dripc):
-    """Step 1's delay has nothing to count from otherwise."""
-    lid = _lead(db, days_ago=0, phone_e164='+15553339002')
+def test_qualifying_stamps_when_by_trigger(db, dripc):
+    """
+    ⚠️ STEP 1'S CLOCK. It used to run from drip_entered_at, stamped by enter().
+    Membership is derived now, so there is no entry event - the moment the lead
+    began to qualify is the moment its STATUS changed, and a trigger stamps that
+    because status is written from six places and a column depending on all of
+    them remembering is a column that is wrong.
+    """
+    lid = _lead(db, days_ago=0, phone_e164='+15553339002', status='new')
+    before = _get_lead(db, lid)['status_changed_at']
+    assert before is not None, 'a new lead has no status clock at all'
+
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
-            assert drip.enter(cur, lid, dripc['campaign_id']) is True
-    assert _get_lead(db, lid)['drip_entered_at'] is not None
+            cur.execute("UPDATE leads SET status='emailed' WHERE lead_id=%s",
+                        (lid,))
+    after = _get_lead(db, lid)['status_changed_at']
+    assert after > before, 'the status changed and the clock did not move'
+
+    # AND AN UNRELATED EDIT LEAVES IT ALONE, or every save would restart step 1.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET notes='x' WHERE lead_id=%s", (lid,))
+    assert _get_lead(db, lid)['status_changed_at'] == after, \
+        "a non-status edit moved step 1's clock"
 
 
-def test_stopping_a_drip_clears_the_entry_time(db, dripc):
-    """If this lead is ever put on a drip again, step 1 must be timed from THAT
-    entry, not the old one."""
+def test_stopping_a_lead_sets_a_status_no_drip_accepts(db, dripc):
+    """
+    ⚠️ STOPPING IS A STATUS CHANGE NOW, because there is nothing else to clear.
+    Each reason maps to the status that MEANS it, so the stop and the pipeline
+    cannot disagree - and the lead leaves every drip by the same mechanism that
+    put it in. The reason survives: "it said no" and "it never answered" are
+    different facts and only the status records which.
+    """
     lid = _lead(db, days_ago=0, phone_e164='+15553339003')
-    with dbm.get_conn() as conn:
-        with conn.cursor() as cur:
-            drip.enter(cur, lid, dripc['campaign_id'])
-    drip.stop(lid, 'by_hand', by='test')
+    _join(db, lid, dripc['campaign_id'])
+    assert drip.qualifies_for(_get_lead(db, lid)), 'the premise: it qualifies'
+
+    assert drip.stop(lid, 'by_hand', by='test') is True
     row = _get_lead(db, lid)
-    assert row['drip_campaign_id'] is None
-    assert row['drip_entered_at'] is None
+    assert row['status'] == drip.STOP_STATUS['by_hand']
+    assert not drip.qualifies_for(dict(row)), \
+        "a stopped lead still qualifies for a drip"
 
 
 def test_a_disabled_tail_step_does_not_block_finishing(db, dripc):
@@ -826,7 +884,7 @@ def test_a_disabled_tail_step_does_not_block_finishing(db, dripc):
 
     lid = _lead(db, days_ago=40, phone_e164='+15553339004')
     _join(db, lid, cid, sent_steps=3)
-    assert drip._maybe_finish(None, lid) is True, \
+    assert drip._maybe_finish(None, lid, cid) is True, \
         'three of three ENABLED steps sent, and it did not finish'
     assert _get_lead(db, lid)['status'] == 'archived'
 
@@ -1153,9 +1211,7 @@ def test_a_call_sourced_lead_never_receives_step_1(db, dripc):
     assert drip.steps(cid) == []
 
     lid = _lead(db, days_ago=40, phone_e164='+15553339500')
-    with dbm.get_conn() as conn:
-        with conn.cursor() as cur:
-            assert drip.enter(cur, lid, cid) is True
+    _join(db, lid, cid)
 
     # NOW write the sequence, as anyone would.
     drip.save_steps(cid, [
@@ -1171,11 +1227,18 @@ def test_a_call_sourced_lead_never_receives_step_1(db, dripc):
         'it should pick up at step 2, at its delay from emailed_at'
 
 
-def test_entering_a_stepless_drip_says_so_on_the_timeline(db, dripc):
+def test_a_stepless_drip_selects_nobody_and_links_nothing(db, dripc):
     """
-    It used to record "email 1 counts as step 1" - which was false, because there
-    was no step 1. rowcount answers "did the UPDATE match a row", never "did it
-    find a step".
+    ⚠️ REWRITTEN, NOT DELETED. This asserted that enter() wrote "⚠️ NO STEPS YET"
+    to the timeline instead of the false "email 1 counts as step 1" - a real bug,
+    where rowcount answered "did the UPDATE match a row" rather than "did it find
+    a step".
+
+    enter() is gone, so there is no entry moment to narrate. THE PROPERTY IT
+    PROTECTED STILL MATTERS and is asserted directly: a drip with no steps selects
+    nobody and links nothing, however many leads qualify. The "no steps yet"
+    warning now lives on the campaign screen, where it is visible before anyone is
+    affected rather than narrated after.
     """
     cid = dripc['campaign_id']
     for st in drip.steps(cid):
@@ -1183,20 +1246,21 @@ def test_entering_a_stepless_drip_says_so_on_the_timeline(db, dripc):
             with conn.cursor() as cur:
                 cur.execute('DELETE FROM drip_steps WHERE step_id = %s',
                             (st['step_id'],))
-    lid = _lead(db, days_ago=40, phone_e164='+15553339501')
-    with dbm.get_conn() as conn:
-        with conn.cursor() as cur:
-            drip.enter(cur, lid, cid)
-    with dbm.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""SELECT detail FROM activity
-                            WHERE lead_id = %s AND kind = 'drip'
-                            ORDER BY created_at DESC LIMIT 1""", (lid,))
-            detail = cur.fetchone()['detail']
-    assert 'NO STEPS YET' in detail, detail
-    assert 'counts as step 1' not in detail, \
-        'it still claims a link it did not make'
+    assert drip.steps(cid) == []
 
+    lid = _lead(db, days_ago=40, phone_e164='+15553339501')
+    _join(db, lid, cid)
+    assert drip.qualifies_for(_get_lead(db, lid)), 'the premise: it qualifies'
+
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)] == [], \
+        'a drip with no steps selected a lead'
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT count(*) AS n FROM email_sends
+                            WHERE lead_id = %s AND step_id IS NOT NULL""",
+                        (lid,))
+            assert cur.fetchone()['n'] == 0, \
+                'a step-less drip linked email 1 to a step that does not exist'
 
 def test_the_editor_says_who_step_1_governs(db, dripc, client):
     """
@@ -1216,8 +1280,8 @@ def test_the_editor_says_who_step_1_governs(db, dripc, client):
         lid = _lead(db, days_ago=40, phone_e164=f'+1555333960{n}')
         with dbm.get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute('UPDATE leads SET drip_campaign_id=%s WHERE lead_id=%s',
-                            (cid, lid))
+                cur.execute("UPDATE leads SET status='emailed' "
+                            'WHERE lead_id=%s', (lid,))
     # ⚠️ NORMALISE WHITESPACE. Jinja wraps the rendered text, so asserting a
     # literal one-line substring fails on markup that is perfectly correct -
     # brittle in the same way as matching a CSS comment was.
@@ -1233,8 +1297,8 @@ def test_the_editor_says_who_step_1_governs(db, dripc, client):
                 lead_source='import')
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute('UPDATE leads SET drip_campaign_id=%s WHERE lead_id=%s',
-                        (cid, lid))
+            cur.execute("UPDATE leads SET status='emailed' WHERE lead_id=%s",
+                        (lid,))
     r = client.get(f'/campaign/{cid}')
     assert 'Step 1 governs <b>1</b> of the 3 leads' in flat(r.text), \
         'the label does not report the imported count when sources are mixed'
@@ -1699,3 +1763,161 @@ def test_no_token_is_minted_for_a_lead_with_no_address(db):
                 has_confirmed_email=False, dm_email_confirmed=False)
     assert _clicks.token_for(lid) is None, \
         'a token was minted for a lead with nowhere to send it'
+
+
+def test_a_click_falls_a_lead_out_of_an_emailed_only_gate(db, dripc):
+    """
+    ⚠️ THE FLIP SIDE, ASSERTED SO IT CANNOT BE A SURPRISE. clicks.record()
+    promotes the lead to `engaged`, so a drip accepting only `emailed` loses that
+    lead the moment it clicks - the sequence stops for someone who just showed
+    interest.
+
+    This is the status gate working exactly as designed, and it is a consequence
+    worth having in a test rather than discovering from a firm that went quiet.
+    Accepting `engaged` on the drip is what keeps them in; that is the operator's
+    call, and the config screen warns either way.
+    """
+    from api import campaigns as _c
+    lid = _lead(db, days_ago=40, phone_e164='+15553339777')
+    _c.update(dripc['campaign_id'], accepted_statuses=['emailed'])
+    _join(db, lid, dripc['campaign_id'], sent_steps=1)
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'the premise: it is due before the click'
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT click_token FROM email_sends
+                            WHERE lead_id = %s AND click_token IS NOT NULL
+                            ORDER BY seq LIMIT 1""", (lid,))
+            tok = cur.fetchone()['click_token']
+    assert clicks.record(tok, user_agent='t') is not None
+    assert _get_lead(db, lid)['status'] == 'engaged', \
+        'the premise: a click promotes the lead'
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'the gate did not drop a lead whose status left the accepted set'
+
+
+# ==========================================================================
+# THE STATUS GATE. Membership is derived, continuously, from one fact.
+# ==========================================================================
+
+def test_an_engaged_lead_is_not_selected_by_a_drip_accepting_emailed(db, dripc):
+    """
+    ⚠️ THE BUG THIS REDESIGN EXISTS FOR. Under the old model a lead was routed
+    into a drip at email-1 time and stayed there whatever happened next, so
+    `status` and `drip_campaign_id` were two facts saying one thing and could
+    disagree: a lead marked `engaged` - it answered - was still queued for the
+    next step, because nothing consulted the status.
+
+    The gate makes the disagreement impossible rather than guarded against.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, phone_e164='+15553338001')
+    _join(db, lid, cid, sent_steps=1)
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'the premise: an emailed lead is due'
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='engaged' WHERE lead_id=%s",
+                        (lid,))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'an engaged lead is still queued for a step - the exact reported bug'
+
+
+def test_a_status_change_stops_the_next_send_with_no_other_action(db, dripc):
+    """
+    RULE 1: CONTINUOUS, NOT ON ENTRY. Nothing has to notice and act - no stop
+    flag, no sweep, no reconciliation. The gate is re-read on every selection.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, phone_e164='+15553338002')
+    _join(db, lid, cid, sent_steps=1)
+    was = [r['position'] for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert was, 'the premise'
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='paused' WHERE lead_id=%s",
+                        (lid,))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    # AND NOTHING ELSE WAS WRITTEN - no stop record, because nothing stopped it.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT count(*) AS n FROM activity
+                            WHERE lead_id = %s AND summary LIKE 'drip STOPPED%%'""",
+                        (lid,))
+            assert cur.fetchone()['n'] == 0, \
+                'something had to act - the gate should need no help'
+
+
+def test_a_dnc_lead_qualifies_for_nothing_whatever_the_gate_says(db, dripc):
+    """
+    ⚠️ EVEN IF A GATE ACCEPTS IT. `dnc` is in TERMINAL_STOP, and suppression is
+    keyed on the phone and outlives the lead. A gate is an operator's choice; the
+    exclusion lists are not, and they must win.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    # deliberately hostile configuration
+    _c.update(cid, accepted_statuses=['dnc', 'emailed'])
+    lid = _lead(db, days_ago=11, phone_e164='+15553338003')
+    _join(db, lid, cid, sent_steps=1)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='dnc' WHERE lead_id=%s", (lid,))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'a dnc lead was selected because a gate accepted the status'
+
+
+def test_email_1_is_attributed_to_step_1_so_the_sequence_can_finish(db, dripc):
+    """
+    ⚠️ WHAT THE LAZY LINK ACTUALLY CARRIES - and it is NOT duplicate prevention.
+    DUE_NOW selects position 1 only when `emailed_at IS NULL`, so a call-sourced
+    lead can never be picked for step 1 whatever the link does. Break 131 reported
+    GREEN and that is how I found out I had guarded the wrong thing.
+
+    It carries two facts instead:
+
+      step_stats     email 1's row has step_id NULL until it is linked, so step 1
+                     reads "0 sent" for every call-sourced lead and its click rate
+                     divides by a denominator that excludes everyone who got it
+      _maybe_finish  counts done steps by joining email_sends to drip_steps, so an
+                     unlinked step 1 means `done < total` FOREVER - the lead never
+                     finishes and stays in the drip permanently
+    """
+    from api.config import load_config
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=40, phone_e164='+15553338100')
+    _join(db, lid, cid)          # emailed_at is set: email 1 already went
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO email_sends
+                               (lead_id, seq, to_email, sent_at, sent_by,
+                                from_email, click_token)
+                           VALUES (%s, 1, 'pat@whitfield.test', now(),
+                                   'operator', 'info@counselorai.io',
+                                   'tok-attrib-1')""", (lid,))
+    due = [r for r in drip.due() if str(r['lead_id']) == str(lid)]
+    assert due, 'the premise: a later step is due'
+    drip.send_step(load_config(), due[0])
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT step_id FROM email_sends
+                            WHERE lead_id = %s AND seq = 1""", (lid,))
+            linked = cur.fetchone()['step_id']
+    assert linked is not None, \
+        "email 1 was never attributed to step 1 - step 1 will read '0 sent' and " \
+        'the sequence can never count as finished'
+    assert linked == drip.steps(cid)[0]['step_id'], 'linked to the wrong step'
+    stats = {r['position']: r for r in drip.step_stats(cid)}
+    assert stats[1]['sent'] == 1, \
+        f"step 1 still reads {stats[1]['sent']} sent for a lead that received it"

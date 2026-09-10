@@ -9,10 +9,10 @@
 # wiring_problems() is the proactive half: a call campaign whose follow-up drip is
 # NULL, or points at a stopped drip. Both matter whether or not the campaign is
 # running, because email 1 can be sent BY HAND from any lead page.
+# ⚠️ RETARGETED 2026-09-10: reported per STATUS rather than per call campaign,
+# because the status is what decides membership. The warning is the same one.
 TARGET = 'api/campaigns.py'
 EXPECT = 'test_today_warns_about_the_CONFIG_before_any_lead_is_affected'
 LABEL = 'stop warning about a campaign wired to nothing'
-OLD = """                 WHERE c.type = 'call'
-                   AND (c.default_drip_id IS NULL OR NOT d.is_running)"""
-NEW = """                 WHERE c.type = 'call'
-                   AND false"""
+OLD = """                 WHERE l.status = ANY(%s)"""
+NEW = """                 WHERE false AND l.status = ANY(%s)"""

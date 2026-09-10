@@ -15,11 +15,11 @@ Last updated 2026-09-10. Every number in the table below was read from
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
-| Wiring | `C1` &rarr; `Drip 1`, set in the UI. Visible from both ends, and `/today` warns while `Drip 1` is stopped |
-| Tests | 766 passed, 1 skipped |
+| Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
+| Tests | 774 passed, 1 skipped |
 | Break pass | **138 definitions** (136–139 added since, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
-| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING** as of 2026-09-10). C1's follow-up drip is `Drip 1` |
+| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed` and `imported` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
 | Email | 1 lead on a drip (`texLaw`), 1 lead with `emailed_at`, **1** `email_sends` row, 4 clicks, 4 live steps on Drip 1 |
 
@@ -549,6 +549,113 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## ⚠️ DRIP MEMBERSHIP IS DERIVED FROM STATUS (2026-09-10)
+
+**A drip declares which statuses it accepts. A lead's status decides whether it
+qualifies. That is the whole mechanism.** Re-evaluated on every selection, so a
+status change takes effect mid-sequence with nothing having to notice and act.
+
+```
+GATE = 'AND l.status = ANY(c.accepted_statuses)'
+```
+
+### What this replaced, and why
+
+`leads.status` said where a lead was; `leads.drip_campaign_id` said which drip
+owned it. **Two facts saying one thing, and they could disagree** — a lead marked
+`engaged` stayed queued for the next step because nothing consulted the status.
+Guarding that needs a gate per disagreement; deriving membership makes the
+disagreement impossible.
+
+| gone | replaced by |
+|---|---|
+| `leads.drip_campaign_id` | the gate |
+| `leads.drip_entered_at` | `leads.status_changed_at`, trigger-maintained |
+| `campaign_configs.default_drip_id` | nothing — no routing decision exists |
+| `drip_for()`, `only_drip()` | nothing chooses a drip |
+| `enter()` | its assignment half; its LINK half moved (see below) |
+| `POST /leads/<id>/drip/assign` | nothing — membership cannot be set by hand |
+| `upload_emails(drip_campaign_id=)` | sets `status='imported'` |
+
+**Migration 043/044/045.** `email_sends` and `email_clicks` were untouched, which
+is what makes re-entry resume: `emailed` → `engaged` → `emailed` picks up where it
+left off, because `ALREADY_SENT_STOP` matches `(lead_id, step_id)` and those rows
+persist through the gap.
+
+### ⚠️ Three things the redesign turned up that the brief did not predict
+
+**1. The lazy link does NOT prevent a duplicate opener — I guarded the wrong
+thing.** `DUE_NOW` selects `position = 1` only when `emailed_at IS NULL`, so a
+call-sourced lead can never be picked for step 1 whatever the link does. **Break
+131 reported GREEN and that is how it surfaced.** What the link actually carries:
+
+* `step_stats` — unlinked, step 1 reads "0 sent" for every call-sourced lead and
+  its click rate divides by a denominator excluding everyone who received it
+* `_maybe_finish` — counts done steps by joining `email_sends` to `drip_steps`, so
+  an unlinked step 1 means `done < total` **forever**: the lead never finishes and
+  stays in the drip permanently, which is the limbo the model refuses
+
+**2. `due()`'s dedupe key had to become `(lead, drip)`.** It was per lead, so a
+lead qualifying for two drips only ever received the earlier-due one and the other
+starved — while overlap is deliberate. Safe **only because pacing exists**: the
+worker sends one email per jittered gap, so two drips' mail to one firm is
+60–300s apart rather than simultaneous. Before the gap this key would have been a
+burst. Within a drip the rule is unchanged, and break 104 still guards it.
+
+**3. ⚠️ A CLICK NOW REMOVES A LEAD FROM AN `emailed`-ONLY DRIP.** `clicks.record()`
+promotes to `engaged` (`pipeline.advance`), so under a gate accepting only
+`emailed` a click ends the sequence — contradicting the standing rule that *a
+click is interest, not an answer; only a reply stops it.*
+
+`engaged` conflates two different facts: they replied, or they clicked. That was
+harmless while status governed dialling. **Now that status governs sending it
+decides whether a warm lead keeps hearing from us.** Both cases are asserted
+(`test_a_click_falls_a_lead_out_of_an_emailed_only_gate`) rather than left to be
+discovered from a firm that went quiet. **This wants a decision:** accept
+`engaged` on the drip, or give a click its own status so a reply and a click stop
+meaning the same thing.
+
+### The four rules and where each lives
+
+| rule | where |
+|---|---|
+| continuous, not on entry | `GATE`, re-read every selection. Break 109 |
+| overlap allowed, warned about | `drip.overlaps()`, on both config screens and `/drips` |
+| re-entry resumes, history survives | `ALREADY_SENT_STOP`, break 98 |
+| any status overridable | the lead-detail dropdown, which now **says it is a send control** |
+
+`dnc` and `dialing` keep their existing exceptions, and a `dnc` lead qualifies for
+nothing **even if a gate accepts it** — `TERMINAL_STOP` and suppression outrank an
+operator's gate.
+
+### Stopping a lead is a status change
+
+`STOP_STATUS` maps each reason to the status that means it (`replied`→`engaged`,
+`bounced`→`bad_email`, `by_hand`→`paused`, …). There is nothing else to clear, and
+the reason survives: six months on, "it said no" and "it never answered" are
+different facts and only the status records which.
+
+### Adding a phone to an imported lead
+
+`imported` is not a dialable status, so a number alone changes nothing about
+dialling. The edit form takes `move_to`: **move** sets `new` and assigns the call
+campaign — the lead then falls out of every drip whose gate no longer matches,
+automatically — and **keep** leaves it `imported`. **The timezone is derived from
+the state, never asked for**; with no state the phone is refused, because the
+calling window is evaluated in the called party's local time.
+
+### The warnings, rewritten not deleted
+
+| was | now |
+|---|---|
+| `_STALLED_AFTER_EMAIL` on `drip_campaign_id IS NULL` | *no RUNNING drip accepts this lead's status*. Break 110 |
+| `wiring_problems()` per call campaign | per **status**: *"no drip accepts `emailed`, N leads hold it"*. Break 137 |
+| **Fed by** panel | the **Accepts** gate, with live per-status lead counts |
+| stop-a-fed-drip confirmation | *N leads currently qualify; stopping means they receive nothing*. Break 136 |
+
+`source_split` survives unchanged — it reads `lead_source`, which records where a
+lead came from and was never the membership.
 
 ## The drip roster answers drip questions (2026-09-10)
 

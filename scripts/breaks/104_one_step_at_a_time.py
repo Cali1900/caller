@@ -7,6 +7,10 @@
 #
 # The sequence must advance in ORDER and one rung at a time, exactly like the
 # retry ladder. due() therefore returns the EARLIEST unsent due step per lead.
+# ⚠️ RETARGETED 2026-09-10: the key became (lead, drip) rather than the lead
+# alone, so a lead qualifying for two drips can receive both. WITHIN a drip the
+# rule is unchanged and this still guards it: after a pause several steps can be
+# due, and sending them all puts three emails in front of one firm.
 TARGET = 'api/drip.py'
 EXPECT = 'test_only_the_earliest_unsent_due_step_is_selected'
 LABEL = 'send every due step at once after a pause'
@@ -14,20 +18,8 @@ LABEL = 'send every due step at once after a pause'
 # This definition has been repointed twice because it identified due() by whatever
 # was defined next - first upcoming(), then held() - and adding a function above
 # them broke it both times. The execute line is unique to due() and moves with it.
-OLD = """            cur.execute(_build_select(), {'op_tz': _op_tz()})
-            seen, out = set(), []
-            for r in cur.fetchall():
-                if r['lead_id'] in seen:
+OLD = """                key = (r['lead_id'], r['drip_campaign_id'])
+                if key in seen:
                     continue
-                seen.add(r['lead_id'])
-                out.append(r)
-                if len(out) >= limit:
-                    break
-            return out"""
-NEW = """            cur.execute(_build_select(), {'op_tz': _op_tz()})
-            out = []
-            for r in cur.fetchall():
-                out.append(r)
-                if len(out) >= limit:
-                    break
-            return out"""
+                seen.add(key)"""
+NEW = """                pass"""

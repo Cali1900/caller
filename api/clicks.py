@@ -82,6 +82,9 @@ def token_for(lead_id) -> str:
             tok = secrets.token_urlsafe(TOKEN_BYTES)
             # ON CONFLICT: two draft generations racing must not mint two
             # tokens for one email, or the Copy button and the send disagree.
+            # from_email is left NULL here on purpose: this row is PREPARED, not
+            # sent, and which mailbox it will go from is not decided yet. The
+            # sender fills it in when it actually goes.
             cur.execute("""INSERT INTO email_sends
                                (lead_id, step_id, seq, to_email, click_token)
                            VALUES (%s, NULL, 1, %s, %s)
