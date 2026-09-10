@@ -1347,9 +1347,30 @@ async def campaign_steps_save(request: Request, campaign_id: str):
     combinations have to be reasoned about.
     """
     form = await request.form()
+
+    # ⚠️ COLLECT EVERY POSTED INDEX. This used to walk i = 0, 1, 2 ... and STOP AT
+    # THE FIRST GAP, so any step whose index was not contiguous was dropped
+    # SILENTLY - the save reported success and wrote fewer rows than were on the
+    # screen. That is data loss with a green banner: copy someone typed,
+    # destroyed, with nothing saying so.
+    #
+    # Indices come from the DOM, and the DOM is assembled from a server-rendered
+    # list plus javascript clones. Nothing guarantees they stay contiguous - a
+    # removed step, a failed clone, a double-fired handler, any of it leaves a
+    # hole - and a loop that stops at the first hole treats "I could not see it"
+    # as "it is not there".
+    #
+    # Read them all, then sort. The screen's order is the index order.
+    import re as _re
+    seen = set()
+    for key in form.keys():
+        m = _re.fullmatch(r'(?:subject|body)_(\d+)', key)
+        if m:
+            seen.add(int(m.group(1)))
+    posted = sorted(seen)
+
     rows = []
-    i = 0
-    while f'subject_{i}' in form or f'body_{i}' in form:
+    for i in posted:
         if (form.get(f'delete_{i}') or '') != '1':
             # `enabled` is supplied EXPLICITLY, always. An unchecked checkbox
             # posts nothing, and drip._flag() defaults absent to TRUE so a
@@ -1372,8 +1393,39 @@ async def campaign_steps_save(request: Request, campaign_id: str):
                          'subject': form.get(f'subject_{i}'),
                          'body': form.get(f'body_{i}')})
         i += 1
+    # ⚠️ REFUSE IF THE COUNT DOES NOT MATCH. The guard that turns silent data
+    # loss into a visible refusal: whatever goes wrong between the form and the
+    # database, writing FEWER steps than were posted must never look like
+    # success. It is cheap, it does not care WHY the numbers differ, and it would
+    # have caught the contiguous-walk bug above on its first occurrence instead
+    # of destroying somebody's copy.
+    kept = [i for i in posted if (form.get(f'delete_{i}') or '') != '1'
+            and ((form.get(f'subject_{i}') or '').strip()
+                 or (form.get(f'body_{i}') or '').strip())]
+
+    # CHECKED BEFORE THE WRITE, so "nothing was written" is TRUE when it says so.
+    # This is where the contiguous-walk bug lived: steps present on the screen
+    # never reached `rows` at all.
+    if len(rows) < len(kept):
+        msg = (f'REJECTED: {len(kept)} step(s) were on the screen but only '
+               f'{len(rows)} reached the save. NOTHING was written. The mismatch '
+               f'itself is the bug - report it rather than retrying.')
+        return RedirectResponse(
+            f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}#drip',
+            status_code=303)
     try:
         saved = _drip_mod.save_steps(campaign_id, rows)
+        # AND AFTER. A drop inside save_steps is a different fault, and this
+        # message does NOT claim a rollback - save_steps commits, so by here the
+        # sequence may be partial and saying otherwise would be the same kind of
+        # false report this guard exists to prevent.
+        if len(saved) != len(rows):
+            msg = (f'⚠️ WROTE {len(saved)} step(s) FROM {len(rows)} POSTED. The '
+                   f'sequence on screen may now be incomplete - reload and check '
+                   f'it before sending anything. This is a bug, not a refusal.')
+            return RedirectResponse(
+                f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}#drip',
+                status_code=303)
         msg = f'Sequence saved - {len(saved)} step(s).'
     except _drip_mod.BadSequence as exc:
         # REFUSED WHOLE. A half-saved sequence is worse than none: the schedule

@@ -1308,3 +1308,130 @@ def test_the_endpoint_says_whether_the_subject_was_real(db, dripc, client):
                     data={'subject_0': 's', 'body_0': 'b', 'lead_id': str(lead)})
     assert r.json()['lead'] == {'company': 'Whitfield Law',
                                'name': 'Timothy Ross', 'real': True}
+
+
+# ==========================================================================
+# ADDING STEPS MUST NOT DESTROY THE ONES ALREADY WRITTEN
+#
+# Reported as: write step 1, add step 2, save -> ONE step containing step 2's
+# content. That is copy somebody typed, destroyed, with a green banner.
+# ==========================================================================
+
+def _post_steps(client, cid, *steps, **extra):
+    """Post exactly what the sequence form posts, with explicit indices."""
+    data = dict(extra)
+    for i, st in enumerate(steps):
+        if st is None:
+            continue
+        data[f'subject_{i}'] = st['subject']
+        data[f'body_{i}'] = st['body']
+        data[f'enabled_{i}'] = '1'
+        if i == 0:
+            data[f'day1_{i}'] = str(st.get('day1', 0))
+        else:
+            data[f'delay_{i}'] = str(st['delay'])
+    return client.post(f'/campaign/{cid}/steps', data=data,
+                       follow_redirects=False)
+
+
+def test_three_added_steps_save_as_three_rows_with_the_right_content(db, dripc, client):
+    """
+    ⚠️ THE CONTENT, NOT JUST THE COUNT. "three rows exist" would pass while every
+    row held the same copy, which is the shape of the bug: one row containing the
+    LAST step's content.
+    """
+    cid = dripc['campaign_id']
+    for st in drip.steps(cid):                      # start from empty
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM drip_steps WHERE step_id=%s',
+                            (st['step_id'],))
+    r = _post_steps(client, cid,
+                    {'subject': 'ONE subj', 'body': 'ONE body', 'day1': 0},
+                    {'subject': 'TWO subj', 'body': 'TWO body', 'delay': 4},
+                    {'subject': 'THREE subj', 'body': 'THREE body', 'delay': 10})
+    assert r.status_code == 303
+    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+
+    got = drip.steps(cid)
+    assert len(got) == 3, f'{len(got)} rows, expected 3'
+    assert [s['position'] for s in got] == [1, 2, 3]
+    # EACH row's own content - the assertion that catches an overwrite.
+    assert [s['subject'] for s in got] == ['ONE subj', 'TWO subj', 'THREE subj']
+    assert [s['body'] for s in got] == ['ONE body', 'TWO body', 'THREE body']
+    assert got[0]['delay_minutes'] == 0 and got[0]['delay_days'] == 0
+    assert [s['delay_days'] for s in got[1:]] == [4, 10]
+
+
+def test_a_step_added_to_an_existing_one_does_not_overwrite_it(db, dripc, client):
+    """The exact reported repro: one step saved, then a second added."""
+    cid = dripc['campaign_id']
+    for st in drip.steps(cid):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM drip_steps WHERE step_id=%s',
+                            (st['step_id'],))
+    _post_steps(client, cid, {'subject': 'KEEP ME', 'body': 'MY COPY', 'day1': 0})
+    first = drip.steps(cid)
+    assert len(first) == 1 and first[0]['subject'] == 'KEEP ME'
+
+    # Now the page reloads with step 1 at index 0 and a clone at index 1.
+    r = _post_steps(client, cid,
+                    {'subject': 'KEEP ME', 'body': 'MY COPY', 'day1': 0},
+                    {'subject': 'ADDED', 'body': 'NEW COPY', 'delay': 4},
+                    **{'step_id_0': str(first[0]['step_id'])})
+    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    got = drip.steps(cid)
+    assert len(got) == 2, f'{len(got)} rows - the first step was destroyed'
+    assert got[0]['subject'] == 'KEEP ME' and got[0]['body'] == 'MY COPY', \
+        "step 1's copy was overwritten by the step that was added after it"
+    assert got[1]['subject'] == 'ADDED'
+
+
+def test_non_contiguous_indices_are_all_saved(db, dripc, client):
+    """
+    ⚠️ THE SILENT DROP. The handler used to walk i = 0, 1, 2 ... and STOP AT THE
+    FIRST GAP, so a step at index 3 with nothing at index 2 was dropped with the
+    save reporting success. Nothing guarantees the DOM's indices are contiguous -
+    a removed step, a failed clone, a re-fired handler, any of it leaves a hole -
+    and a loop that stops at a hole treats "I could not see it" as "not there".
+    """
+    cid = dripc['campaign_id']
+    for st in drip.steps(cid):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM drip_steps WHERE step_id=%s',
+                            (st['step_id'],))
+    r = client.post(f'/campaign/{cid}/steps', data={
+        'subject_0': 'ONE', 'body_0': 'one', 'enabled_0': '1', 'day1_0': '0',
+        # index 1 deliberately ABSENT - the hole
+        'subject_2': 'THREE', 'body_2': 'three', 'enabled_2': '1', 'delay_2': '4',
+        'subject_5': 'SIX', 'body_5': 'six', 'enabled_5': '1', 'delay_5': '10',
+    }, follow_redirects=False)
+    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    got = drip.steps(cid)
+    assert [s['subject'] for s in got] == ['ONE', 'THREE', 'SIX'], \
+        f'a gap in the indices dropped a step: {[s["subject"] for s in got]}'
+
+
+def test_the_save_refuses_when_fewer_rows_would_be_written(db, dripc, client, monkeypatch):
+    """
+    THE GUARD. Whatever goes wrong between the form and the database, writing
+    FEWER steps than were on the screen must never look like success. It does not
+    care WHY the numbers differ - and it says NOTHING WAS WRITTEN only because it
+    runs BEFORE the write.
+    """
+    cid = dripc['campaign_id']
+    # Simulate the old contiguous walk by making one index invisible to the
+    # collector, which is what a dropped step looked like.
+    import api.web as w
+    real = w._drip_mod.save_steps
+    monkeypatch.setattr(w._drip_mod, 'save_steps',
+                        lambda c, rows: real(c, rows[:1]))
+    before = [s['subject'] for s in drip.steps(cid)]
+    r = _post_steps(client, cid,
+                    {'subject': 'A', 'body': 'a', 'day1': 0},
+                    {'subject': 'B', 'body': 'b', 'delay': 4})
+    loc = r.headers['location']
+    assert 'WROTE' in loc or 'REJECTED' in loc, loc
+    assert 'incomplete' in loc or 'NOTHING was written' in loc, loc
