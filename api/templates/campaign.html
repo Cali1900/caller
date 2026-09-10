@@ -203,6 +203,13 @@
     <p class="dim">Every delay is measured from the <b>first send</b>. Starting
        this campaign is the switch &mdash; steps do not send while it is stopped.</p>
 
+    {# ⚠️ THE REFUSAL RENDERS HERE, not only in the page banner at the top. The
+       save redirects to #drip, and the browser scrolls the top banner off
+       screen - which is why a refused save READ AS A SILENT DROP: the step was
+       correctly refused, correctly explained, and the explanation was above the
+       fold. #}
+    {% if seq_msg %}<div class="banner warn" style="margin-bottom:10px">{{ seq_msg }}</div>{% endif %}
+
     <p class="ph-list">Placeholders:
       {% for ph in placeholders %}<code class="ph">&#123;&#123;{{ ph }}&#125;&#125;</code>{% endfor %}
       <span class="dim">&mdash; type them, or click one to insert it at the
@@ -238,7 +245,7 @@
     {% if not loop.first %}
     <div class="stepgap">
       &darr;&nbsp; send
-      <input type="number" name="delay_{{ i }}" min="1" max="365"
+      <input type="number" name="delay_{{ i }}" min="1" max="365" required
              value="{{ st.delay_days }}" style="width:4.5em">
       days after the first send
     </div>
@@ -268,7 +275,9 @@
           <div class="field">
             <label>Sends</label>
             <div class="toolbar">
-              <input type="number" name="day1_{{ i }}" min="0" max="60"
+              {# MAX 7, matching drip.MAX_STEP1_DAYS and the database CHECK
+                 behind it. It offered 60 and the save refused anything over 7. #}
+              <input type="number" name="day1_{{ i }}" min="0" max="7"
                      value="{{ (st.delay_minutes or 0) // 1440 }}" style="width:4.5em">
               <span class="dim">days after <b>joining the drip</b>
                 &mdash; 0 = immediately</span>
@@ -327,7 +336,13 @@
     <template id="stepgaptpl">
       <div class="stepgap">
         &darr;&nbsp; send
-        <input type="number" name="delay___I__" min="1" max="365" style="width:4.5em">
+        {# REQUIRED, and blank by design - a clone must not inherit a delay
+           nobody chose. The browser blocks the submit and focuses the box, so
+           the common case never reaches the server and nothing typed is at
+           risk; drip.validate() refuses it again server-side, because a client
+           check is a convenience and never the guard. #}
+        <input type="number" name="delay___I__" min="1" max="365" required
+               style="width:4.5em">
         days after the first send
       </div>
     </template>
@@ -335,7 +350,7 @@
       <div class="field">
         <label>Sends</label>
         <div class="toolbar">
-          <input type="number" name="day1___I__" min="0" max="60" value="0"
+          <input type="number" name="day1___I__" min="0" max="7" value="0"
                  style="width:4.5em">
           <span class="dim">days after <b>joining the drip</b>
             &mdash; 0 = immediately</span>

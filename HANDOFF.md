@@ -293,6 +293,59 @@ itself and is easy to miss in prose — the real send would post it to a law fir
 verbatim. The placeholder **menu** (every name from `drafts.PLACEHOLDERS`,
 inserted at the cursor) is what removes the need to type them at all.
 
+### The save REPLACES the sequence, and soft-deletes the rest
+
+`POST /campaign/{id}/steps` posts **the sequence as it should be, not a diff**.
+Ordering is the order of the rows, a row with no `step_id` is new, and a step that
+is not posted is **soft-deleted**. One atomic replace instead of four endpoints
+whose combinations have to be reasoned about.
+
+Two consequences that look like bugs and are not:
+
+* **`drip_steps` holds more rows than the sequence has steps.** Soft-deleted rows
+  keep their `position`, so an unfiltered query shows several rows per position.
+  That is history, and it is what lets a sent step keep its record after its copy
+  changes. Read the sequence the way the editor does: `deleted_at IS NULL`.
+* **A plain `UNIQUE (campaign_id, position)` cannot be added.** It would refuse
+  every save once any step has been deleted. `drip_steps_position` is already
+  `UNIQUE (campaign_id, position) WHERE deleted_at IS NULL`, and `PARK_OFFSET`
+  (+10000) exists to reorder underneath it, because `position` also has
+  `CHECK (position >= 1)` so a negative park violates it.
+
+**Recovering copy from a bad save**, which the soft delete makes possible:
+
+    SELECT step_id, position, delay_days, delay_minutes, subject,
+           deleted_at IS NOT NULL AS deleted, created_at
+      FROM drip_steps WHERE campaign_id = '<id>' ORDER BY created_at;
+
+`created_at` tells you which set is which. Restore by setting `deleted_at = NULL`
+with the positions you want, after deleting or re-parking whatever is live — the
+partial index will refuse two live rows at one position, which is the check
+working.
+
+This was exercised for real on **2026-09-10**: four steps of copy were replaced by
+verification POSTs aimed at the live drip instead of a scratch one, and every
+superseded row was still there to restore. See the README standing rule —
+verification may READ live data, never WRITE it, and `scripts/scratch_drip.sh`
+is the safe target.
+
+### Four ways the save could lose work, all fixed 2026-09-10
+
+| what happened | why it was silent | fix |
+|---|---|---|
+| a step at a non-contiguous index was dropped | the collector walked 0,1,2… and stopped at the first hole | read every posted index, break 120 |
+| a blank clone refused the whole save | the template promised "leave blank to skip" and the handler did not skip | skip rows with no subject AND no body, break 121 |
+| a blank clone **masked the count guard** | `kept` counted steps with copy, `rows` counted every posted row, so a blank row could stand in for a dropped step and the totals matched | same fix — the guard's two numbers now measure the same thing |
+| a refusal threw away the copy that caused it | the 303 re-rendered from the database, and the banner sits ~90 lines above the `#drip` anchor the redirect jumps to, so the browser scrolled past the reason | refusals re-render the POSTED rows with the message inside the sequence card, break 122 |
+
+A missing delay is now named as a missing delay (`step 3 has no delay`) rather than
+quoted back as `'' is not a number of days`, and the delay inputs are `required`
+so the common case never reaches the server. Step 1's ceiling is
+`drip.MAX_STEP1_DAYS = 7`, which is `drip_steps_delay_minutes_sane`
+(`delay_minutes <= 10080`) expressed in the unit the operator types — the input
+offered 60 days, the save refused over 7 in **minutes**, and raising the python
+ceiling alone turned that refusal into a Postgres `CheckViolation`. Break 123.
+
 ### ⚠️ STEP 1 IS NOT ON THE DAY SCALE
 
 Step 1 **is** the first send, so it cannot be N days from itself — a day field on

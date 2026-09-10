@@ -1336,6 +1336,31 @@ def _step_minutes(value, unit):
     return n * 60 if (unit or 'm').strip().lower().startswith('h') else n
 
 
+def _posted_steps(rows):
+    """
+    Posted rows in the shape the template reads, so a refusal re-renders them.
+
+    Values are whatever was typed, INCLUDING the invalid one - the point is that
+    the operator sees the step that was refused with their own words in it. Only
+    delay_minutes is coerced, because the template divides it and a string there
+    would 500 the page that is trying to explain a mistake.
+    """
+    out = []
+    for n, r in enumerate(rows, start=1):
+        try:
+            mins = int(r.get('delay_minutes') or 0)
+        except (TypeError, ValueError):
+            mins = 0
+        days = r.get('delay_days')
+        out.append({'step_id': r.get('step_id') or '', 'position': n,
+                    'delay_days': '' if days is None else days,
+                    'delay_minutes': mins,
+                    'enabled': bool(r.get('enabled')),
+                    'subject': r.get('subject') or '',
+                    'body': r.get('body') or ''})
+    return out
+
+
 @router.post('/campaign/{campaign_id}/steps')
 async def campaign_steps_save(request: Request, campaign_id: str):
     """
@@ -1369,8 +1394,29 @@ async def campaign_steps_save(request: Request, campaign_id: str):
             seen.add(int(m.group(1)))
     posted = sorted(seen)
 
+    def _content(i):
+        return ((form.get(f'subject_{i}') or '').strip()
+                or (form.get(f'body_{i}') or '').strip())
+
     rows = []
     for i in posted:
+        # ⚠️ A ROW WITH NO COPY AT ALL IS SKIPPED, which is what the template has
+        # always promised ("leave blank to skip") and what the count below has
+        # always assumed. It did NOT skip them, and that cost twice:
+        #
+        #   * an untouched blank row refused the whole save with "step 3 has no
+        #     subject", so adding a step you then decided against blocked
+        #     saving the two you meant;
+        #   * IT MASKED THE COUNT GUARD. `kept` counts steps WITH copy, `rows`
+        #     counted every posted row, so a blank row could stand in the place
+        #     of a real step that got dropped - the two numbers matched and the
+        #     guard stayed quiet over exactly the loss it exists to catch. A
+        #     guard whose two counts measure different things is not a guard.
+        #
+        # Skipping is safe precisely because there is nothing to lose: no
+        # subject, no body, nothing anybody typed.
+        if not _content(i):
+            continue
         if (form.get(f'delete_{i}') or '') != '1':
             # `enabled` is supplied EXPLICITLY, always. An unchecked checkbox
             # posts nothing, and drip._flag() defaults absent to TRUE so a
@@ -1392,27 +1438,25 @@ async def campaign_steps_save(request: Request, campaign_id: str):
                          'enabled': '1' if form.get(f'enabled_{i}') else '',
                          'subject': form.get(f'subject_{i}'),
                          'body': form.get(f'body_{i}')})
-        i += 1
     # ⚠️ REFUSE IF THE COUNT DOES NOT MATCH. The guard that turns silent data
     # loss into a visible refusal: whatever goes wrong between the form and the
     # database, writing FEWER steps than were posted must never look like
     # success. It is cheap, it does not care WHY the numbers differ, and it would
     # have caught the contiguous-walk bug above on its first occurrence instead
     # of destroying somebody's copy.
-    kept = [i for i in posted if (form.get(f'delete_{i}') or '') != '1'
-            and ((form.get(f'subject_{i}') or '').strip()
-                 or (form.get(f'body_{i}') or '').strip())]
+    kept = [i for i in posted
+            if (form.get(f'delete_{i}') or '') != '1' and _content(i)]
 
     # CHECKED BEFORE THE WRITE, so "nothing was written" is TRUE when it says so.
     # This is where the contiguous-walk bug lived: steps present on the screen
     # never reached `rows` at all.
     if len(rows) < len(kept):
-        msg = (f'REJECTED: {len(kept)} step(s) were on the screen but only '
-               f'{len(rows)} reached the save. NOTHING was written. The mismatch '
-               f'itself is the bug - report it rather than retrying.')
-        return RedirectResponse(
-            f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}#drip',
-            status_code=303)
+        return _campaign_view(
+            request, campaign_id, steps=_posted_steps(rows),
+            seq_msg=(f'REJECTED: {len(kept)} step(s) were on the screen but only '
+                     f'{len(rows)} reached the save. NOTHING was written. The '
+                     f'mismatch itself is the bug - report it rather than '
+                     f'retrying.'))
     try:
         saved = _drip_mod.save_steps(campaign_id, rows)
         # AND AFTER. A drop inside save_steps is a different fault, and this
@@ -1428,9 +1472,13 @@ async def campaign_steps_save(request: Request, campaign_id: str):
                 status_code=303)
         msg = f'Sequence saved - {len(saved)} step(s).'
     except _drip_mod.BadSequence as exc:
-        # REFUSED WHOLE. A half-saved sequence is worse than none: the schedule
-        # would be computed from steps nobody approved.
-        msg = f'REJECTED: {exc}'
+        # REFUSED WHOLE, AND THE TYPED COPY COMES BACK. A half-saved sequence is
+        # worse than none: the schedule would be computed from steps nobody
+        # approved. But a refusal that also throws away the draft turns a
+        # correctable mistake into lost work - the operator retypes the step to
+        # find out what was wrong with it.
+        return _campaign_view(request, campaign_id, steps=_posted_steps(rows),
+                              seq_msg=f'REJECTED: {exc}')
     return RedirectResponse(
         f'/campaign/{campaign_id}?msg={urllib.parse.quote(msg)}#drip',
         status_code=303)
@@ -1438,6 +1486,25 @@ async def campaign_steps_save(request: Request, campaign_id: str):
 
 @router.get('/campaign/{campaign_id}', response_class=HTMLResponse)
 def campaign_page(request: Request, campaign_id: str, msg: str = ''):
+    return _campaign_view(request, campaign_id, msg=msg)
+
+
+def _campaign_view(request: Request, campaign_id: str, msg: str = '',
+                   seq_msg: str = '', steps=None):
+    """
+    The campaign screen. `steps` overrides the saved sequence with POSTED rows.
+
+    ⚠️ A REFUSED SAVE RE-RENDERS WHAT WAS TYPED. It used to redirect, which
+    re-read the sequence from the database - so every refusal DESTROYED the copy
+    that caused it. The operator saw a step they had just written disappear, and
+    the explanation scrolled off the top of the page. Refusing is right; losing
+    the work while refusing is the same silent-loss shape as the save that wrote
+    fewer rows than were posted.
+
+    `seq_msg` renders INSIDE the sequence card, because the redirect target is
+    #drip and the page banner sits ~90 lines above it - a message the browser
+    scrolls past is a message nobody reads.
+    """
     cfg = _cfg()
     camp = campaigns.get(campaign_id)
     if camp is None:
@@ -1451,8 +1518,9 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
     prompts_mod.sync_if_stale(cfg, 'L1')
     pv_lead, pv_real = drafts_mod.preview_lead(campaign_id)
     _sender_opts = senders_mod.options(cfg, camp['sender_email'])
+    _steps = _drip_mod.steps(campaign_id) if steps is None else steps
     return templates.TemplateResponse(request, 'campaign.html', {
-        'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg,
+        'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
         'per_hour': per_hour, 'remaining': remaining,
         # The ladders, and how many rungs of each can actually fire. A rung
         # only applies if another attempt follows it, so a four-rung ladder
@@ -1461,7 +1529,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
         # THE SEQUENCE, and a live preview of each step rendered against the
         # same sample lead the email-1 preview uses - so what you see is what
         # drafts.render() will actually produce.
-        'drip_steps': _drip_mod.steps(campaign_id),
+        'drip_steps': _steps,
         # RENDERED ON LOAD as well as on every edit, so the preview is correct
         # before anything is typed rather than empty until the first keystroke.
         'step_previews': {
@@ -1470,7 +1538,7 @@ def campaign_page(request: Request, campaign_id: str, msg: str = ''):
                     st['subject'], drafts_mod.values_for(pv_lead, camp)),
                 'body': drafts_mod.render(
                     st['body'], drafts_mod.values_for(pv_lead, camp))}
-            for st in _drip_mod.steps(campaign_id)},
+            for st in _steps},
         'source_split': _drip_mod.source_split(campaign_id),
         'preview_candidates': drafts_mod.preview_candidates(campaign_id),
         'sample_id': drafts_mod.SAMPLE_ID,

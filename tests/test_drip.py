@@ -399,7 +399,10 @@ def test_saving_a_bad_sequence_is_refused_on_the_screen(db, dripc, client):
         'step_id_1': str(steps[1]['step_id']), 'delay_1': '0',
         'subject_1': 'b', 'body_1': 'b',
     }, follow_redirects=False)
-    assert 'REJECTED' in r.headers['location']
+    # ON THE PAGE, not in a redirect: the refusal now re-renders so the typed
+    # copy survives it. Asserting on the location header was asserting on the
+    # mechanism that threw the work away.
+    assert 'REJECTED' in _msg(r), _msg(r)
     # And nothing was half-saved.
     assert len(drip.steps(dripc['campaign_id'])) == 4
 
@@ -1001,7 +1004,7 @@ def test_saving_a_sequence_needs_no_call_only_fields(db, dripc, client):
         'subject_1': 'Second', 'body_1': 'Following up',
     }, follow_redirects=False)
     assert r.status_code == 303, r.text[:300]
-    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    assert 'REJECTED' not in _msg(r), _msg(r)
     saved = drip.steps(dripc['campaign_id'])
     assert [s['subject'] for s in saved] == ['Opener', 'Second']
     assert saved[0]['delay_minutes'] == 1440, 'one day, stored as minutes'
@@ -1334,6 +1337,155 @@ def _post_steps(client, cid, *steps, **extra):
                        follow_redirects=False)
 
 
+def _msg(r):
+    """
+    What the operator actually sees, from a redirect OR a re-rendered refusal.
+
+    A refused save no longer redirects - it re-renders the page with the typed
+    copy still in it - so asserting on r.headers['location'] alone would KeyError
+    on exactly the paths these tests exist to check.
+    """
+    import urllib.parse
+    if r.status_code in (302, 303):
+        return urllib.parse.unquote(r.headers['location'])
+    return r.text
+
+
+def _clear(cid):
+    for st in drip.steps(cid):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM drip_steps WHERE step_id=%s',
+                            (st['step_id'],))
+
+
+def test_a_blank_delay_refuses_the_save_and_names_the_step(db, dripc, client):
+    """
+    ⚠️ A MISSING DELAY IS THE SAME CLASS AS A MISSING SUBJECT: refused, named,
+    and nothing written. It WAS refused - with "step 3: '' is not a number of
+    days", which is true and useless - and the refusal was invisible for a
+    different reason (see the copy-back test below), so it read as a silent drop.
+    """
+    cid = dripc['campaign_id']
+    _clear(cid)
+    _post_steps(client, cid,
+                {'subject': 'ONE', 'body': 'one', 'day1': 0},
+                {'subject': 'TWO', 'body': 'two', 'delay': 3})
+    before = [(s['position'], s['subject'], s['body'], s['delay_days'])
+              for s in drip.steps(cid)]
+    assert len(before) == 2
+
+    ids = {f'step_id_{i}': str(s['step_id'])
+           for i, s in enumerate(drip.steps(cid))}
+    r = client.post(f'/campaign/{cid}/steps', data={
+        'subject_0': 'ONE', 'body_0': 'one', 'enabled_0': '1', 'day1_0': '0',
+        'subject_1': 'TWO', 'body_1': 'two', 'enabled_1': '1', 'delay_1': '3',
+        # step 3 has copy and NO DELAY - what a fresh clone posts untouched.
+        'subject_2': 'THREE subj', 'body_2': 'THREE body', 'enabled_2': '1',
+        'delay_2': '',
+        **ids}, follow_redirects=False)
+
+    m = _msg(r)
+    assert 'REJECTED' in m, m
+    assert 'step 3' in m, f'the refusal does not say WHICH step: {m}'
+    assert 'no delay' in m, f'the refusal does not say what is missing: {m}'
+    # ⚠️ AND NOTHING CHANGED. A refusal that half-wrote would be worse than the
+    # bug: the schedule would come from steps nobody approved.
+    after = [(s['position'], s['subject'], s['body'], s['delay_days'])
+             for s in drip.steps(cid)]
+    assert after == before, f'a refused save changed rows: {before} -> {after}'
+
+
+def test_step_1_cannot_be_given_a_delay_the_database_would_refuse(db, dripc, client):
+    """
+    ⚠️ THE CEILING IS THE DATABASE'S, AND THE SCREEN MUST NOT OFFER PAST IT.
+
+    drip_steps_delay_minutes_sane caps delay_minutes at 10080 (seven days). The
+    step 1 input offered 0-60 DAYS, so 30 was refused with "43200 minutes is over
+    a week" - a number nobody typed in a unit nobody chose. Fixing only the
+    message and raising the python ceiling to 60 turned that refusal into a 500
+    from Postgres, which is why this test asserts BOTH: a refusal, and never an
+    exception.
+    """
+    cid = dripc['campaign_id']
+    _clear(cid)
+    r = client.post(f'/campaign/{cid}/steps', data={
+        'subject_0': 'ONE', 'body_0': 'one', 'enabled_0': '1',
+        'day1_0': str(drip.MAX_STEP1_DAYS + 1),
+    }, follow_redirects=False)
+    assert r.status_code in (200, 303), \
+        f'the ceiling reached the database instead of the operator ({r.status_code})'
+    m = _msg(r)
+    assert 'REJECTED' in m, m
+    assert 'days' in m and 'minutes' not in m, \
+        f'the refusal must speak in the unit that was typed: {m}'
+    assert drip.steps(cid) == [], 'a refused step 1 was written anyway'
+    # AND THE SCREEN AGREES WITH IT, so the value is never offered in the first
+    # place. A client max is a convenience; the refusal above is the guard.
+    page = client.get(f'/campaign/{cid}').text
+    assert f'name="day1___I__" min="0" max="{drip.MAX_STEP1_DAYS}"' in page, \
+        'the step 1 input offers days the save refuses'
+
+
+def test_a_refused_save_gives_back_the_copy_that_was_typed(db, dripc, client):
+    """
+    ⚠️ THE ACTUAL LOSS. The refusal was correct; the 303 that carried it
+    re-rendered the sequence FROM THE DATABASE, so the step being complained
+    about vanished from the screen along with its copy. The operator saw work
+    disappear and no error, because the banner sits ~90 lines above the #drip
+    anchor the redirect jumps to - a message the browser scrolls past.
+    """
+    cid = dripc['campaign_id']
+    _clear(cid)
+    r = client.post(f'/campaign/{cid}/steps', data={
+        'subject_0': 'FIRST subj', 'body_0': 'FIRST body',
+        'enabled_0': '1', 'day1_0': '0',
+        'subject_1': 'UNSAVED SUBJECT', 'body_1': 'UNSAVED BODY WORTH KEEPING',
+        'enabled_1': '1', 'delay_1': '',
+    }, follow_redirects=False)
+
+    assert r.status_code == 200, \
+        f'a refusal must re-render, not redirect the copy away (got {r.status_code})'
+    body = r.text
+    assert 'UNSAVED SUBJECT' in body, 'the refused subject was thrown away'
+    assert 'UNSAVED BODY WORTH KEEPING' in body, 'the refused body was thrown away'
+    assert 'FIRST subj' in body, 'the step BEFORE the bad one was thrown away too'
+    # AND THE REASON IS WHERE THE SEQUENCE IS, below the anchor the save jumps to.
+    assert 'REJECTED' in body
+    assert body.index('id="drip"') < body.rindex('REJECTED'), \
+        'the refusal renders only above #drip, which is where it was unreadable'
+
+
+def test_a_blank_row_is_skipped_not_refused(db, dripc, client):
+    """
+    ⚠️ "leave blank to skip" IS WHAT THE TEMPLATE PROMISES, and it was a lie: an
+    untouched clone refused the whole save with "step 3 has no subject", so
+    adding a step you then thought better of blocked saving the two you meant.
+
+    It also MASKED THE COUNT GUARD, which is the serious half. `kept` counted
+    steps WITH copy; `rows` counted every posted row. A blank row could stand in
+    the place of a real step that had been dropped - the two numbers matched and
+    the guard stayed silent over exactly the loss it exists to catch.
+    """
+    cid = dripc['campaign_id']
+    _clear(cid)
+    r = client.post(f'/campaign/{cid}/steps', data={
+        'subject_0': 'ONE', 'body_0': 'one', 'enabled_0': '1', 'day1_0': '0',
+        'subject_1': 'TWO', 'body_1': 'two', 'enabled_1': '1', 'delay_1': '4',
+        # a clone nobody typed in: no subject, no body, no delay
+        'subject_2': '', 'body_2': '', 'enabled_2': '1', 'delay_2': '',
+    }, follow_redirects=False)
+
+    m = _msg(r)
+    assert 'REJECTED' not in m, f'an untouched blank row blocked the save: {m}'
+    # NOT COUNTED, either: a blank row must not inflate the number the guard
+    # compares against, or it can hide a dropped step behind a matching total.
+    assert 'WROTE' not in m, f'the blank row was counted as a posted step: {m}'
+    got = drip.steps(cid)
+    assert [s['subject'] for s in got] == ['ONE', 'TWO'], \
+        f'expected the two typed steps only, got {[s["subject"] for s in got]}'
+
+
 def test_three_added_steps_save_as_three_rows_with_the_right_content(db, dripc, client):
     """
     ⚠️ THE CONTENT, NOT JUST THE COUNT. "three rows exist" would pass while every
@@ -1350,8 +1502,8 @@ def test_three_added_steps_save_as_three_rows_with_the_right_content(db, dripc, 
                     {'subject': 'ONE subj', 'body': 'ONE body', 'day1': 0},
                     {'subject': 'TWO subj', 'body': 'TWO body', 'delay': 4},
                     {'subject': 'THREE subj', 'body': 'THREE body', 'delay': 10})
-    assert r.status_code == 303
-    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    assert r.status_code == 303, _msg(r)
+    assert 'REJECTED' not in _msg(r), _msg(r)
 
     got = drip.steps(cid)
     assert len(got) == 3, f'{len(got)} rows, expected 3'
@@ -1380,7 +1532,7 @@ def test_a_step_added_to_an_existing_one_does_not_overwrite_it(db, dripc, client
                     {'subject': 'KEEP ME', 'body': 'MY COPY', 'day1': 0},
                     {'subject': 'ADDED', 'body': 'NEW COPY', 'delay': 4},
                     **{'step_id_0': str(first[0]['step_id'])})
-    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    assert 'REJECTED' not in _msg(r), _msg(r)
     got = drip.steps(cid)
     assert len(got) == 2, f'{len(got)} rows - the first step was destroyed'
     assert got[0]['subject'] == 'KEEP ME' and got[0]['body'] == 'MY COPY', \
@@ -1408,7 +1560,7 @@ def test_non_contiguous_indices_are_all_saved(db, dripc, client):
         'subject_2': 'THREE', 'body_2': 'three', 'enabled_2': '1', 'delay_2': '4',
         'subject_5': 'SIX', 'body_5': 'six', 'enabled_5': '1', 'delay_5': '10',
     }, follow_redirects=False)
-    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    assert 'REJECTED' not in _msg(r), _msg(r)
     got = drip.steps(cid)
     assert [s['subject'] for s in got] == ['ONE', 'THREE', 'SIX'], \
         f'a gap in the indices dropped a step: {[s["subject"] for s in got]}'
@@ -1432,6 +1584,6 @@ def test_the_save_refuses_when_fewer_rows_would_be_written(db, dripc, client, mo
     r = _post_steps(client, cid,
                     {'subject': 'A', 'body': 'a', 'day1': 0},
                     {'subject': 'B', 'body': 'b', 'delay': 4})
-    loc = r.headers['location']
+    loc = _msg(r)
     assert 'WROTE' in loc or 'REJECTED' in loc, loc
     assert 'incomplete' in loc or 'NOTHING was written' in loc, loc

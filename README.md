@@ -127,6 +127,7 @@ happen.
 
 | 12 | `drip.REPLIED_STOP`, via a test that never clicked | ⚠️ **A NEW SUB-SHAPE: the test's SETUP silently no-opped.** `test_a_click_does_NOT_stop_the_sequence` asserted that a click leaves the drip running — while never producing a click. Its fixture inserted `email_sends` rows with no `click_token`, so `clicks.record()` had nothing to look up and returned `None`, and the test's own `if row and row['click_token']:` made the skip invisible. Break 100 removed the guard, nothing failed, and the pass reported GREEN. Only observable by asserting the click was RECORDED before asserting the consequence. Found 2026-09-09. |
 | 13 | **the break pass itself**, laundering a live break | ⚠️ **THE TOOL, NOT A TEST.** `preflight` ran BEFORE the concurrency lock. It treats an existing `.break_pass_state` as a crashed run — restores from that snapshot and `rm -rf`s it — so a second invocation, *even one the lock would have refused*, deleted the running pass's only copy of the originals. The running pass then couldn't restore, correctly stopped, and left `ALREADY_SENT_STOP = ''` live in `api/drip.py`. Its FINAL VERIFY reported *"no state directory — nothing was left applied"* (with no state dir it had nothing to compare against) and four later `--only` runs each snapshotted the **broken** file as their original and reported `RESTORE VERIFIED ✓` against it. `--check` said clean. A full suite passed. Caught only by `breaks_anchor_check.py`, when break 98's `OLD` stopped matching. Fixed 2026-09-09: lock before preflight, `--check` runs the anchor check, and `break_pass.sh` refuses to start with a live break. |
+| 14 | the sequence save's **count guard**, masked by a blank row | ⚠️ **THE GUARD'S TWO NUMBERS MEASURED DIFFERENT THINGS.** It refuses when fewer steps reach the database than were posted — `kept` counted posted steps WITH COPY, `rows` counted EVERY posted row including untouched blank clones. So a blank row could stand in the place of a real step that had been dropped: the totals matched and the guard stayed silent over exactly the loss it was added for. It had no test that posted a blank row alongside real ones, because the blank row was assumed to be refused earlier — and the template promised the opposite ("leave blank to skip"). Only observable by posting a blank row WITH content steps. Fixed 2026-09-10, break 121. |
 
 Note #5: the *test* was wrong, not the code. That is the usual shape.
 
@@ -237,6 +238,46 @@ what a container is serving.
 Cheap, mechanical, and it caught what three rounds of care did not. The same
 shape as everything else in this file: prefer a check that reads the real artefact
 over a claim about the thing that produces it.
+
+### ⚠️ STANDING RULE — verification may READ live data, never WRITE it
+
+The rule above says fetch the real route before reporting a UI fix. It has a hole,
+and on **2026-09-10** the hole cost real work: verifying a **save** means POSTing,
+and `POST /campaign/<id>/steps` REPLACES that campaign's sequence. Those POSTs went
+to the live `Drip 1` while checking a blank-delay fix, and four steps of Sean's copy
+were replaced with `b1`/`b2`/`b3`/`b4`.
+
+It read as a save bug — "the editor shows old test content", "the database has two
+rows per position", "editing a delay duplicated the rows" — and it was none of
+those. `save_steps` had behaved exactly as designed: soft-delete what was not
+posted, insert what was. The duplicate positions were soft-deleted history, which
+is what keeps a sent step's record after its copy changes.
+
+Two things saved it, and neither was a rule:
+
+* `save_steps` SOFT-deletes, so every superseded row was still there to restore
+* the copy had been written recently enough that `created_at` ordering told the
+  story
+
+**So: a curl that WRITES gets a scratch campaign, every time.**
+
+    CID=$(./scripts/scratch_drip.sh new)     # created through /campaigns/new
+    curl ... -X POST "http://localhost:4100/campaign/$CID/steps" ...
+    ./scripts/scratch_drip.sh clean          # and it REFUSES if leads got attached
+
+`list` shows leftovers. The `SCRATCH-` prefix is the whole mechanism: it labels
+itself on /campaigns, which `DRIP-LIVETEST` and `DRIP-REPRO` did not — they sat in
+the dev database for days and had to be asked about four times.
+
+And the diagnostic lesson, which is the same one as the whole file: **a report of
+what a bug looks like is evidence, not a diagnosis.** Duplicated rows and resurrected
+content are exactly what an append bug looks like from the outside; the row
+timestamps said something else. Check `created_at` against the session's own
+commands before adding a constraint. The constraint asked for here — a plain
+`UNIQUE (campaign_id, position)` — would have refused EVERY save, because
+soft-deleted rows keep their positions. `drip_steps_position` is already
+`UNIQUE (campaign_id, position) WHERE deleted_at IS NULL`, which is the same
+intent expressed correctly, and `PARK_OFFSET` exists to reorder underneath it.
 
 ### ⚠️ STANDING RULE — a table designed to OUTLIVE A LEAD will outlive TEST ISOLATION
 

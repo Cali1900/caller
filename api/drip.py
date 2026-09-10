@@ -70,6 +70,12 @@ def _flag(v, default: bool = True) -> bool:
     return str(v).strip().lower() in ('1', 'true', 'on', 'yes')
 
 
+# Step 1's ceiling, in days. Seven, because drip_steps_delay_minutes_sane caps
+# delay_minutes at 10080 - the constraint is the authority and this is the same
+# number in the operator's unit. Raising one without the other is a 500.
+MAX_STEP1_DAYS = 7
+
+
 def _minutes(raw, i) -> int:
     """
     Step 1's delay, in minutes from entering the drip. 0 = immediately.
@@ -87,10 +93,23 @@ def _minutes(raw, i) -> int:
         raise BadSequence(f'step {i}: {raw!r} is not a number of minutes.')
     if m < 0:
         raise BadSequence(f'step {i}: a delay cannot be negative.')
-    if m > 10080:
+    # ⚠️ THE CEILING IS THE DATABASE'S, EXPRESSED IN THE UNIT THE OPERATOR TYPES.
+    # drip_steps_delay_minutes_sane is CHECK (delay_minutes <= 10080) - seven
+    # days - and that constraint is the authority; this is its message.
+    #
+    # It used to report the excess in MINUTES, left over from when step 1's
+    # timing was a number plus a minutes/hours unit. The screen offers DAYS, so
+    # typing 30 - inside the range the input allowed - was refused with "43200
+    # minutes is over a week": a number nobody typed, in a unit nobody chose.
+    # THE INPUT NOW STOPS AT 7 TOO. A control must not offer a value the save
+    # refuses, and it must not offer one the DATABASE refuses either - my first
+    # pass at this raised the ceiling here alone and turned the refusal into a
+    # 500 from Postgres, which is the same fault one layer down.
+    if m > MAX_STEP1_DAYS * 1440:
         raise BadSequence(
-            f'step {i}: {m} minutes is over a week. Use a day-based step '
-            f'instead - this control is for the first send.')
+            f'step {i}: {m // 1440} days is more than {MAX_STEP1_DAYS} after '
+            f'joining the drip. If the first email is that far out, import the '
+            f'list when you want it to go rather than parking it here.')
     return m
 
 
@@ -165,6 +184,17 @@ def validate(rows) -> list:
             continue
 
         raw = r.get('delay_days')
+        # ⚠️ BLANK IS ITS OWN FAULT, NAMED AS ITSELF. A missing delay used to be
+        # reported as "'' is not a number of days", which is true and useless:
+        # the operator did not type a bad number, they left a box empty, and the
+        # message has to say which box on which step so the fix is obvious
+        # without hunting. Same class as a missing subject or body - REFUSED,
+        # never defaulted, because guessing a delay silently reschedules an
+        # email somebody else has to explain.
+        if raw is None or str(raw).strip() == '':
+            raise BadSequence(
+                f'step {i} has no delay - say how many days after the first '
+                f'send it goes out. Nothing was saved.')
         try:
             delay = int(raw)
         except (TypeError, ValueError):
