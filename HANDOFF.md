@@ -364,7 +364,7 @@ working.
 This was exercised for real on **2026-09-10**: four steps of copy were replaced by
 verification POSTs aimed at the live drip instead of a scratch one, and every
 superseded row was still there to restore. See the README standing rule —
-verification may READ live data, never WRITE it, and `scripts/scratch_drip.sh`
+verification may READ live data, never WRITE it, and `scripts/scratch.sh`
 is the safe target.
 
 ### Four ways the save could lose work, all fixed 2026-09-10

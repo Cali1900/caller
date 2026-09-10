@@ -131,6 +131,7 @@ happen.
 | 15 | the email gap's WIDE fallback, masked by the test reading it | ⚠️ **THE TEST READ THE VALUE IT WAS ASSERTING.** `test_the_gap_falls_back_WIDE_when_no_drip_is_running` bounded its own assertion with `lo, hi = worker.FALLBACK_EMAIL_GAP` and then checked every roll fell inside `[lo, hi]`. Break 130 set the constant to `(1, 2)` seconds — a fallback that bursts when configuration is unreadable, the exact inversion of "fail slow, never fast" — the test read `(1, 2)`, every roll was inside it, and the pass reported **GREEN**. Only observable by asserting the LITERAL floor (60s) that matters. Same shape as row 9 turned inward: there the test configured one place and production read another; here the test read production's own answer and compared it to itself. Fixed 2026-09-10. |
 | 16 | the bounce-visible status write, masked by its own successor | ⚠️ **A GUARD THAT BECAME REDUNDANT RATHER THAN ABSENT.** `stop()` began setting the status generically from `STOP_STATUS`, in the transaction that records the stop — so the second `UPDATE leads SET status='bad_email'` in the bounce branch was dead code. Break 105 removed it, nothing failed, and the pass reported GREEN. The property was never at risk; the BREAK was pointing at a line that no longer did the work, which is a guard nobody would notice had stopped being proven. Only observable by removing the mechanism that now provides it. Fixed 2026-09-10: dead code deleted, break retargeted at `STOP_STATUS['bounced']`. |
 | 17 | `PHONE_REQUIRED`, masked by a landing status the test's own docstring denied | ⚠️ **THE TEST STATED THE PREMISE THAT HAD BROKEN.** `test_a_phoneless_lead_is_never_a_candidate` said "status 'new' … so only the missing phone can exclude it" — while `upload_emails()` had started landing leads as `imported`, which is not a dialable status. The STATUS excluded the lead, `PHONE_REQUIRED` was never consulted, and break 106 reported GREEN. The docstring was the documentation of an isolation that no longer existed, which is worse than no docstring. Only observable by setting the status the test claims to have set. Fixed 2026-09-10. |
+| 18 | the per-mailbox cap predicate, masked by pointing at the POSITIVE test | ⚠️ **A BREAK THAT WIDENS A FILTER CAN ONLY BE CAUGHT BY A TEST ASSERTING EXCLUSION.** Break 128 changes `WHERE es.from_email = c.sender_email` to `WHERE true`, so the caps count every mailbox as one. Its `EXPECT` named `test_the_caps_count_per_mailbox_not_per_campaign` — "a send from the same mailbox counts" — which still passes under the break, because over-counting counts MORE, not less. GREEN on the full pass. The failure is over-counting, and only `test_a_different_mailbox_does_not_spend_this_ones_budget` asserts the exclusion it destroys. Fixed 2026-09-10 by repointing `EXPECT`. Same shape as row 17's negative-case gap: **for a break that removes a filter, ask which test would fail if MORE rows matched.** |
 
 Note #5: the *test* was wrong, not the code. That is the usual shape.
 
@@ -262,15 +263,40 @@ Two things saved it, and neither was a rule:
 * the copy had been written recently enough that `created_at` ordering told the
   story
 
-**So: a curl that WRITES gets a scratch campaign, every time.**
+**So: a curl that WRITES gets a scratch target, every time — and the diff catches
+the time you forget.**
 
-    CID=$(./scripts/scratch_drip.sh new)     # created through /campaigns/new
-    curl ... -X POST "http://localhost:4100/campaign/$CID/steps" ...
-    ./scripts/scratch_drip.sh clean          # and it REFUSES if leads got attached
+    ./scripts/scratch.sh snapshot            # before verifying anything
+    CID=$(./scripts/scratch.sh new)          # a scratch DRIP campaign
+    CID=$(./scripts/scratch.sh new-call)     # ... or a CALL campaign
+    LID=$(./scripts/scratch.sh new-lead)     # ... or a LEAD, not dialable
+    curl ... -X POST ".../campaign/$CID/steps" ...
+    ./scripts/scratch.sh diff                # ⚠️ did I touch REAL data?
+    ./scripts/scratch.sh clean               # refuses if a REAL lead attached
+
+⚠️ **THE FIRST VERSION OF THIS RULE COVERED DRIPS ONLY, AND THAT IS WHY IT
+RECURRED.** A day after it was written, a full config POST went to the live `C1`
+to check a new selector — changing its prompt version and blanking its notes —
+because there was no safe target for a call campaign and the rule's example only
+showed a drip. **A rule with a hole in it gets used on the other side of the
+hole.** The script was `scratch_drip.sh` while it already made call campaigns; the
+name describing less than the thing is what made the hole readable as the whole.
+
+`snapshot` / `diff` are the part that actually closes it. A scratch target only
+helps when you remember to use one; **the diff catches the time you did not**,
+within seconds, by hashing every live table — `leads`, `campaign_configs`,
+`suppression`, `email_do_not_send`, `email_sends`, `email_clicks`, `drip_steps` —
+excluding `SCRATCH-` rows.
+
+⚠️ **TWO TABLES CANNOT BE PUT BACK: `suppression` and `email_do_not_send`.**
+Deleting a mistaken row does not undo it, because their entire purpose is to
+outlive the lead — a wrong entry is a firm never contacted again with nothing on
+screen saying why, and a wrongly REMOVED one is a compliance failure. Verification
+must never write to either. `/dnc` is the only route in, deliberately.
 
 `list` shows leftovers. The `SCRATCH-` prefix is the whole mechanism: it labels
-itself on /campaigns, which `DRIP-LIVETEST` and `DRIP-REPRO` did not — they sat in
-the dev database for days and had to be asked about four times.
+itself on /campaigns and /leads, which `DRIP-LIVETEST` and `DRIP-REPRO` did not —
+they sat in the dev database for days and had to be asked about four times.
 
 And the diagnostic lesson, which is the same one as the whole file: **a report of
 what a bug looks like is evidence, not a diagnosis.** Duplicated rows and resurrected
