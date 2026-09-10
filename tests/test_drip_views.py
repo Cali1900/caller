@@ -13,7 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import campaigns, clicks, db as dbm, drip
-from tests.test_drip import dripc, _lead, _join, open_all_hours  # noqa: F401
+from tests.test_drip import (dripc, _lead, _join, open_all_hours,  # noqa: F401
+                             LA)
 
 
 @pytest.fixture
@@ -538,15 +539,41 @@ def test_a_send_time_is_moved_into_the_FIRMS_business_hours(db, dripc, client):
                             WHERE campaign_id = %s""", (cid,))
     lid = _lead(db, days_ago=11, company='Night Owl', phone_e164='+15553330201')
     _join(db, lid, cid, sent_steps=1)
+
+    # ⚠️ THE DUE TIME IS PINNED TO 02:00 LOCAL, TOMORROW, and that is the whole
+    # point of this test. It used to leave the step OVERDUE, so with next_open()
+    # removed the answer was max(next_due, now) = NOW - and "now" is inside 9-17
+    # on a weekday whenever the suite runs during business hours. The break
+    # verified RED at 20:00 PDT and GREEN at 12:54 PDT: same code, opposite
+    # result, decided by the clock. A test that passes randomly is worse than one
+    # that fails randomly, because it reads as coverage all working day.
+    #
+    # Pinned FUTURE and OUT OF HOURS, max(next_due, now) is next_due, so the
+    # assertion below can only pass if next_open() moved it.
+    step2 = drip.steps(cid)[1]
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE leads
+                      SET emailed_at = ((date_trunc('day', (now() AT TIME ZONE %s))
+                                         + interval '1 day 2 hours')
+                                        AT TIME ZONE %s)
+                                       - (%s || ' days')::interval
+                    WHERE lead_id = %s""",
+                (LA, LA, step2['delay_days'], lid))
+
     row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
     assert row['sends_at'] is not None, row
+    due_local = row['next_due'].astimezone(ZoneInfo(row['timezone']))
+    assert due_local.hour == 2, \
+        f'the premise: due at 02:00 local, got {due_local:%a %H:%M}'
 
     local = row['sends_at'].astimezone(ZoneInfo(row['timezone']))
     assert 9 <= local.hour < 17, \
         f'the send time is {local:%a %H:%M} local - outside business hours'
     assert local.weekday() < 5, f'the send time is a {local:%A}'
-    assert row['sends_at'] >= row['next_due'], \
-        'a send cannot be scheduled BEFORE it is due'
+    assert row['sends_at'] > row['next_due'], \
+        'the send time equals the raw schedule - nothing moved it into the window'
     assert row['sends_at_local'], 'no firm-local rendering of the send time'
 
 
