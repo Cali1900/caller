@@ -17,7 +17,7 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
 | Tests | 777 passed, 1 skipped |
-| Break pass | **139 definitions** (136–139 added since, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
+| Break pass | **139 definitions.** Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -1255,7 +1255,7 @@ do-not-send is `email_do_not_send` (migration 029), read by
 `archive.is_do_not_send()` and checked in `autosend.eligibility()` AND again in
 both `sender.send_one()` and `sender.send_manual()`. Breaks 80–81.
 
-## Four defects found in the SAFETY TOOLING itself
+## Five defects found in the SAFETY TOOLING itself
 
 All three shared one shape: **the tool reported success without doing the
 thing.** Worth knowing about, because that shape is not caught by tests passing.
@@ -1294,6 +1294,19 @@ thing.** Worth knowing about, because that shape is not caught by tests passing.
    start at all. It now looks for the `caller-caller-api-run` container — the
    thing that would actually deadlock the database. **A safety check that fires
    on itself is worse than none: it trains you to bypass it.**
+
+### 5. A break could name a test that no longer exists (2026-09-10)
+
+`EXPECT` named `test_stopping_a_fed_drip_asks_first` after the status gate renamed
+that test. The pass said so — `no test named ... exists <-- not coverage` — but
+forty breaks in, having already spent the chunk.
+
+**A definition pointing at a nonexistent test reads like coverage from outside:**
+the file is there, the comment argues for a real property, and nothing says the
+connection is severed. `breaks_anchor_check.py` now audits every `EXPECT` against
+the tests that exist, beside the anchor check, in the same exit status — so
+`break_pass_all.sh` refuses to start rather than discovering it mid-run. The anchor
+check covers the CODE end; this covers the TEST end.
 
 ### 4. The resume checkpoint did not cover the code under test (2026-09-10)
 
