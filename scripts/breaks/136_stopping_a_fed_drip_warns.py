@@ -12,7 +12,13 @@
 # the leads that currently QUALIFY instead of the campaigns that pointed at it.
 # Same consequence, measured by the mechanism that decides it.
 TARGET = 'api/web.py'
-EXPECT = 'test_stopping_a_fed_drip_asks_first'
+# ⚠️ RENAMED WITH ITS TEST. The status gate made "fed by a call campaign"
+# meaningless, so the test became test_stopping_a_drip_with_leads_asks_first - and
+# this EXPECT was left naming the old one. The pass reported "no test named ...
+# exists <-- not coverage", which is the right answer: a break naming a test that
+# does not exist is a guard nothing verifies, and it would have sat here reading
+# like coverage.
+EXPECT = 'test_stopping_a_drip_with_leads_asks_first'
 LABEL = 'stop a fed drip silently'
 OLD = """    if row['type'] == 'drip' and confirm != 'yes':
         if _drip_mod.roster(campaign_id, limit=1):"""
