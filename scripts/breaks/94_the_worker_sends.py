@@ -19,5 +19,11 @@
 TARGET = 'api/worker.py'
 EXPECT = 'test_the_worker_runs_both_send_loops'
 LABEL = 'drop the send tick, so no email ever goes out again'
-OLD = """            r = _safe('sender', sender.run_once, cfg)"""
-NEW = """            r = None"""
+# ⚠️ REPOINTED 2026-09-10 when pacing landed. The send tick became ONE email per
+# jittered gap instead of a 50-lead drain, so the old anchor
+# (`_safe('sender', sender.run_once, cfg)`) no longer exists. The DRIP call is
+# now the right anchor: it is the loop that must never be quietly dropped,
+# because a drip that stops advancing is invisible - no error, no failed send,
+# just firms that never hear from us again.
+OLD = """            d = _safe('drip', drip.run_once, cfg, 1)"""
+NEW = """            d = None"""

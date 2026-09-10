@@ -5,10 +5,40 @@
   {% else %}<span class="pill">stopped</span>{% endif %}</h1>
 <p class="sub"><a href="/campaigns">&larr; all campaigns</a>
    {% if c.notes %}&middot; {{ c.notes }}{% endif %}</p>
+{% if c.type == 'drip' and pace.held %}
+<div class="banner warn">
+  <b>{{ pace.held }} email{{ '' if pace.held == 1 else 's' }} due now and
+  waiting.</b> Nothing failed and nothing is lost &mdash; each one sends when its
+  window opens.
+  <span class="dim">Held by:
+    {% if pace.outside_hours %}<b>{{ pace.outside_hours }}</b> outside business
+      hours in the firm's own timezone{% endif %}
+    {% if pace.over_hourly %}{% if pace.outside_hours %} &middot; {% endif %}
+      <b>{{ pace.over_hourly }}</b> over the hourly cap{% endif %}
+    {% if pace.over_daily %}{% if pace.outside_hours or pace.over_hourly %} &middot; {% endif %}
+      <b>{{ pace.over_daily }}</b> over today's cap{% endif %}.
+    A lead can be held by more than one, so these do not add up to
+    {{ pace.held }}.</span>
+</div>
+{% endif %}
 {% if msg %}<div class="banner{% if 'REJECTED' in msg %} warn{% endif %}">{{ msg }}</div>{% endif %}
 
 <div class="card">
   <div class="toolbar" style="justify-content:space-between">
+    {% if c.type == 'drip' %}
+    {# THE BACKLOG, in the same shape as the call queue above it. Anything past a
+       cap WAITS - it is not selected yet, it has not failed, and this is where it
+       says so. Derived from the same query the sender runs, so it cannot drift
+       from what actually goes out. #}
+    <div class="metric">
+      <div class="m"><b>{{ pace.sendable or 0 }}</b><span>sendable now</span></div>
+      <div class="m"><b>{{ pace.held or 0 }}</b><span>waiting on pace</span></div>
+      <div class="m"><b>{{ pace.sent_hour or 0 }}/{{ pace.hourly_cap }}</b><span>this hour</span></div>
+      <div class="m"><b>{{ pace.sent_today or 0 }}/{{ pace.daily_cap }}</b><span>today</span></div>
+      <div class="m"><b>{{ pace.gap_min }}&ndash;{{ pace.gap_max }}s</b><span>apart, jittered</span></div>
+      <div class="m"><b>~{{ emails_per_hour }}</b><span>per hour at this pace</span></div>
+    </div>
+    {% else %}
     <div class="metric">
       <div class="m"><b>{{ queue.queued or 0 }}</b><span>in queue</span></div>
       <div class="m"><b>{{ queue.queued_carry or 0 }}</b><span>carry-overs first</span></div>
@@ -17,6 +47,7 @@
       <div class="m"><b>{{ remaining }}</b><span>left today (~{{ hours_left }}h)</span></div>
       <div class="m"><b>{{ queue.pool or 0 }}</b><span>assigned, not queued</span></div>
     </div>
+    {% endif %}
     <div style="text-align:right">
       <div style="margin-bottom:8px">
         <span class="livedot {{ 'on' if c.is_running else 'off' }}"></span>
@@ -51,8 +82,91 @@
         <input id="nt" name="notes" value="{{ c.notes or '' }}"></div>
     </div>
 
+    {% if c.type == 'drip' %}
+    <div class="card">
+      <h2>Sending pace</h2>
+      <p class="dim" style="margin-top:0">Reputation belongs to the
+         <b>address</b>, so the caps count every campaign sending as
+         <code>{{ c.sender_email }}</code> &mdash; not just this one.</p>
+      <div class="fields-2">
+        <div class="field"><label for="ehc">Emails per hour</label>
+          <input id="ehc" name="email_hourly_cap" type="number" min="1" max="60"
+                 value="{{ c.email_hourly_cap }}"></div>
+        <div class="field"><label for="edc">Emails per day</label>
+          <input id="edc" name="email_daily_cap" type="number" min="1" max="250"
+                 value="{{ c.email_daily_cap }}"></div>
+      </div>
+      <div class="fields-2">
+        <div class="field"><label for="egn">Gap min (s)</label>
+          <input id="egn" name="email_gap_min_seconds" type="number" min="15" max="7200"
+                 value="{{ c.email_gap_min_seconds }}"></div>
+        <div class="field"><label for="egx">Gap max (s)</label>
+          <input id="egx" name="email_gap_max_seconds" type="number" min="15" max="7200"
+                 value="{{ c.email_gap_max_seconds }}"></div>
+      </div>
+      <p class="dim" style="margin-bottom:0">
+        The <b>hourly cap</b> is the real throttle &mdash; the gap alone would
+        still allow {{ (3600 // (c.email_gap_min_seconds or 60)) }}/hour at its
+        tightest. Day ceiling is <b>250</b>, enforced by the database: a new
+        domain earns volume rather than being given it.
+        {% if hours_to_clear %}At this pace the {{ pace.scheduled }} due now
+        clear in about <b>{{ hours_to_clear }}h</b> of sending.{% endif %}</p>
+    </div>
+
+    <div class="card">
+      <h2>Business hours</h2>
+      <p class="dim" style="margin-top:0">Set below, per weekday &mdash; and read
+        in the <b>firm's</b> timezone, not yours, using the same window logic the
+        dialer uses. A 9am send lands at 9am where they are.</p>
+      {% if tz_fallback %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ tz_fallback }}</b> lead{{ '' if tz_fallback == 1 else 's' }}
+        on this drip {{ 'has' if tz_fallback == 1 else 'have' }} no timezone
+        &mdash; imported leads arrive without one. They fall back to
+        <b>{{ operator_tz }}</b>, your hours. Adding a phone sets a timezone.</p>
+      {% else %}
+      <p class="dim" style="margin-bottom:0">Every lead on this drip has its own
+        timezone.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+
     {# BOTH TYPES have a sender: a drip mails as somebody too. #}
     {% if c.type == 'call' %}
+    <div class="card">
+      <h2>Follow-up drip</h2>
+      <div class="field">
+        <label for="dd">Leads enter this drip after email&nbsp;1 is sent</label>
+        <select id="dd" name="default_drip_id">
+          <option value="" {% if not c.default_drip_id %}selected{% endif %}>none
+            &mdash; leads will not enter a drip after email 1</option>
+          {% for d in drip_options %}
+          <option value="{{ d.campaign_id }}"
+                  {% if c.default_drip_id and c.default_drip_id|string == d.campaign_id|string %}selected{% endif %}>
+            {{ d.name }}{% if not d.is_running %} (stopped){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {# ⚠️ NULL WAS SILENT, AND THAT IS HOW A CALL CAMPAIGN ENDED UP WIRED TO
+         NOTHING. Email 1 went out, the lead sat at 'emailed', and no sequence
+         followed - visible only by opening that lead. It says so now. #}
+      {% if not c.default_drip_id %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>No follow-up drip.</b> Leads
+        will not enter a drip after email&nbsp;1 &mdash; email 1 goes out and
+        nothing follows it. They appear in <a href="/today">Today</a> as
+        <b>emailed and on no drip</b>.</p>
+      {% elif drip_chosen and not drip_chosen.is_running %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ drip_chosen.name }} is
+        stopped.</b> Nothing enters a stopped drip &mdash; leads that get
+        email&nbsp;1 while it is stopped join no drip at all, rather than waiting
+        for it to start.</p>
+      {% else %}
+      <p class="dim" style="margin-bottom:0">Changing this affects leads entering
+        <b>afterwards only</b>. Anyone already on a drip finishes that sequence:
+        this is read when email&nbsp;1 is sent, and entry only fires for a lead
+        with no drip yet.</p>
+      {% endif %}
+    </div>
+
     <div class="card">
       <h2>Daily cap</h2>
       <div class="field"><label for="cap">New leads per day</label>
@@ -390,11 +504,22 @@
   {% endif %}
 </div>
 
-{% if c.type == 'call' %}
+{# ⚠️ BOTH TYPES. campaign_windows is what "business hours" MEANS for a drip -
+   drip.due() reads these rows through the same windows.PREFERENCE_WINDOW SQL the
+   dialer uses, keyed on the drip campaign. Rendering it for calls only left the
+   email window editable nowhere while being enforced. #}
 <div class="card">
-  <h2>Calling window</h2>
+  <h2>{{ 'Calling window' if c.type == 'call' else 'Business hours' }}</h2>
+  {% if c.type == 'call' %}
   <p class="dim">In the <b>called party's</b> local time, and specific to this
      campaign. Can only ever narrow the legal 08:00&ndash;20:30 window.</p>
+  {% else %}
+  <p class="dim">In the <b>firm's</b> local time, and specific to this drip. A
+     step that falls due outside these hours WAITS for them &mdash; it is not
+     skipped and it does not fail. There is no legal window on email: TCPA's
+     08:00&ndash;20:30 is a law about phone calls, and borrowing it here would
+     imply a constraint that does not exist.</p>
+  {% endif %}
   <form method="post" action="/campaign/{{ c.campaign_id }}/windows">
     <table style="box-shadow:none;max-width:720px">
     <tr><th style="width:30%">Day</th><th style="width:10%">On</th>
@@ -409,7 +534,6 @@
     <p><button type="submit" class="ghost">Save window</button></p>
   </form>
 </div>
-{% endif %}
 
 {% if c.type == 'call' %}
 <div class="card" id="copy">

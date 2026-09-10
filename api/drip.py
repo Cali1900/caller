@@ -583,6 +583,75 @@ DUE_NOW = ("AND ((l.emailed_at IS NOT NULL AND s.position > 1"
            "          + (coalesce(s.delay_minutes, 0) || ' minutes')::interval"
            "          <= now()))")
 
+# ---------------------------------------------------------------------------
+# PACING. Four layers, and they gate SELECTION - never the send.
+#
+# ⚠️ A CAPPED LEAD IS NOT-YET-DUE, NOT REFUSED. Putting these in send_step()
+# would write a refused_ineligible audit row for every held lead on every
+# 120-second tick: thousands of rows that read as failures, for leads that are
+# simply waiting their turn. Sean's requirement is that anything past a cap
+# WAITS - it must not fail and it must not vanish - and "not selected yet" is
+# exactly that. The backlog is then derivable rather than stored: see held().
+#
+# Each fragment is its own constant so the break pass can remove exactly one and
+# watch exactly the matching test go red.
+# ---------------------------------------------------------------------------
+
+# ⚠️ BUSINESS HOURS IN THE CONTACT'S TIMEZONE, REUSING THE CALL LOGIC VERBATIM.
+# This is windows.PREFERENCE_WINDOW with one substitution: the drip's windows
+# belong to the DRIP campaign, so it keys on l.drip_campaign_id instead of
+# l.campaign_id. A derived string rather than a copy, because two copies of a
+# timezone rule are two rules, and the first time they disagree one of them is
+# mailing a firm at 4am.
+#
+# TCPA's LEGAL_WINDOW is deliberately NOT here: 8:00-20:30 is a law about
+# telephone calls, and borrowing it for email would imply a legal constraint
+# that does not exist. Business hours are an etiquette and reputation decision,
+# and they live in campaign_windows where the operator can see them.
+#
+# ⚠️ A LEAD WITH NO TIMEZONE FALLS BACK TO THE OPERATOR'S. leads.timezone is
+# NULLABLE since the email-only import (038), and `now() AT TIME ZONE NULL` is
+# NULL, which fails every comparison - so without the coalesce an imported lead
+# would never be due and would never say why. That is the silent-vanishing
+# failure this whole feature is meant to avoid. The fallback is Sean's own
+# hours, which is the best available proxy, and lead_source_split on the
+# campaign screen shows how many leads are on it.
+def _email_window() -> str:
+    from api import windows
+    return (windows.PREFERENCE_WINDOW
+            .replace('w.campaign_id = l.campaign_id',
+                     'w.campaign_id = l.drip_campaign_id')
+            .replace('l.timezone', "coalesce(l.timezone, %(op_tz)s)"))
+
+
+# ⚠️ LIMITS ARE PER CAMPAIGN, COUNTS ARE PER MAILBOX. Reputation belongs to the
+# ADDRESS. Two drips on info@counselorai.io at 15/hour each would put 30/hour on
+# one mailbox, so both counts span every campaign sharing c.sender_email - which
+# means the tighter campaign is bound by the shared total. Conservative on
+# purpose: the wrong answer costs delay, the other wrong answer costs a domain.
+_MAILBOX_SENDS = """
+        SELECT count(*) FROM email_sends es
+          JOIN leads ml            ON ml.lead_id = es.lead_id
+          JOIN campaign_configs mc ON mc.campaign_id
+               = coalesce(ml.drip_campaign_id, ml.campaign_id)
+         WHERE mc.sender_email = c.sender_email
+           AND es.sent_at IS NOT NULL
+"""
+
+HOURLY_CAP = f"""
+    AND ({_MAILBOX_SENDS}
+           AND es.sent_at > now() - interval '1 hour') < c.email_hourly_cap
+"""
+
+# The day boundary is the OPERATOR's, matching guards.assert_under_daily_cap.
+# A rolling 24 hours would mean "50 a day" never refilled at a predictable time,
+# and a per-contact-timezone day would make the cap unknowable from the screen.
+DAILY_CAP = f"""
+    AND ({_MAILBOX_SENDS}
+           AND (es.sent_at AT TIME ZONE %(op_tz)s)::date
+               = (now() AT TIME ZONE %(op_tz)s)::date) < c.email_daily_cap
+"""
+
 SELECT_DUE = """
     SELECT l.lead_id, l.company, l.dm_email, l.dm_name, l.emailed_at,
            s.step_id, s.position, s.delay_days, s.subject, s.body,
@@ -603,18 +672,41 @@ SELECT_DUE = """
        {enabled}
        {already_sent}
        {due_now}
+       {pacing}
      -- The EARLIEST unsent due step for each lead, so a sequence cannot skip
      -- ahead if two fall due together after a pause.
      ORDER BY l.lead_id, s.position
 """
 
 
-def _build_select(due_clause=DUE_NOW):
+def _op_tz() -> str:
+    """
+    The operator's IANA timezone, for the daily-cap day boundary and as the
+    fallback when a lead has none. Read from config rather than passed down,
+    because every caller of due() would otherwise have to know about it - and a
+    caller that forgot would get a NULL comparison and select nothing.
+    """
+    from api.config import load_config
+    return load_config().OPERATOR_TIMEZONE
+
+
+def _build_select(due_clause=DUE_NOW, pacing=True, pace_sql=None):
+    """
+    The selection query. `pacing=False` drops the four pace layers.
+
+    ⚠️ upcoming() - the digest - MUST pass pacing=False. It answers "what is
+    SCHEDULED", and a cap shifts when a mail goes out without changing whether
+    it is coming. A digest that hid capped sends would under-report tomorrow,
+    which is the one thing that block exists to prevent.
+    """
     return SELECT_DUE.format(
         running=RUNNING_STOP, replied=REPLIED_STOP, archived=ARCHIVED_STOP,
         terminal=TERMINAL_STOP, do_not_send=DO_NOT_SEND_STOP,
-        enabled=ENABLED_STOP,
-        already_sent=ALREADY_SENT_STOP, due_now=due_clause)
+        enabled=ENABLED_STOP, already_sent=ALREADY_SENT_STOP,
+        due_now=due_clause,
+        pacing=(pace_sql if pace_sql is not None
+                else ((HOURLY_CAP + DAILY_CAP + _email_window())
+                      if pacing else '')))
 
 
 def due(limit: int = 50):
@@ -627,7 +719,7 @@ def due(limit: int = 50):
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(_build_select())
+            cur.execute(_build_select(), {'op_tz': _op_tz()})
             seen, out = set(), []
             for r in cur.fetchall():
                 if r['lead_id'] in seen:
@@ -637,6 +729,198 @@ def due(limit: int = 50):
                 if len(out) >= limit:
                     break
             return out
+
+
+def step_stats(campaign_id) -> list:
+    """
+    Per step: how many went out, how many were clicked, and the rate.
+
+    ⚠️ THIS IS THE WHOLE REASON TO RUN A SEQUENCE - it says which email is doing
+    the work and which one to cut. A per-lead click count cannot answer it, which
+    is why the token is per SEND: email_sends is one row per (lead, step) with its
+    own click_token, and email_clicks.send_id points back at it. So every click
+    already resolves to a step and this table is a join, not a new capture.
+
+    Counts are of SENT rows only. A prepared-but-unsent row (sent_at IS NULL) is
+    a send that may still fail, and counting it would inflate the denominator and
+    understate every rate on the page.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.step_id, s.position, s.subject, s.delay_days,
+                       s.delay_minutes, s.enabled,
+                       count(DISTINCT es.send_id)                 AS sent,
+                       count(DISTINCT ec.send_id)                 AS clicked,
+                       round(100.0 * count(DISTINCT ec.send_id)
+                             / greatest(count(DISTINCT es.send_id), 1), 1) AS pct
+                  FROM drip_steps s
+                  LEFT JOIN email_sends es
+                         ON es.step_id = s.step_id AND es.sent_at IS NOT NULL
+                  LEFT JOIN email_clicks ec ON ec.send_id = es.send_id
+                 WHERE s.campaign_id = %s AND s.deleted_at IS NULL
+                 GROUP BY s.step_id, s.position, s.subject, s.delay_days,
+                          s.delay_minutes, s.enabled
+                 ORDER BY s.position""", (campaign_id,))
+            return [dict(r) for r in cur.fetchall()]
+
+
+def roster(campaign_id, limit: int = 500) -> list:
+    """
+    The leads on this drip, with EMAIL facts only.
+
+    No phone, no attempts, no agent score: on a drip those columns are noise, and
+    a table nobody can scan is the same failure as a summary line that wraps every
+    row onto three lines.
+
+    `next_due` is the SCHEDULE, computed the same way DUE_NOW computes it - step 1
+    from drip_entered_at, later steps from emailed_at. It deliberately ignores the
+    pace layers: a cap shifts when a mail goes out, and a roster that showed
+    "next: never" for a lead behind a cap would be lying about the sequence.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH sent AS (
+                    SELECT es.lead_id, es.step_id, es.sent_at, es.send_id,
+                           st.position
+                      FROM email_sends es
+                      JOIN drip_steps st ON st.step_id = es.step_id
+                     WHERE es.sent_at IS NOT NULL
+                       AND st.campaign_id = %(cid)s
+                ),
+                per_lead AS (
+                    SELECT lead_id, count(*) AS steps_sent,
+                           max(sent_at) AS last_sent, max(position) AS last_step
+                      FROM sent GROUP BY lead_id
+                ),
+                clicks AS (
+                    SELECT s.lead_id,
+                           string_agg(DISTINCT 'step ' || s.position, ', '
+                                      ORDER BY 'step ' || s.position) AS by_step,
+                           count(*) AS n
+                      FROM sent s
+                      JOIN email_clicks ec ON ec.send_id = s.send_id
+                     GROUP BY s.lead_id
+                ),
+                nxt AS (
+                    SELECT l.lead_id,
+                           min(CASE WHEN st.position = 1
+                                    THEN coalesce(l.drip_entered_at, now())
+                                         + (coalesce(st.delay_minutes, 0)
+                                            || ' minutes')::interval
+                                    ELSE l.emailed_at
+                                         + (st.delay_days || ' days')::interval
+                               END) AS due_at,
+                           min(st.position) AS next_step
+                      FROM leads l
+                      JOIN drip_steps st ON st.campaign_id = %(cid)s
+                                        AND st.deleted_at IS NULL AND st.enabled
+                     WHERE l.drip_campaign_id = %(cid)s
+                       AND NOT EXISTS (SELECT 1 FROM email_sends es
+                                        WHERE es.lead_id = l.lead_id
+                                          AND es.step_id = st.step_id)
+                     GROUP BY l.lead_id
+                )
+                SELECT l.lead_id, l.company, l.dm_name, l.dm_email, l.status,
+                       l.emailed_at, l.replied_at, l.drip_entered_at,
+                       l.lead_source, l.timezone,
+                       coalesce(p.steps_sent, 0) AS steps_sent,
+                       p.last_sent, p.last_step,
+                       coalesce(cl.n, 0) AS clicks, cl.by_step AS clicked_steps,
+                       n.due_at AS next_due, n.next_step,
+                       EXISTS (SELECT 1 FROM email_do_not_send d
+                                WHERE d.email = lower(btrim(l.dm_email)))
+                           AS do_not_send
+                  FROM leads l
+                  LEFT JOIN per_lead p ON p.lead_id = l.lead_id
+                  LEFT JOIN clicks   cl ON cl.lead_id = l.lead_id
+                  LEFT JOIN nxt      n  ON n.lead_id = l.lead_id
+                 WHERE l.drip_campaign_id = %(cid)s
+                 ORDER BY coalesce(p.last_sent, l.drip_entered_at) DESC NULLS LAST
+                 LIMIT %(lim)s""", {'cid': campaign_id, 'lim': limit})
+            return [dict(r) for r in cur.fetchall()]
+
+
+def held(campaign_id=None) -> dict:
+    """
+    What is due RIGHT NOW but held by pacing, and which layer is holding it.
+
+    ⚠️ DERIVED, NEVER STORED. A capped send is a row that the selection does not
+    return yet - there is no queue table, no status to get stuck in, and nothing
+    to reconcile. The backlog is the difference between "scheduled and otherwise
+    eligible" and "selectable now", which cannot drift from what the sender
+    actually does because both sides are the same query.
+
+    Sean's requirement was that anything past a cap WAITS: it must not fail and
+    it must not silently vanish. This is the "does not vanish" half - the number
+    on the campaign screen - and gating selection rather than the send is the
+    "does not fail" half.
+    """
+    scope = ' AND c.campaign_id = %(cid)s' if campaign_id else ''
+    params = {'op_tz': _op_tz(), 'cid': campaign_id}
+
+    def _count(pace_sql):
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT count(DISTINCT l.lead_id) AS n FROM ('
+                    + _build_select(pace_sql=pace_sql + scope)
+                    + ') l', params)
+                return cur.fetchone()['n']
+
+    window = _email_window()
+    scheduled = _count('')
+    sendable = _count(HOURLY_CAP + DAILY_CAP + window)
+    # Each layer measured ALONE, so the reason shown is the one actually biting.
+    # They can overlap - a lead can be both outside hours and over the cap - so
+    # these do not sum to `held`, and the screen must not present them as if
+    # they do.
+    out = {'scheduled': scheduled, 'sendable': sendable,
+           'held': scheduled - sendable,
+           'outside_hours': scheduled - _count(window),
+           'over_hourly': scheduled - _count(HOURLY_CAP),
+           'over_daily': scheduled - _count(DAILY_CAP)}
+    out.update(sent_counts(campaign_id))
+    return out
+
+
+def sent_counts(campaign_id=None) -> dict:
+    """
+    What this MAILBOX has actually sent in the last hour and today.
+
+    Per mailbox, not per campaign, for the same reason the caps are: the number
+    that matters to a spam filter is what the ADDRESS sent.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.sender_email, c.email_hourly_cap, c.email_daily_cap,
+                       c.email_gap_min_seconds, c.email_gap_max_seconds
+                  FROM campaign_configs c
+                 WHERE c.campaign_id = %s""", (campaign_id,))
+            camp = cur.fetchone()
+            if camp is None:
+                return {'sent_hour': 0, 'sent_today': 0}
+            cur.execute("""
+                SELECT count(*) FILTER (
+                         WHERE es.sent_at > now() - interval '1 hour') AS hour,
+                       count(*) FILTER (
+                         WHERE (es.sent_at AT TIME ZONE %(tz)s)::date
+                             = (now() AT TIME ZONE %(tz)s)::date) AS today
+                  FROM email_sends es
+                  JOIN leads ml            ON ml.lead_id = es.lead_id
+                  JOIN campaign_configs mc ON mc.campaign_id
+                       = coalesce(ml.drip_campaign_id, ml.campaign_id)
+                 WHERE mc.sender_email = %(se)s
+                   AND es.sent_at IS NOT NULL""",
+                {'tz': _op_tz(), 'se': camp['sender_email']})
+            n = cur.fetchone()
+            return {'sent_hour': n['hour'] or 0, 'sent_today': n['today'] or 0,
+                    'hourly_cap': camp['email_hourly_cap'],
+                    'daily_cap': camp['email_daily_cap'],
+                    'gap_min': camp['email_gap_min_seconds'],
+                    'gap_max': camp['email_gap_max_seconds']}
 
 
 def upcoming(within_hours: int = 24, limit: int = 200):
@@ -654,7 +938,8 @@ def upcoming(within_hours: int = 24, limit: int = 200):
               " <= now() + (%(h)s || ' hours')::interval")
     with db.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(_build_select(clause), {'h': within_hours})
+            cur.execute(_build_select(clause, pacing=False),
+                        {'h': within_hours})
             seen, out = set(), []
             for r in cur.fetchall():
                 if r['lead_id'] in seen:

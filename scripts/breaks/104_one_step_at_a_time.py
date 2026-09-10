@@ -10,7 +10,12 @@
 TARGET = 'api/drip.py'
 EXPECT = 'test_only_the_earliest_unsent_due_step_is_selected'
 LABEL = 'send every due step at once after a pause'
-OLD = """            seen, out = set(), []
+# ⚠️ ANCHORED ON due()'s OWN execute LINE, not on the function that follows it.
+# This definition has been repointed twice because it identified due() by whatever
+# was defined next - first upcoming(), then held() - and adding a function above
+# them broke it both times. The execute line is unique to due() and moves with it.
+OLD = """            cur.execute(_build_select(), {'op_tz': _op_tz()})
+            seen, out = set(), []
             for r in cur.fetchall():
                 if r['lead_id'] in seen:
                     continue
@@ -18,16 +23,11 @@ OLD = """            seen, out = set(), []
                 out.append(r)
                 if len(out) >= limit:
                     break
-            return out
-
-
-def upcoming"""
-NEW = """            out = []
+            return out"""
+NEW = """            cur.execute(_build_select(), {'op_tz': _op_tz()})
+            out = []
             for r in cur.fetchall():
                 out.append(r)
                 if len(out) >= limit:
                     break
-            return out
-
-
-def upcoming"""
+            return out"""

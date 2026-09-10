@@ -152,14 +152,22 @@ def test_the_line_never_ends_mid_sentence(db):
 # ONE generator, TWO places
 # --------------------------------------------------------------------------
 
-def test_the_same_line_renders_on_the_list_and_on_lead_detail(client, db):
+def test_the_why_line_is_on_lead_detail_and_NOT_on_the_list(client, db):
     """
-    ⚠️ THE POINT OF THE WHOLE ITEM. Sean searches a firm to find out where it
-    stands; if the list and lead detail can say different things, the list is
-    the one that goes stale and it is the one he reads first.
+    ⚠️ REQUIREMENT CHANGED 2026-09-10, and this test changed with it.
 
-    Asserted against RENDERED HTML on both screens, not against the template
-    source - two regex "alignment checkers" have already both lied.
+    It used to assert the line rendered on BOTH screens, on the argument that a
+    search result you have to click through has not answered your question. In
+    practice it wrapped every row of the leads table onto three lines and made
+    the table unscannable - so it now lives on lead DETAIL only, where there is
+    room for a sentence.
+
+    Kept as a test rather than deleted, because the property still matters in
+    both directions: the explanation must be SOMEWHERE, and it must not be in
+    the table. A deleted test would let either half drift back.
+
+    Asserted against RENDERED HTML, not template source - two regex "alignment
+    checkers" have already both lied.
     """
     lid = _lead(db, company='Seans Law', dm_name='Bob Smith',
                 dm_email='bob@seanslaw.example', dm_email_confirmed=True,
@@ -175,8 +183,11 @@ def test_the_same_line_renders_on_the_list_and_on_lead_detail(client, db):
     list_body = ' '.join(client.get('/?q=Seans+Law').text.split())
     detail_body = ' '.join(client.get(f'/leads/{lid}').text.split())
     want = ' '.join(expected.split())
-    assert want in list_body, 'the search result did not carry the line'
     assert want in detail_body, 'lead detail did not carry the line'
+    assert want not in list_body, \
+        'the why line is back on the leads list - it wraps every row onto three'
+    # AND THE ROW IS STILL FINDABLE, which is what the list is for.
+    assert 'Seans Law' in list_body
 
 
 def test_a_search_answers_where_it_is_and_why_without_a_second_click(client, db):
@@ -186,11 +197,18 @@ def test_a_search_answers_where_it_is_and_why_without_a_second_click(client, db)
                 emailed_at=datetime.datetime(2026, 9, 8, tzinfo=datetime.timezone.utc),
                 replied_at=datetime.datetime(2026, 9, 9, tzinfo=datetime.timezone.utc))
     _call(db, lid, 'user_hangup')
+    # ⚠️ THE SEARCH FINDS IT; LEAD DETAIL EXPLAINS IT. The prose moved off the
+    # list on 2026-09-10 - see the test above. What the list must still do is
+    # answer "where is it" from its COLUMNS, which is why these assertions are
+    # now about status and the row being present rather than about the sentence.
     body = ' '.join(client.get('/?q=Seans+Law').text.split())
     assert 'Seans Law' in body
-    assert 'reached a human once' in body
-    assert 'Bob Smith gave their email' in body
-    assert 'They replied Sep 9' in body
+    assert 'engaged' in body, 'the list must still say where the lead stands'
+
+    detail = ' '.join(client.get(f'/leads/{lid}').text.split())
+    assert 'reached a human once' in detail
+    assert 'Bob Smith gave their email' in detail
+    assert 'They replied Sep 9' in detail
 
 
 # --------------------------------------------------------------------------

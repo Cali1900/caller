@@ -451,11 +451,11 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = [dict(r) for r in cur.fetchall()]
-            # SAME GENERATOR as lead detail, over a row built by the same
-            # joins. Two implementations would drift, and the one on the
-            # list is the one that would quietly go stale.
-            for r in rows:
-                r['why'] = _why.line(r)
+            # ⚠️ NO `why` LINE ON THE LIST. It is computed per row for lead
+            # DETAIL only: on the list it wrapped every row onto three lines and
+            # made the table unscannable. Not computed here at all rather than
+            # computed and hidden, because a per-row generator over hundreds of
+            # rows is work nobody reads.
             # The same draft join as the list query - the email-state predicate
             # references it, and a count that cannot see `d` would 500 or, worse,
             # silently disagree with the rows on screen.
@@ -1519,8 +1519,42 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     pv_lead, pv_real = drafts_mod.preview_lead(campaign_id)
     _sender_opts = senders_mod.options(cfg, camp['sender_email'])
     _steps = _drip_mod.steps(campaign_id) if steps is None else steps
+    # SENDING PACE, and the backlog it creates. Derived on every render from the
+    # same query the sender runs, so the number on screen cannot drift from what
+    # actually goes out.
+    pace = _drip_mod.held(campaign_id) if camp['type'] == 'drip' else {}
+    # EVERY drip, running or not, so a stopped one can still be chosen - and the
+    # screen says which are stopped, because drip_for() refuses to route into a
+    # stopped drip and that would otherwise look like the setting not working.
+    drip_options = [c for c in campaigns.list_all() if c['type'] == 'drip']
+    # The chosen one, resolved here so the template can say "stopped" without
+    # searching the list itself.
+    drip_chosen = (campaigns.get(camp['default_drip_id'])
+                   if camp.get('default_drip_id') else None)
+    gap_avg = ((camp['email_gap_min_seconds'] + camp['email_gap_max_seconds'])
+               / 2.0) or 1
+    # The REAL rate is whichever binds first: the gap or the hourly cap. Showing
+    # the gap's rate alone would overstate it fourfold at these defaults, which
+    # is the kind of number that gets trusted and then blamed.
+    emails_per_hour = min(round(3600.0 / gap_avg, 1),
+                          float(camp['email_hourly_cap']))
+    hours_to_clear = (round(pace.get('scheduled', 0) / emails_per_hour, 1)
+                      if emails_per_hour and pace.get('scheduled') else 0)
+    # ⚠️ HOW MANY LEADS FALL BACK TO THE OPERATOR'S HOURS. leads.timezone is
+    # nullable since the email-only import, and a fallback nobody can see is a
+    # silent behaviour change for exactly the leads a drip holds most of.
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT count(*) AS n FROM leads'
+                        ' WHERE drip_campaign_id = %s AND timezone IS NULL',
+                        (campaign_id,))
+            tz_fallback = cur.fetchone()['n']
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
+        'drip_options': drip_options, 'drip_chosen': drip_chosen,
+        'pace': pace, 'emails_per_hour': emails_per_hour,
+        'hours_to_clear': hours_to_clear, 'tz_fallback': tz_fallback,
+        'operator_tz': cfg.OPERATOR_TIMEZONE,
         'per_hour': per_hour, 'remaining': remaining,
         # The ladders, and how many rungs of each can actually fire. A rung
         # only applies if another attempt follows it, so a four-rung ladder
@@ -1622,19 +1656,89 @@ def prompts_sync():
 
 @router.post('/campaign/{campaign_id}/save')
 def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(''),
-                  agent_l1_version: int = Form(...),
+                  agent_l1_version: int = Form(None),
                   sender_email: str = Form(...), sender_name: str = Form(...),
-                  sender_company_line: str = Form(...), daily_cap: int = Form(...),
-                  max_concurrent: int = Form(...), dial_interval_min: int = Form(...),
-                  dial_interval_max: int = Form(...),
+                  sender_company_line: str = Form(...),
+                  daily_cap: int = Form(None),
+                  max_concurrent: int = Form(None),
+                  dial_interval_min: int = Form(None),
+                  dial_interval_max: int = Form(None),
                   max_attempts: int = Form(None),
                   retry_busy: str = Form(None),
                   retry_no_answer: str = Form(None),
-                  retry_voicemail: str = Form(None)):
-    if dial_interval_min > dial_interval_max:
+                  retry_voicemail: str = Form(None),
+                  email_gap_min_seconds: int = Form(None),
+                  email_gap_max_seconds: int = Form(None),
+                  email_hourly_cap: int = Form(None),
+                  email_daily_cap: int = Form(None),
+                  default_drip_id: str = Form(None)):
+    """
+    ⚠️ THE CALL FIELDS ARE OPTIONAL BECAUSE A DRIP SCREEN DOES NOT RENDER THEM.
+
+    They were `Form(...)` - required - and the drip campaign screen shows no cap,
+    no spacing and no prompt version, so SAVING A DRIP'S NAME OR SENDER WAS A 422
+    for as long as drip campaigns have existed. Nobody hit it because the useful
+    control on that screen is the sequence form, which posts elsewhere.
+
+    Optional does NOT mean defaulted: a missing field is not written at all, and
+    for a CALL campaign the fields the screen does render are checked below and
+    refused if absent. Defaulting a missing cap to anything would let a partial
+    post silently rewrite a live campaign's pacing.
+    """
+    camp = campaigns.get(campaign_id)
+    if camp is None:
+        return HTMLResponse('<p>no such campaign</p>', status_code=404)
+
+    def _refuse(why):
         return RedirectResponse(
-            f'/campaign/{campaign_id}?msg={urllib.parse.quote("REJECTED: gap min cannot exceed gap max")}',
+            f'/campaign/{campaign_id}?msg={urllib.parse.quote("REJECTED: " + why)}',
             status_code=303)
+
+    # WHAT THIS TYPE'S SCREEN RENDERS IS WHAT THIS TYPE MUST POST. Absent means
+    # the form was incomplete, which is a bug worth refusing rather than a
+    # value worth guessing.
+    # ⚠️ THE FOLLOW-UP DRIP. An EMPTY STRING is a real answer here - "none",
+    # chosen on purpose - and None means the field was not on the form at all.
+    # Collapsing the two would make "none" unsettable, which is the state that
+    # caused this: null was silent, so C1 sat wired to nothing.
+    if default_drip_id is not None and default_drip_id.strip():
+        target = campaigns.get(default_drip_id.strip())
+        if target is None or target['type'] != 'drip':
+            return _refuse('the follow-up drip must be a drip campaign')
+    if camp['type'] == 'call':
+        missing = [n for n, v in (('prompt version', agent_l1_version),
+                                  ('daily cap', daily_cap),
+                                  ('calls at a time', max_concurrent),
+                                  ('gap min', dial_interval_min),
+                                  ('gap max', dial_interval_max)) if v is None]
+        if missing:
+            return _refuse(f'the form did not post {", ".join(missing)}. '
+                           f'Nothing was saved.')
+        if dial_interval_min > dial_interval_max:
+            return _refuse('gap min cannot exceed gap max')
+    else:
+        missing = [n for n, v in (('send gap min', email_gap_min_seconds),
+                                  ('send gap max', email_gap_max_seconds),
+                                  ('hourly cap', email_hourly_cap),
+                                  ('daily cap', email_daily_cap)) if v is None]
+        if missing:
+            return _refuse(f'the form did not post {", ".join(missing)}. '
+                           f'Nothing was saved.')
+        # ⚠️ SAME MESSAGE AS THE DIAL GAP, because it is the same mistake. The
+        # database CHECK refuses it too; this is so the operator reads a
+        # sentence instead of a constraint name.
+        if email_gap_min_seconds > email_gap_max_seconds:
+            return _refuse('send gap min cannot exceed gap max')
+        if email_daily_cap > 250:
+            return _refuse(f'{email_daily_cap} a day is above the 250 ceiling. '
+                           f'A new sending domain earns volume; it cannot be '
+                           f'given it.')
+        if email_hourly_cap * 8 > email_daily_cap:
+            # NOT A REFUSAL ELSEWHERE - just arithmetic nobody should have to
+            # do. An hourly cap that cannot be reached inside a working day is
+            # a control that does nothing, the same class as step 1's timing on
+            # a call-only drip.
+            pass
     # The sender is a choice from a list. A typed address that Brevo has never
     # heard of is the config-that-cannot-send this replaced a text field to stop.
     if not senders_mod.is_allowed(_cfg(), sender_email):
@@ -1642,16 +1746,35 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
             f'/campaign/{campaign_id}?msg={urllib.parse.quote(f"REJECTED: {sender_email} is not an offered or verified sender")}',
             status_code=303)
     try:
-        campaigns.update(campaign_id, name=name, notes=notes,
-                         agent_l1_version=agent_l1_version,
-                         sender_email=sender_email, sender_name=sender_name,
-                         sender_company_line=sender_company_line,
-                         daily_cap=daily_cap, max_concurrent=max_concurrent,
-                         dial_interval_min=dial_interval_min,
-                         dial_interval_max=dial_interval_max,
-                         **_retry_fields(max_attempts, retry_busy,
-                                         retry_no_answer, retry_voicemail))
-        msg = f'saved - prompt v{agent_l1_version} is now live'
+        # ONLY WHAT WAS POSTED. A None here means the field is not on this
+        # type's screen, and writing it would overwrite a real value with a
+        # guess.
+        fields = {'name': name, 'notes': notes,
+                  'sender_email': sender_email, 'sender_name': sender_name,
+                  'sender_company_line': sender_company_line}
+        for k, v in (('agent_l1_version', agent_l1_version),
+                     ('daily_cap', daily_cap),
+                     ('max_concurrent', max_concurrent),
+                     ('dial_interval_min', dial_interval_min),
+                     ('dial_interval_max', dial_interval_max),
+                     ('email_gap_min_seconds', email_gap_min_seconds),
+                     ('email_gap_max_seconds', email_gap_max_seconds),
+                     ('email_hourly_cap', email_hourly_cap),
+                     ('email_daily_cap', email_daily_cap)):
+            if v is not None:
+                fields[k] = v
+        # Written as NULL when the operator picked "none", so the choice sticks
+        # rather than silently keeping the old drip.
+        if default_drip_id is not None:
+            fields['default_drip_id'] = default_drip_id.strip() or None
+        if camp['type'] == 'call':
+            fields.update(_retry_fields(max_attempts, retry_busy,
+                                        retry_no_answer, retry_voicemail))
+        campaigns.update(campaign_id, **fields)
+        msg = (f'saved - prompt v{agent_l1_version} is now live'
+               if camp['type'] == 'call' else
+               f'saved - {email_hourly_cap}/hour, {email_daily_cap}/day, '
+               f'{email_gap_min_seconds}-{email_gap_max_seconds}s apart')
     except Exception as exc:
         # A raw constraint violation is a wall of Postgres. Say what the
         # operator did wrong, in the terms they used.

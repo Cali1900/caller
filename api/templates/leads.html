@@ -180,10 +180,13 @@
   <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a>
       {% if l.tz_needs_review %}<span class="pill human_review" title="timezone derived from a split state">tz?</span>{% endif %}
       {% for t in l.tags or [] %}<a class="tag" href="/?tag={{ t | urlencode }}">{{ t }}</a>{% endfor %}
-      {# WHY IS IT HERE - same generator as lead detail. A search result you
-         have to click through to understand has not answered the question
-         you searched for. #}
-      {% if l.why %}<div class="why">{{ l.why }}</div>{% endif %}</td>
+      {# ⚠️ "WHY IS IT HERE" LIVES ON LEAD DETAIL ONLY, deliberately. It used to
+         render here too, on the same argument that a search result you have to
+         click through has not answered your question - but it wrapped the row
+         onto three lines and made the TABLE unscannable, which costs more than
+         it explained. A list is for scanning; the explanation belongs where
+         there is room for it. The generator is unchanged and still used on
+         /leads/<id>. #}</td>
   <td>{% if l.campaign_name %}<a class="camptag{% if l.campaign_running %} running{% endif %}"
         href="/campaign/{{ l.campaign_id }}"
         title="{% if l.campaign_running %}running{% else %}stopped{% endif %}">{{ l.campaign_name }}</a>

@@ -512,6 +512,79 @@ went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
 
+## Sending pace: four layers, and the hourly cap is the throttle (2026-09-10)
+
+The dialer had spacing and a daily cap. The sender had **neither** - `drip.run_once`
+drained up to 50 due leads in a tight loop and the worker re-entered it every 120
+seconds, so 100 leads entering a drip meant 50 emails in a few seconds and ~1,500/hour
+from one mailbox. `limit=50` was a query-cost decision doing duty as a rate.
+
+| layer | where it lives | default |
+|---|---|---|
+| gap between sends, jittered | `worker.next_email_gap()`, re-rolled every send | 60&ndash;300s |
+| hourly cap | `drip.HOURLY_CAP`, in the SELECT | 15 |
+| daily cap | `drip.DAILY_CAP`, operator-timezone day | 50, CHECK refuses >250 |
+| business hours | `drip._email_window()` | `campaign_windows`, per weekday |
+
+All four are on the campaign screen for drip campaigns, beside where the dial
+settings sit for call campaigns.
+
+### ⚠️ Four decisions that are not obvious from the code
+
+**1. The caps gate SELECTION, never the send.** A held lead is *not-yet-due*: no
+audit row, no refusal, no status to get stuck in. Putting them in `send_step()`
+would write a `refused_ineligible` row for every waiting lead on every tick -
+thousands of entries that read as failures for mail that is simply queued. The
+requirement was that anything past a cap WAITS without failing and without
+vanishing, and "not selected yet" is exactly that.
+
+**2. Limits are per campaign; counts are per MAILBOX.** Reputation belongs to the
+address. Two drips on `info@counselorai.io` at 15/hour each would put 30/hour on
+one mailbox, so both counts span every campaign sharing `sender_email` - the
+tighter campaign is bound by the shared total. Breaks 124, 125, 128.
+
+**3. Business hours REUSE the call logic.** `_email_window()` is
+`windows.PREFERENCE_WINDOW` with `l.campaign_id` swapped for
+`l.drip_campaign_id` - a derived string, not a copy, because two copies of a
+timezone rule are two rules and the first disagreement mails a firm at 4am.
+**TCPA's `LEGAL_WINDOW` is deliberately NOT applied**: 8:00-20:30 is a law about
+telephone calls, and borrowing it for email would imply a legal constraint that
+does not exist. Break 126.
+
+**4. A lead with no timezone falls back to the OPERATOR'S hours.** `leads.timezone`
+is nullable since the email-only import, and `now() AT TIME ZONE NULL` is NULL,
+which fails every comparison - so without the coalesce an imported lead would
+never be due and never say why. The campaign screen counts how many leads are on
+the fallback rather than leaving it hidden. Break 127.
+
+`drip.held(campaign_id)` is the backlog, **derived not stored**: the difference
+between "scheduled and otherwise eligible" and "selectable now", computed from the
+same query the sender runs, so the number on screen cannot drift from what goes
+out. The reasons (`outside_hours`, `over_hourly`, `over_daily`) are each measured
+ALONE and can overlap, so they do not sum to `held` - the screen says so.
+
+`upcoming()` - the digest - passes `pacing=False` on purpose. It answers "what is
+SCHEDULED", and a cap shifts when a mail goes out without changing whether it is
+coming. Break 129.
+
+### The drip config save had been a 422 since drip campaigns existed
+
+`daily_cap`, `max_concurrent`, `dial_interval_min/max` and `agent_l1_version` were
+required `Form(...)` params, and the drip screen renders none of them - so
+**renaming a drip or changing its sender was impossible**. Found while adding the
+pace fields to the same form. They are now optional, and what a type's screen
+renders is what that type must post: a CALL campaign posting an incomplete set is
+REFUSED by name rather than having a missing cap defaulted to a guess.
+
+### What is still not paced
+
+`sender.run_once` (email 1, auto mode) shares the mailbox and the same one-per-gap
+slot, and the drip goes first - a step is a promise already made, email 1 starts a
+new conversation, the same asymmetry the dialer applies to callbacks. But **email 1
+auto-send is off everywhere** (`email_1_mode = 'manual'`), so this only matters if
+that changes. There is no WARM-UP RAMP: a fixed cap cannot express "10 this week,
+25 next", and lowering the cap by hand each week is the current answer.
+
 ## The drip
 
 A lead's email sequence, owned by a **drip** campaign. `api/drip.py`.

@@ -46,6 +46,10 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  # hours, so the ladder never needs to. See api/retry_ladder.py.
                  'retry_busy', 'retry_no_answer', 'retry_voicemail',
                  'max_attempts',
+                 # SENDING PACE, drip campaigns. Limits are per campaign and
+                 # counts are per MAILBOX - see migration 041 and drip.HOURLY_CAP.
+                 'email_gap_min_seconds', 'email_gap_max_seconds',
+                 'email_hourly_cap', 'email_daily_cap',
                  # Email 1: manual or auto, and how long after the call.
                  # DEFAULTS TO MANUAL - see api/autosend.py.
                  'email_1_mode', 'email_1_delay_minutes',

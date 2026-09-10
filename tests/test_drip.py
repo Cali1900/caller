@@ -24,12 +24,35 @@ from tests.conftest import running_campaign_id
 LA = 'America/Los_Angeles'
 
 
+def open_all_hours(cid):
+    """
+    Business hours 00:00-23:59 every day, for tests that are about the SCHEDULE.
+
+    ⚠️ WITHOUT THIS EVERY DRIP TEST DEPENDS ON THE WALL CLOCK. A campaign is
+    created with Mon-Fri 09:00-17:00 and Sunday off, and drip.due() now reads
+    those windows in the lead's timezone - so a suite run at 18:00 LA or on a
+    Sunday would see zero due leads and fail everywhere, for a reason that has
+    nothing to do with what any of those tests assert.
+
+    The business-hours behaviour gets its OWN tests, which set a narrow window
+    deliberately. Same rule as everything else here: a guard is only tested if
+    the test isolates it.
+    """
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE campaign_windows
+                              SET enabled = true, start_time = '00:00',
+                                  end_time = '23:59'
+                            WHERE campaign_id = %s""", (cid,))
+
+
 @pytest.fixture
 def dripc(db):
     """A running drip campaign with a four-step sequence: 0, 4, 10, 21 days."""
     c = campaigns.create('DRIP-T', campaign_type='drip')
     cid = c['campaign_id']
     campaigns.start(cid)
+    open_all_hours(cid)
     drip.save_steps(cid, [
         {'delay_days': 0,  'subject': 'Following up', 'body': 'One {{first_name}} {{sample_link}}'},
         {'delay_days': 4,  'subject': 'Second',       'body': 'Two {{sample_link}}'},

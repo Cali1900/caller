@@ -49,6 +49,11 @@ SCORE_EVERY = 60
 # by step and by firm, so there is a checkpoint BEFORE each batch. See
 # api/drip.py and HANDOFF.md.
 SEND_EVERY = 120
+
+# ⚠️ THE EMAIL GAP'S FALLBACK, and it is the WIDE end on purpose - the same
+# argument as FALLBACK_GAP for dials. Used only when no drip is running or the
+# campaign row cannot be read.
+FALLBACK_EMAIL_GAP = (60, 300)
 # Alerts are immediate on purpose - a verbal yes decays. The digest is the
 # batched channel; these two are not.
 ALERT_EVERY = 60
@@ -132,6 +137,42 @@ def next_gap():
     return random.uniform(lo, hi)
 
 
+def next_email_gap():
+    """
+    Seconds to wait before the next EMAIL, re-rolled every send.
+
+    The same shape as next_gap() for dials, and for the same reason: a fixed
+    cadence is itself a pattern, and 60 seconds apart to the millisecond looks
+    more automated than a burst does.
+
+    ⚠️ THE WIDEST RANGE ACROSS RUNNING DRIPS WINS - the SLOWEST. Spacing belongs
+    to the mailbox, not to a campaign: two drips sharing info@counselorai.io
+    cannot each claim their own gap without doubling the real rate. Taking the
+    widest is the conservative reading, and it FAILS SLOW like the dial gap - if
+    the database cannot be read we do not know the configured spacing, and an
+    outage must never be able to tighten the interval between sends.
+    """
+    import random
+    from api import db
+    lo, hi = FALLBACK_EMAIL_GAP
+    try:
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT max(email_gap_min_seconds) AS lo,
+                                      max(email_gap_max_seconds) AS hi
+                                 FROM campaign_configs
+                                WHERE type = 'drip' AND is_running""")
+                r = cur.fetchone()
+        if r and r['lo'] is not None:
+            lo, hi = r['lo'], r['hi']
+    except Exception as exc:
+        print(f'[worker] cannot read the email gap ({exc}) - '
+              f'falling back to {lo}-{hi}s', flush=True)
+    if lo > hi:
+        lo, hi = hi, lo
+    return random.uniform(lo, hi)
+
+
 def main():
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
@@ -169,7 +210,8 @@ def main():
     last_dial = 0.0
     dial_gap = _next_gap()
     last_score = 0.0
-    last_send = 0.0
+    last_email = 0.0
+    email_gap = next_email_gap()
     last_alert = 0.0
     last_digest = 0.0
     last_archive = 0.0
@@ -194,18 +236,40 @@ def main():
             if d and d['drafted']:
                 print(f'[worker] drafted {d["drafted"]} email(s) - NOT sent', flush=True)
 
-        if now - last_send >= SEND_EVERY:
-            last_send = now
-            # EMAIL 1, for campaigns set to auto. Off by default.
-            r = _safe('sender', sender.run_once, cfg)
-            if r and (r['sent'] or r['refused']):
-                print(f'[worker] email 1: sent {r["sent"]}, '
-                      f'refused {r["refused"]}', flush=True)
-            # THE DRIP: steps 2..N, for drips that are running.
-            d = _safe('drip', drip.run_once, cfg)
+        # ⚠️ ONE EMAIL PER JITTERED GAP, NOT A BATCH PER TICK.
+        #
+        # This used to run every SEND_EVERY (120s) and drain up to 50 due leads
+        # in a tight loop, with `limit=50` chosen for query cost and doing duty
+        # as a rate. 100 leads entering a drip meant 50 emails in a few seconds,
+        # then 50 more two minutes later: ~1,500/hour from one mailbox, which is
+        # the burst pattern that costs a sending domain its reputation.
+        #
+        # The limit is now 1 and the PACE is the gap, so there is one mechanism
+        # rather than two that have to agree. The hourly and daily caps live in
+        # drip.due()'s selection - the gap alone would still permit 60/hour.
+        #
+        # ⚠️ ONE SLOT, SHARED, AND THE DRIP GOES FIRST. Both senders use the
+        # same mailbox, so they cannot each have a slot. A drip step is a
+        # promise already made to a firm that has heard from us; email 1 starts
+        # a new conversation. The dialer makes the same call for the same
+        # reason: a callback goes ahead of a new lead.
+        if now - last_email >= email_gap:
+            last_email = now
+            d = _safe('drip', drip.run_once, cfg, 1)
             if d and (d['sent'] or d['refused']):
                 print(f'[worker] drip: sent {d["sent"]}, '
                       f'refused {d["refused"]}', flush=True)
+            if not (d and d['sent']):
+                # EMAIL 1, for campaigns set to auto. Off by default.
+                r = _safe('sender', sender.run_once, cfg, 1)
+                if r and (r['sent'] or r['refused']):
+                    print(f'[worker] email 1: sent {r["sent"]}, '
+                          f'refused {r["refused"]}', flush=True)
+            prev = email_gap
+            email_gap = next_email_gap()
+            if d and d['sent']:
+                print(f'[worker] next email in ~{email_gap:.0f}s '
+                      f'(waited {prev:.0f}s)', flush=True)
 
         if now - last_alert >= ALERT_EVERY:
             last_alert = now

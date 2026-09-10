@@ -18,6 +18,7 @@ from api import (archive, autosend, campaigns, dialer, drip, guards, stages,
                  upload, web)
 from api import db as dbm
 from tests.conftest import running_campaign_id
+from tests.test_drip import open_all_hours
 
 CSV = ('company,email,website,demands_per_month\n'
        'Whitfield Law,intake@whitfield.test,whitfield.test,12\n'
@@ -347,6 +348,13 @@ def dripc(db):
     c = campaigns.create('IMP-DRIP', campaign_type='drip')
     cid = c['campaign_id']
     campaigns.start(cid)
+    # ⚠️ BUSINESS HOURS GATE SELECTION SINCE THE PACING WORK, and a campaign is
+    # created Mon-Fri 09:00-17:00 - so without this these tests pass or fail on
+    # the wall clock, for a reason that has nothing to do with what they assert.
+    # The hours have their own tests in test_pacing.py, which narrow the window
+    # deliberately. Same rule as everywhere: a guard is only tested if the test
+    # isolates it.
+    open_all_hours(cid)
     drip.save_steps(cid, [
         {'delay_days': 0,  'subject': 'Opener',  'body': 'One {{sample_link}}'},
         {'delay_days': 4,  'subject': 'Second',  'body': 'Two'},
@@ -385,7 +393,10 @@ def test_a_later_step_is_not_due_before_the_clock_has_started(db, dripc):
     rows = drip._build_select()
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(rows)
+            # The selection binds the operator timezone since pacing landed: the
+            # daily cap's day boundary and the fallback for a lead with no
+            # timezone of its own both read it.
+            cur.execute(rows, {'op_tz': drip._op_tz()})
             mine = [r for r in cur.fetchall()
                     if str(r['lead_id']) == str(lead['lead_id'])]
     assert [r['position'] for r in mine] == [1], \
@@ -547,3 +558,96 @@ def test_an_imported_lead_is_not_flagged_as_email_unconfirmed(db, client):
     upload.upload_emails(CSV)
     r = client.get('/today')
     assert 'Whitfield Law' not in r.text
+
+
+# ==========================================================================
+# the follow-up drip, chosen on the CALL campaign's screen
+# ==========================================================================
+
+def test_the_follow_up_drip_is_settable_and_unsettable_from_the_screen(db, dripc, client):
+    """
+    ⚠️ default_drip_id HAD NO UI AT ALL. C1 sat at NULL, so every lead that got
+    email 1 joined no drip - email out, nothing following it - and the only way
+    to find out was to open a lead. A setting with no control is a setting nobody
+    can be expected to have made.
+
+    BOTH DIRECTIONS. An empty string is a real answer ("none", chosen on purpose)
+    and must be distinguishable from a field that was not on the form, or "none"
+    becomes unsettable and the null state can never be corrected.
+    """
+    cid = running_campaign_id()
+    base = {'name': 'C-T', 'notes': 'n', 'agent_l1_version': '1',
+            'sender_email': campaigns.get(cid)['sender_email'],
+            'sender_name': 'S', 'sender_company_line': 'C',
+            'daily_cap': '100', 'max_concurrent': '1',
+            'dial_interval_min': '210', 'dial_interval_max': '300'}
+
+    r = client.post(f'/campaign/{cid}/save',
+                    data={**base, 'default_drip_id': dripc['campaign_id']},
+                    follow_redirects=False)
+    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    assert str(campaigns.get(cid)['default_drip_id']) == str(dripc['campaign_id'])
+
+    r = client.post(f'/campaign/{cid}/save',
+                    data={**base, 'default_drip_id': ''},
+                    follow_redirects=False)
+    assert 'REJECTED' not in r.headers['location'], r.headers['location']
+    assert campaigns.get(cid)['default_drip_id'] is None, \
+        '"none" could not be chosen, so a wrongly-set drip cannot be cleared'
+
+
+def test_a_call_campaign_cannot_point_its_follow_up_at_another_call_campaign(db, client):
+    cid = running_campaign_id()
+    other = campaigns.create('C-OTHER', campaign_type='call')['campaign_id']
+    r = client.post(f'/campaign/{cid}/save', data={
+        'name': 'C-T', 'notes': 'n', 'agent_l1_version': '1',
+        'sender_email': campaigns.get(cid)['sender_email'],
+        'sender_name': 'S', 'sender_company_line': 'C', 'daily_cap': '100',
+        'max_concurrent': '1', 'dial_interval_min': '210',
+        'dial_interval_max': '300', 'default_drip_id': other,
+    }, follow_redirects=False)
+    assert 'REJECTED' in r.headers['location'], r.headers['location']
+    assert campaigns.get(cid)['default_drip_id'] is None
+
+
+def test_changing_the_follow_up_drip_does_not_move_leads_already_on_one(db, dripc):
+    """
+    ⚠️ A CONFIG CHANGE MUST NOT YANK PEOPLE MID-SEQUENCE INTO DIFFERENT COPY.
+
+    This is structural rather than a promise: default_drip_id is read ONLY when
+    email 1 is sent, and enter() assigns only `WHERE drip_campaign_id IS NULL`.
+    So a lead already on a drip cannot be re-routed by editing the campaign - it
+    finishes the sequence it started, whatever the campaign now points at.
+    """
+    lid = _lead_on_drip(db, dripc['campaign_id'])
+    other = campaigns.create('OTHER-DRIP3', campaign_type='drip')['campaign_id']
+    campaigns.start(other)
+    campaigns.update(running_campaign_id(), default_drip_id=other)
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            # entry attempted again, with the campaign now pointing elsewhere
+            assert drip.enter(cur, lid, other) is False, \
+                'a lead already on a drip was re-entered onto another one'
+            cur.execute('SELECT drip_campaign_id FROM leads WHERE lead_id = %s',
+                        (lid,))
+            still = cur.fetchone()['drip_campaign_id']
+    assert str(still) == str(dripc['campaign_id']), \
+        'the lead was moved off the sequence it had already started'
+
+
+def _lead_on_drip(db, cid):
+    """A lead mid-sequence: on the drip, email 1 sent."""
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO leads
+                           (company, phone_e164, timezone, pool_status, status,
+                            has_confirmed_email, dm_email, dm_email_confirmed,
+                            campaign_id, drip_campaign_id, drip_entered_at,
+                            emailed_at, emailed_by)
+                       VALUES ('Midseq', '+15557770123', 'America/Los_Angeles',
+                               'active', 'emailed', true, 'm@midseq.test', true,
+                               %s, %s, now(), now(), 'operator')
+                    RETURNING lead_id""", (running_campaign_id(), cid))
+        lid = cur.fetchone()['lead_id']
+    db.commit()
+    return lid
