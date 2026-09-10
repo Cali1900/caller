@@ -263,3 +263,86 @@ def test_a_prepared_but_unsent_row_says_so_rather_than_looking_sent(db, dripc, c
     body = client.get(f'/leads/{lid}').text
     assert 'prepared, not sent' in body, \
         'an unsent row reads as a send, which is how a lost email hides'
+
+
+# ==========================================================================
+# a partial POST must never blank a field it did not mention
+# ==========================================================================
+
+def test_a_config_post_without_notes_does_not_blank_them(db, client):
+    """
+    ⚠️ THIS COST A REAL FIELD. `notes: str = Form('')` meant an absent field
+    arrived as an empty string and was written, so a config POST that did not
+    mention notes ERASED them - silently, with a success banner. C1's notes went
+    that way while verifying an unrelated selector.
+
+    ABSENT IS NOT EMPTY. None means "not on the form", '' means "the operator
+    cleared the box". The real form posts every field, so clearing still works.
+    """
+    from tests.conftest import running_campaign_id
+    cid = running_campaign_id()
+    campaigns.update(cid, notes='keep me')
+    base = {'name': 'C-T', 'agent_l1_version': '1',
+            'sender_email': campaigns.get(cid)['sender_email'],
+            'sender_name': 'S', 'sender_company_line': 'C', 'daily_cap': '100',
+            'max_concurrent': '1', 'dial_interval_min': '210',
+            'dial_interval_max': '300'}
+
+    client.post(f'/campaign/{cid}/save', data=base, follow_redirects=False)
+    assert campaigns.get(cid)['notes'] == 'keep me', \
+        'a POST that never mentioned notes erased them'
+
+    # AND CLEARING STILL WORKS, because the form does post the field.
+    client.post(f'/campaign/{cid}/save', data={**base, 'notes': ''},
+                follow_redirects=False)
+    assert (campaigns.get(cid)['notes'] or '') == '', \
+        'the operator can no longer clear the notes box'
+
+
+def test_a_partial_lead_edit_does_not_blank_the_contact_facts(db, dripc, client):
+    """
+    ⚠️ THE SAME BUG, SOMEWHERE WORSE. lead_edit wrote dm_name, dm_title,
+    dm_email, dm_email_confirmed, demands_per_month and notes unconditionally
+    through NULLIF(%s,''), so any post that omitted one NULLed it - dm_email
+    included, which ends a drip silently: the address is the only thing a step
+    can be sent to.
+
+    The PHONE was already protected against exactly this, with a comment saying
+    why, and the protection was never generalised to the fields beside it.
+    """
+    lid = _lead(db, days_ago=1, company='Facts Firm', phone_e164='+15553330094',
+                dm_name='Pat Kelly', dm_email='pat@facts.test')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE leads SET dm_title = 'Partner', notes = 'keep',
+                                  demands_per_month = 12
+                            WHERE lead_id = %s""", (lid,))
+
+    # a post that mentions ONLY the title - everything else absent
+    client.post(f'/leads/{lid}/edit', data={'dm_title': 'Managing Partner'},
+                follow_redirects=False)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT * FROM leads WHERE lead_id = %s', (lid,))
+            got = cur.fetchone()
+    assert got['dm_title'] == 'Managing Partner', 'the edit did not apply'
+    assert got['dm_email'] == 'pat@facts.test', \
+        'a partial edit erased the email address - the drip would stop silently'
+    assert got['dm_name'] == 'Pat Kelly', 'a partial edit erased the contact name'
+    assert got['notes'] == 'keep', 'a partial edit erased the notes'
+    assert got['demands_per_month'] == 12, 'a partial edit erased the volume'
+
+
+def test_clearing_a_lead_field_on_purpose_still_works(db, client):
+    """The other half: an EMPTY box posted by the real form still clears."""
+    lid = _lead(db, days_ago=1, company='Clearable', phone_e164='+15553330095',
+                dm_name='Someone')
+    client.post(f'/leads/{lid}/edit',
+                data={'dm_name': '', 'dm_title': '', 'dm_email': '',
+                      'notes': '', 'demands_per_month': ''},
+                follow_redirects=False)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT dm_name FROM leads WHERE lead_id = %s', (lid,))
+            assert cur.fetchone()['dm_name'] is None, \
+                'an empty box no longer clears the field'

@@ -98,10 +98,16 @@ def _join(db, lid, cid, sent_steps=0):
             # WITH A TOKEN. A send row without one cannot be clicked, and a
             # click test whose click silently does not happen passes for the
             # wrong reason - which is exactly how break 100 caught this.
+            # ⚠️ sent_by IS REQUIRED whenever sent_at is set
+            # (email_sends_sent_is_attributed). This fixture used to omit it,
+            # fabricating the exact shape migration 042 exists to forbid: a row
+            # claiming a send that nobody performed. A fixture that builds
+            # impossible data tests nothing about the real thing.
             cur.execute("""INSERT INTO email_sends
                                (lead_id, step_id, seq, to_email, sent_at,
-                                click_token)
-                           VALUES (%s,%s,%s,'pat@whitfield.test', now(), %s)""",
+                                sent_by, click_token)
+                           VALUES (%s,%s,%s,'pat@whitfield.test', now(),
+                                   'operator', %s)""",
                         (lid, st['step_id'], i, f'tok-{lid}-{i}'))
     db.commit()
 
@@ -1610,3 +1616,86 @@ def test_the_save_refuses_when_fewer_rows_would_be_written(db, dripc, client, mo
     loc = _msg(r)
     assert 'WROTE' in loc or 'REJECTED' in loc, loc
     assert 'incomplete' in loc or 'NOTHING was written' in loc, loc
+
+
+# ==========================================================================
+# a send row is a record of something that happened
+# ==========================================================================
+
+def test_the_database_refuses_a_send_row_with_no_recipient(db, dripc):
+    """
+    ⚠️ NOT NULL DID NOT STOP THIS. `to_email text NOT NULL` was already there, and
+    migration 036's backfill wrote coalesce(dm_email, '') to satisfy it - so two
+    rows existed claiming a send to nobody, one of them linked to a drip step, and
+    the roster counted it as a step delivered.
+
+    A writer that must satisfy NOT NULL and has nothing to write will write ''.
+    The CHECK removes the option, so no future backfill can make the same trade.
+    """
+    import psycopg2
+    lid = _lead(db, days_ago=1, phone_e164='+15553331001')
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO email_sends
+                                   (lead_id, seq, to_email, click_token)
+                               VALUES (%s, 9, '', 'tok-empty-to')""", (lid,))
+
+
+def test_the_database_refuses_a_sent_row_with_no_sender(db, dripc):
+    """
+    SENT IS AN ACT AND AN ACT HAS AN ACTOR. sent_at was `NOT NULL DEFAULT now()`
+    in 036, so any insert that did not mention it declared a send - the DEFAULT
+    did the lying. Requiring sent_by alongside makes it something that was done.
+    """
+    import psycopg2
+    lid = _lead(db, days_ago=1, phone_e164='+15553331002')
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO email_sends
+                                   (lead_id, seq, to_email, sent_at, click_token)
+                               VALUES (%s, 9, 'a@b.test', now(), 'tok-no-by')""",
+                            (lid,))
+
+
+def test_record_send_refuses_a_lead_with_no_address_by_name(db, dripc):
+    """
+    The same rule said in the caller's terms, so the message names the LEAD
+    rather than surfacing a constraint name from three layers down. Both exist on
+    purpose: the CHECK is what makes it impossible, this is what makes it legible.
+    """
+    lid = _lead(db, days_ago=1, phone_e164='+15553331003', dm_email=None)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            with pytest.raises(ValueError, match='no email address'):
+                drip.record_send(cur, lid, None, 1, '', None, 'operator')
+
+
+def test_a_prepared_row_may_have_no_sent_at_but_still_needs_an_address(db, dripc):
+    """
+    PREPARED IS A REAL STATE - a draft whose token is live before the mail goes -
+    and it must stay possible. What it may not be is anonymous.
+    """
+    lid = _lead(db, days_ago=1, phone_e164='+15553331004')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO email_sends
+                               (lead_id, seq, to_email, click_token)
+                           VALUES (%s, 9, 'real@firm.test', 'tok-prepared-ok')
+                        RETURNING send_id, sent_at, sent_by""", (lid,))
+            row = cur.fetchone()
+    assert row['sent_at'] is None and row['sent_by'] is None, \
+        'a prepared row must not claim to have been sent'
+
+
+def test_no_token_is_minted_for_a_lead_with_no_address(db):
+    """
+    A tracked link for a lead we cannot email is a link nobody will ever click,
+    and minting one meant writing the empty-recipient row this all started with.
+    """
+    from api import clicks as _clicks
+    lid = _lead(db, days_ago=1, phone_e164='+15553331005', dm_email=None,
+                has_confirmed_email=False, dm_email_confirmed=False)
+    assert _clicks.token_for(lid) is None, \
+        'a token was minted for a lead with nowhere to send it'

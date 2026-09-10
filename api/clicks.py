@@ -67,6 +67,18 @@ def token_for(lead_id) -> str:
             lead = cur.fetchone()
             if lead is None:
                 return None
+            # ⚠️ NO ADDRESS, NO SEND ROW. This wrote `dm_email or ''`, which is
+            # exactly the fabrication migration 036 made: a row that satisfies
+            # NOT NULL and means nothing, which every reader then has to know to
+            # treat as absent. email_sends_has_recipient now refuses it, so this
+            # refuses first and says so, rather than raising a constraint error
+            # from three layers down.
+            #
+            # Nothing is lost: a tracked link for a lead we cannot email is a
+            # link nobody will ever click, and drafts.generate_pending only
+            # drafts for leads whose address is confirmed.
+            if not (lead['dm_email'] or '').strip():
+                return None
             tok = secrets.token_urlsafe(TOKEN_BYTES)
             # ON CONFLICT: two draft generations racing must not mint two
             # tokens for one email, or the Copy button and the send disagree.
@@ -74,7 +86,7 @@ def token_for(lead_id) -> str:
                                (lead_id, step_id, seq, to_email, click_token)
                            VALUES (%s, NULL, 1, %s, %s)
                            RETURNING click_token""",
-                        (lead_id, lead['dm_email'] or '', tok))
+                        (lead_id, lead['dm_email'].strip(), tok))
             got = cur.fetchone()
             return got['click_token'] if got else tok
 

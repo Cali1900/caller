@@ -805,9 +805,9 @@ def _int_or_none(v):
 
 
 @router.post('/leads/{lead_id}/edit')
-def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
-              dm_email: str = Form(''), dm_email_confirmed: str = Form(''),
-              demands_per_month: str = Form(''), notes: str = Form(''),
+def lead_edit(lead_id: str, dm_name: str = Form(None), dm_title: str = Form(None),
+              dm_email: str = Form(None), dm_email_confirmed: str = Form(None),
+              demands_per_month: str = Form(None), notes: str = Form(None),
               phone_e164: str = Form(''), timezone: str = Form('')):
     """
     Fix a wrong email, or give an email-only lead a number. Every edit lands on
@@ -856,17 +856,35 @@ def lead_edit(lead_id: str, dm_name: str = Form(''), dm_title: str = Form(''),
                          f'a number; it is now dialable. Its lead_source is '
                          f'unchanged - that records where it came from, not '
                          f'what has happened to it since.'))
-            cur.execute(
-                """UPDATE leads SET dm_name = NULLIF(%s,''), dm_title = NULLIF(%s,''),
-                          dm_email = NULLIF(%s,''), dm_email_confirmed = %s,
-                          demands_per_month = %s,
-                          notes = NULLIF(%s,''), updated_at = now()
-                    WHERE lead_id = %s""",
-                (dm_name.strip(), dm_title.strip(), dm_email.strip(),
-                 confirmed, _int_or_none(demands_per_month),
-                 notes.strip(), lead_id))
+            # ⚠️ ONLY WHAT WAS POSTED. These were Form('') and written
+            # unconditionally, so ANY post that omitted a field NULLed it -
+            # dm_email included, which silently ends a drip. The phone above was
+            # already protected against exactly this and the protection was
+            # never generalised.
+            #
+            # ABSENT IS NOT EMPTY: None means the field was not on the form,
+            # '' means the operator cleared the box on purpose. The real form
+            # posts every field, so clearing still works; what changes is that a
+            # PARTIAL post can no longer blank what it never mentioned.
+            sets, vals = [], []
+            for col, raw in (('dm_name', dm_name), ('dm_title', dm_title),
+                             ('dm_email', dm_email), ('notes', notes)):
+                if raw is not None:
+                    sets.append(f"{col} = NULLIF(%s,'')")
+                    vals.append(raw.strip())
+            if dm_email_confirmed is not None:
+                sets.append('dm_email_confirmed = %s')
+                vals.append(confirmed)
+            if demands_per_month is not None:
+                sets.append('demands_per_month = %s')
+                vals.append(_int_or_none(demands_per_month))
+            if sets:
+                cur.execute(
+                    f"""UPDATE leads SET {', '.join(sets)}, updated_at = now()
+                         WHERE lead_id = %s""", vals + [lead_id])
             old = (prev or {}).get('dm_email')
-            changed = old != (dm_email.strip() or None)
+            changed = (dm_email is not None
+                       and old != (dm_email.strip() or None))
             if changed:
                 cur.execute(
                     """INSERT INTO activity (lead_id, kind, summary, detail)
@@ -1779,7 +1797,7 @@ def prompts_sync():
 
 
 @router.post('/campaign/{campaign_id}/save')
-def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(''),
+def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(None),
                   agent_l1_version: int = Form(None),
                   sender_email: str = Form(...), sender_name: str = Form(...),
                   sender_company_line: str = Form(...),
@@ -1873,9 +1891,15 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form('')
         # ONLY WHAT WAS POSTED. A None here means the field is not on this
         # type's screen, and writing it would overwrite a real value with a
         # guess.
-        fields = {'name': name, 'notes': notes,
+        # ⚠️ notes IS ONLY WRITTEN WHEN POSTED. It was Form(''), so a config
+        # POST that omitted it BLANKED it - which is how C1's notes were lost
+        # while verifying an unrelated selector. Same rule as everything else on
+        # this handler: absent means untouched, never "set to the default".
+        fields = {'name': name,
                   'sender_email': sender_email, 'sender_name': sender_name,
                   'sender_company_line': sender_company_line}
+        if notes is not None:
+            fields['notes'] = notes
         for k, v in (('agent_l1_version', agent_l1_version),
                      ('daily_cap', daily_cap),
                      ('max_concurrent', max_concurrent),

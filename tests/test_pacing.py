@@ -62,9 +62,11 @@ def _sent(lid, when='now()', seq=99):
     """A send that COUNTS against the caps: sent_at is what both caps read."""
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
+            # sent_by alongside sent_at - email_sends_sent_is_attributed.
             cur.execute(f"""INSERT INTO email_sends
-                                (lead_id, seq, to_email, sent_at, click_token)
-                            VALUES (%s, %s, 'x@y.test', {when}, %s)""",
+                                (lead_id, seq, to_email, sent_at, sent_by,
+                                 click_token)
+                            VALUES (%s, %s, 'x@y.test', {when}, 'operator', %s)""",
                         (lid, seq, f'tok-cap-{lid}-{seq}'))
 
 

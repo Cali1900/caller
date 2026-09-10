@@ -455,12 +455,20 @@ def record_send(cur, lead_id, step_id, seq, to_email, subject, sent_by):
     A per-lead count cannot tell those apart.
     """
     import secrets
+    # ⚠️ REFUSES WITHOUT A RECIPIENT rather than writing ''. That coercion is
+    # what migration 036 did, and it produced rows claiming a send to nobody -
+    # which the roster then counted as a step delivered. email_sends_has_recipient
+    # enforces this in the database; this is the same rule said in the caller's
+    # own terms, so the message names the lead instead of a constraint.
+    if not (to_email or '').strip():
+        raise ValueError(f'lead {lead_id} has no email address - a send row '
+                         f'without a recipient is not a send')
     cur.execute(
         """INSERT INTO email_sends
                (lead_id, step_id, seq, to_email, subject, sent_by, click_token)
            VALUES (%s,%s,%s,%s,%s,%s,%s)
         RETURNING *""",
-        (lead_id, step_id, seq, to_email or '', subject, sent_by,
+        (lead_id, step_id, seq, to_email.strip(), subject, sent_by,
          secrets.token_urlsafe(16)))
     return cur.fetchone()
 
