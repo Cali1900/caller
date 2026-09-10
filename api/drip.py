@@ -1475,24 +1475,24 @@ def stop(lead_id, reason: str, by: str = 'operator') -> bool:
         archive.archive(lead_id, 'unsubscribed', by=by)
     elif reason == 'bounced' and row['dm_email']:
         archive.do_not_send(row['dm_email'], 'bad_email', f'drip:{by}')
-        # AND SET THE STATUS, so the bounce is VISIBLE.
+        # THE STATUS IS ALREADY 'bad_email' - STOP_STATUS set it above, in the
+        # same transaction that recorded the stop. A second UPDATE here used to do
+        # it and is now DEAD CODE: removing it changed nothing, which is exactly
+        # what break 105 reported when it went GREEN on the full pass.
         #
-        # The address going on the do-not-send list is what stops us mailing it
-        # again; it is not what tells anyone it happened. Without this the lead
-        # sits at 'emailed' with no drip and no explanation - in no filter, on
-        # no queue, simply stopped. A LEAD FAILING SILENTLY is the shape every
-        # other guard in this system exists to prevent.
+        # The property it protected has not moved: the address going on the
+        # do-not-send list is what stops us mailing it again, and it is not what
+        # tells anyone it happened. Without a visible status the lead sits at
+        # 'emailed' with no explanation - in no filter, on no queue, simply
+        # stopped. A LEAD FAILING SILENTLY is the shape every other guard here
+        # exists to prevent. That guard is now STOP_STATUS['bounced'], and break
+        # 105 points at it.
         #
-        # NOT archived, deliberately: the brief says bounced -> bad_email, back
-        # to Sean. A bounce is a bad ADDRESS, not a bad firm, and it usually
-        # wants a corrected one - which is a person's job and needs the lead in
-        # front of them rather than resting for six months.
+        # NOT archived, deliberately: a bounce is a bad ADDRESS, not a bad firm,
+        # and it usually wants a corrected one - a person's job, which needs the
+        # lead in front of them rather than resting for six months.
         with db.get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """UPDATE leads SET status = 'bad_email',
-                              updated_at = now()
-                        WHERE lead_id = %s""", (lead_id,))
                 # The detail is BOUND, not inlined: a multi-line SQL string
                 # literal would put its own newlines and indentation into the
                 # timeline text.

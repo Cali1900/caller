@@ -156,12 +156,13 @@ def test_a_phoneless_lead_is_never_a_candidate(db, cfg_env, monkeypatch):
     lead = _by_email(db, 'intake@whitfield.test')
     campaigns.assign([lead['lead_id']], running_campaign_id())
     with db.cursor() as cur:
-        cur.execute("UPDATE leads SET pool_status='active' WHERE lead_id=%s",
-                    (lead['lead_id'],))
+        cur.execute("UPDATE leads SET pool_status='active', status='new' "
+                    'WHERE lead_id=%s', (lead['lead_id'],))
     db.commit()
     picked = {str(c['lead_id'])
               for c in dialer.select_and_claim(cfg_env, limit=10)}
-    assert str(lead['lead_id']) not in picked
+    assert str(lead['lead_id']) not in picked, \
+        'a lead with no phone became a dial candidate'
 
 
 def test_the_pre_dial_guard_refuses_loudly_and_is_audited(db, cfg_env):

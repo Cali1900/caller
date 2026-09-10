@@ -14,11 +14,16 @@
 # NOT archived, deliberately: a bounce is a bad ADDRESS, not a bad firm, and it
 # usually wants a corrected one - which is a person's job and needs the lead in
 # front of them rather than resting six months.
+# ⚠️ RETARGETED 2026-09-10, after this break went GREEN on the full pass. It
+# removed a second `UPDATE leads SET status='bad_email'` in the bounce branch -
+# which had become DEAD CODE when stop() started setting the status generically
+# from STOP_STATUS, in the transaction that records the stop. The property was
+# intact and the break was pointing at a line that no longer did the work.
+#
+# It now removes the mapping itself: a bounce that leaves the lead at `emailed`
+# is a lead in no filter and on no queue, stopped with nothing saying why.
 TARGET = 'api/drip.py'
 EXPECT = 'test_a_bounce_is_visible_in_the_status_filter'
 LABEL = 'block a bounced address without ever saying it bounced'
-OLD = """                cur.execute(
-                    \"\"\"UPDATE leads SET status = 'bad_email',
-                              updated_at = now()
-                        WHERE lead_id = %s\"\"\", (lead_id,))"""
-NEW = """                pass"""
+OLD = '''    'bounced': 'bad_email','''
+NEW = '''    'bounced': 'emailed','''
