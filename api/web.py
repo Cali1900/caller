@@ -1574,12 +1574,14 @@ async def campaign_steps_save(request: Request, campaign_id: str):
 
 
 @router.get('/campaign/{campaign_id}', response_class=HTMLResponse)
-def campaign_page(request: Request, campaign_id: str, msg: str = ''):
-    return _campaign_view(request, campaign_id, msg=msg)
+def campaign_page(request: Request, campaign_id: str, msg: str = '',
+                  stop_confirm: str = ''):
+    return _campaign_view(request, campaign_id, msg=msg,
+                          stop_confirm=bool(stop_confirm))
 
 
 def _campaign_view(request: Request, campaign_id: str, msg: str = '',
-                   seq_msg: str = '', steps=None):
+                   seq_msg: str = '', steps=None, stop_confirm: bool = False):
     """
     The campaign screen. `steps` overrides the saved sequence with POSTED rows.
 
@@ -1616,6 +1618,9 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     # screen says which are stopped, because drip_for() refuses to route into a
     # stopped drip and that would otherwise look like the setting not working.
     drip_options = [c for c in campaigns.list_all() if c['type'] == 'drip']
+    # WHO FEEDS THIS DRIP - the relationship read from the other end, so the
+    # wiring is auditable from both screens rather than only from the call side.
+    fed_by = campaigns.feeders(campaign_id) if camp['type'] == 'drip' else []
     # The chosen one, resolved here so the template can say "stopped" without
     # searching the list itself.
     drip_chosen = (campaigns.get(camp['default_drip_id'])
@@ -1641,6 +1646,7 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
         'drip_options': drip_options, 'drip_chosen': drip_chosen,
+        'fed_by': fed_by, 'stop_confirm': stop_confirm,
         'pace': pace, 'emails_per_hour': emails_per_hour,
         'hours_to_clear': hours_to_clear, 'tz_fallback': tz_fallback,
         'operator_tz': cfg.OPERATOR_TIMEZONE,
@@ -1714,6 +1720,10 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
         'any_sent': any(r['sent'] for r in stats),
         'roster': _drip_mod.roster(cid),
         'pace': _drip_mod.held(cid),
+        # WHO FEEDS IT. The wiring lives on the CALL campaign, so without this
+        # the drip area cannot answer "where do these leads come from" - and it
+        # is the screen the drip work actually happens on.
+        'fed_by': campaigns.feeders(cid),
         # ⚠️ THE SEQUENCE EDITOR IS AN INCLUDE, so it needs exactly the context
         # the campaign page gives it. Anything missing renders as empty rather
         # than erroring, which is how a template silently loses a control.
@@ -2024,11 +2034,39 @@ def campaign_start(campaign_id: str, stop_running: str = Form('')):
 
 
 @router.post('/campaign/{campaign_id}/stop')
-def campaign_stop(campaign_id: str):
+def campaign_stop(campaign_id: str, confirm: str = Form('')):
+    """
+    Stop a campaign.
+
+    ⚠️ STOPPING A DRIP THAT A CALL CAMPAIGN FEEDS IS NEVER SILENT. drip_for()
+    refuses to route a lead into a stopped drip - deliberately, so a lead never
+    lands on whatever copy happens to be running instead - which means stopping
+    a drip quietly changes what happens to every future lead of every campaign
+    pointing at it: email 1 goes out and nothing follows.
+
+    So it bounces to a confirmation naming the campaigns affected, the same shape
+    as starting a call campaign while another runs. Nothing is orphaned in the
+    database - default_drip_id still points here and takes effect again when it
+    restarts - but the CONSEQUENCE is invisible without this.
+
+    There is no delete route for a campaign, so a drip cannot be deleted out from
+    under a wiring; stopping is the only way to break the chain.
+    """
+    row = campaigns.get(campaign_id)
+    if row is None:
+        return HTMLResponse('<p>no such campaign</p>', status_code=404)
+    if row['type'] == 'drip' and confirm != 'yes':
+        fed = campaigns.feeders(campaign_id)
+        if fed:
+            return RedirectResponse(
+                f'/campaign/{campaign_id}?stop_confirm=1', status_code=303)
     row = campaigns.stop(campaign_id)
     name = row['name'] if row else 'campaign'
+    what = ('stopped - steps will not send, and leads finishing email 1 will '
+            'join NO drip' if row and row['type'] == 'drip'
+            else 'stopped - nothing dials')
     return RedirectResponse(
-        f'/campaign/{campaign_id}?msg={urllib.parse.quote(name + " stopped - nothing dials")}',
+        f'/campaign/{campaign_id}?msg={urllib.parse.quote(name + " " + what)}',
         status_code=303)
 
 
@@ -2079,7 +2117,12 @@ def today_page(request: Request, sent: str = ''):
             needs = cur.fetchall()
     return templates.TemplateResponse(request, 'today.html', {
         'hdr': hdr, 'date': d['date'], 'body': d['body'],
-        'needs_you': needs, 'sent': sent, 'digest_hour': 18})
+        'needs_you': needs, 'sent': sent, 'digest_hour': 18,
+        # ⚠️ THE PROACTIVE HALF of "emailed and on no drip". That net finds leads
+        # ALREADY past email 1; this finds the CONFIGURATION that will send the
+        # next one nowhere, which is observable before anybody is affected and
+        # was completely silent.
+        'wiring': campaigns.wiring_problems()})
 
 
 @router.post('/today/send')

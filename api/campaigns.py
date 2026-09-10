@@ -37,6 +37,68 @@ from api import db, senders as _senders
 TEMPLATE_FIELDS = ('subject_with_name', 'subject_without',
                    'body_with_name', 'body_without')
 
+def feeders(drip_campaign_id) -> list:
+    """
+    The CALL campaigns whose leads enter this drip after email 1.
+
+    ⚠️ THE RELATIONSHIP READ FROM THE OTHER END. default_drip_id lives on the
+    call campaign, so the drip itself had no way to say who feeds it - and a
+    wiring you can only see from one side is a wiring nobody can audit. Many
+    call campaigns may point at one drip; that is allowed and normal.
+    """
+    from api import db as _db
+    with _db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT campaign_id, name, is_running
+                             FROM campaign_configs
+                            WHERE type = 'call'
+                              AND default_drip_id = %s
+                            ORDER BY name""", (drip_campaign_id,))
+            return [dict(r) for r in cur.fetchall()]
+
+
+def wiring_problems() -> list:
+    """
+    Call campaigns whose follow-up drip will not receive anyone, and why.
+
+    ⚠️ THIS IS THE PROACTIVE HALF, AND IT IS WHY THE /today NET WAS NOT ENOUGH.
+    That net finds leads with emailed_at set and no drip - it can only fire AFTER
+    a lead has already been affected. The failure it was meant to catch was a
+    campaign CONFIGURED to send people nowhere, which is observable before anyone
+    is harmed and was completely silent.
+
+    Two shapes, and both matter because email 1 can be sent BY HAND from a lead
+    page whether or not the campaign is running:
+
+      no drip        default_drip_id IS NULL - the lead joins nothing
+      stopped drip   the drip exists but is stopped, and drip_for() refuses to
+                     route into a stopped drip rather than falling back to
+                     whatever else happens to be running
+    """
+    from api import db as _db
+    with _db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.campaign_id, c.name, c.is_running,
+                       d.campaign_id AS drip_id, d.name AS drip_name,
+                       d.is_running  AS drip_running,
+                       (SELECT count(*) FROM leads l
+                         WHERE l.campaign_id = c.campaign_id) AS leads
+                  FROM campaign_configs c
+                  LEFT JOIN campaign_configs d
+                         ON d.campaign_id = c.default_drip_id
+                 WHERE c.type = 'call'
+                   AND (c.default_drip_id IS NULL OR NOT d.is_running)
+                 ORDER BY c.is_running DESC, c.name""")
+            out = []
+            for r in cur.fetchall():
+                r = dict(r)
+                r['why'] = ('no follow-up drip' if not r['drip_id']
+                            else f'{r["drip_name"]} is stopped')
+                out.append(r)
+            return out
+
+
 CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  'sender_email', 'sender_name', 'sender_company_line',
                  'daily_cap', 'max_concurrent', 'dial_interval_min',

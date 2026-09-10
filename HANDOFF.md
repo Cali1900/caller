@@ -15,8 +15,9 @@ Last updated 2026-09-10. Every number in the table below was read from
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
-| Tests | 755 passed, 1 skipped |
-| Break pass | **134 definitions.** Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
+| Wiring | `C1` &rarr; `Drip 1`, set in the UI. Visible from both ends, and `/today` warns while `Drip 1` is stopped |
+| Tests | 761 passed, 1 skipped |
+| Break pass | **136 definitions** (136–137 added for the wiring warnings, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **stopped**). C1's follow-up drip is `Drip 1` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -548,6 +549,57 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## Wiring a call campaign to a drip is a RUNTIME act, in the UI (2026-09-10)
+
+**Nothing about this is hardcoded.** Any call campaign can point at any drip, and
+be repointed, without a deploy or a SQL statement.
+
+    /campaign/<call-id>   FOLLOW-UP DRIP  [ Drip 1 ▾ ]
+
+`campaign_configs.default_drip_id`, saved with the rest of the config. Options are
+every drip that exists plus "none". Many-to-one is fine and nothing enforces
+exclusivity — several call campaigns may feed one drip.
+
+### The four rules, and where each is enforced
+
+| rule | how |
+|---|---|
+| any call campaign → any drip, changeable at runtime | a `<select>` on the config form; `campaigns.CONFIG_FIELDS` carries it |
+| changing it affects only leads entering AFTERWARDS | **structural**: `default_drip_id` is read only when email 1 is sent, and `enter()` assigns only `WHERE drip_campaign_id IS NULL`. Break 131 — removing that also re-stamps `drip_entered_at`, restarting step 1's timing mid-thread |
+| "none" is legitimate and says so | the card renders *"leads will not enter a drip after email 1"*. An empty string is a real answer, distinct from an absent field, or "none" could never be chosen and a wrong setting could never be cleared |
+| stopping a fed drip warns | `POST /stop` bounces to a confirmation naming the feeding campaigns. Break 136 |
+
+⚠️ **There is no delete route for a campaign**, so a drip cannot be deleted out
+from under a wiring. Stopping is the only way to break the chain, and stopping is
+what warns.
+
+### Read from both ends
+
+`default_drip_id` lives on the CALL campaign, so the drip could not say who feeds
+it — and answering that meant running a query, which is not a UI.
+`campaigns.feeders(drip_id)` now backs a **Fed by** panel on the drip's config page
+and a line on `/drips`. When a drip has no feeders it says how leads reach it
+instead (import, or by hand).
+
+### ⚠️ Why the "emailed and on no drip" net did NOT warn about the null
+
+`_STALLED_AFTER_EMAIL` matches `emailed_at IS NOT NULL AND drip_campaign_id IS
+NULL`. It is a good net and it fires **too late by construction**: by the time it
+matches, email 1 has gone and nothing is following it. It cannot see a campaign
+*configured* to send people nowhere, because no lead has reached the state yet.
+
+`campaigns.wiring_problems()` is the proactive half, on `/today`. Two shapes:
+
+    no drip        default_drip_id IS NULL - the lead will join nothing
+    stopped drip   the drip is set but stopped, and drip_for() refuses to route
+                   into a stopped drip rather than falling back to whatever else
+                   happens to be running
+
+Both matter **whether or not the call campaign is running**, because email 1 can be
+sent by hand from any lead page. Break 137. The reactive net stays — the two answer
+different questions, and the per-lead one is what catches a lead that slipped
+through while the config was briefly wrong.
 
 ## Phantom sends, and why the fix was a constraint (2026-09-10)
 

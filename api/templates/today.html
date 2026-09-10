@@ -1,5 +1,27 @@
 {% extends "base.html" %}{% block title %}today &middot; caller{% endblock %}
 {% block body %}
+{# ⚠️ THE CONFIGURATION WARNING, not a per-lead one. "emailed and on no drip"
+   below can only fire once a lead is ALREADY past email 1 - by then the mail has
+   gone and nothing follows it. This fires on the WIRING, before anyone is
+   affected, which is the case that was silent. #}
+{% if wiring %}
+<div class="banner warn">
+  <b>{{ wiring|length }} call campaign{{ '' if wiring|length == 1 else 's' }}
+  will send email&nbsp;1 and put the lead on no drip.</b>
+  <ul style="margin:6px 0 0 18px">
+    {% for w in wiring %}
+    <li><a href="/campaign/{{ w.campaign_id }}">{{ w.name }}</a>
+        {% if w.is_running %}<span class="pill completed">RUNNING</span>{% endif %}
+        &mdash; {{ w.why }}{% if w.leads %}, {{ w.leads }} lead{{ '' if w.leads == 1 else 's' }} assigned{% endif %}.
+        {% if w.drip_id %}<a href="/campaign/{{ w.drip_id }}">start {{ w.drip_name }}</a>
+        {% else %}<a href="/campaign/{{ w.campaign_id }}">set its follow-up drip</a>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  <span class="dim">Email&nbsp;1 can be sent by hand from any lead page, so this
+    matters whether or not the campaign is running.</span>
+</div>
+{% endif %}
+
 <h1>Today &mdash; {{ date }}</h1>
 <div class="card">
   <h2>The digest as it currently stands</h2>

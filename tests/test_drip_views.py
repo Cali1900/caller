@@ -346,3 +346,114 @@ def test_clearing_a_lead_field_on_purpose_still_works(db, client):
             cur.execute('SELECT dm_name FROM leads WHERE lead_id = %s', (lid,))
             assert cur.fetchone()['dm_name'] is None, \
                 'an empty box no longer clears the field'
+
+
+# ==========================================================================
+# the wiring, visible from BOTH ends and warned about before it bites
+# ==========================================================================
+
+def test_a_drip_says_which_call_campaigns_feed_it(db, dripc, client):
+    """
+    ⚠️ default_drip_id LIVES ON THE CALL CAMPAIGN, so the drip had no way to say
+    who feeds it. A relationship visible from one side only is one nobody can
+    audit - and auditing it meant running a query, which is not a UI.
+    """
+    from tests.conftest import running_campaign_id
+    cid = dripc['campaign_id']
+    call_id = running_campaign_id()
+    campaigns.update(call_id, default_drip_id=cid)
+
+    fed = campaigns.feeders(cid)
+    assert [f['campaign_id'] for f in fed] == [call_id], fed
+
+    # on the drip's own config page AND in the drip area
+    for url in (f'/campaign/{cid}', f'/drips?drip={cid}'):
+        body = client.get(url).text
+        assert 'Fed by' in body, f'{url} does not say who feeds this drip'
+        assert campaigns.get(call_id)['name'] in body, \
+            f'{url} does not name the feeding campaign'
+
+
+def test_many_call_campaigns_can_feed_one_drip(db, dripc, client):
+    """Many-to-one is allowed and normal - nothing enforces exclusivity."""
+    from tests.conftest import running_campaign_id
+    cid = dripc['campaign_id']
+    a = running_campaign_id()
+    b = campaigns.create('C-SECOND', campaign_type='call')['campaign_id']
+    campaigns.update(a, default_drip_id=cid)
+    campaigns.update(b, default_drip_id=cid)
+    assert len(campaigns.feeders(cid)) == 2, campaigns.feeders(cid)
+    body = client.get(f'/campaign/{cid}').text
+    assert 'C-SECOND' in body
+
+
+def test_stopping_a_fed_drip_asks_first(db, dripc, client):
+    """
+    ⚠️ STOPPING A DRIP QUIETLY CHANGES WHAT HAPPENS TO EVERY FUTURE LEAD of every
+    campaign pointing at it: drip_for() refuses to route into a stopped drip, so
+    email 1 goes out and nothing follows. Nothing is orphaned in the database -
+    the wiring is kept - but the CONSEQUENCE is invisible without a confirmation.
+    """
+    from tests.conftest import running_campaign_id
+    cid = dripc['campaign_id']
+    campaigns.update(running_campaign_id(), default_drip_id=cid)
+    assert campaigns.get(cid)['is_running'], 'the fixture drip should be running'
+
+    r = client.post(f'/campaign/{cid}/stop', follow_redirects=False)
+    assert 'stop_confirm' in r.headers['location'], r.headers['location']
+    assert campaigns.get(cid)['is_running'], \
+        'the drip stopped without asking, and its feeders were not named'
+
+    body = client.get(f'/campaign/{cid}?stop_confirm=1').text
+    assert 'no drip at all' in body, 'the confirmation does not say what breaks'
+
+    r = client.post(f'/campaign/{cid}/stop', data={'confirm': 'yes'},
+                    follow_redirects=False)
+    assert not campaigns.get(cid)['is_running'], 'confirming did not stop it'
+
+
+def test_stopping_an_unfed_drip_does_not_ask(db, dripc, client):
+    """No feeders, nothing to warn about - a confirmation nobody needs is noise."""
+    cid = dripc['campaign_id']
+    assert campaigns.feeders(cid) == []
+    r = client.post(f'/campaign/{cid}/stop', follow_redirects=False)
+    assert 'stop_confirm' not in r.headers['location'], r.headers['location']
+    assert not campaigns.get(cid)['is_running']
+
+
+def test_today_warns_about_the_CONFIG_before_any_lead_is_affected(db, dripc, client):
+    """
+    ⚠️ WHY THE "emailed and on no drip" NET WAS NOT ENOUGH. That net matches
+    emailed_at IS NOT NULL AND drip_campaign_id IS NULL - it can only fire once a
+    lead is ALREADY past email 1, by which point the mail has gone and nothing
+    follows it. The failure was a campaign CONFIGURED to send people nowhere,
+    which is observable before anyone is harmed and was completely silent.
+    """
+    from tests.conftest import running_campaign_id
+    call_id = running_campaign_id()
+    campaigns.update(call_id, default_drip_id=None)
+
+    problems = campaigns.wiring_problems()
+    assert any(w['campaign_id'] == call_id and 'no follow-up drip' in w['why']
+               for w in problems), problems
+    body = client.get('/today').text
+    assert 'put the lead on no drip' in body, '/today does not warn on the config'
+    assert campaigns.get(call_id)['name'] in body
+
+    # AND THE STOPPED-DRIP VARIANT, which is the shape that actually bit: the
+    # wiring is set and the destination is off.
+    campaigns.update(call_id, default_drip_id=dripc['campaign_id'])
+    campaigns.stop(dripc['campaign_id'])
+    problems = campaigns.wiring_problems()
+    assert any('is stopped' in w['why'] for w in problems), problems
+    assert 'is stopped' in client.get('/today').text
+
+
+def test_a_correctly_wired_campaign_produces_no_warning(db, dripc, client):
+    """The other half: a warning that never clears is a warning nobody reads."""
+    from tests.conftest import running_campaign_id
+    call_id = running_campaign_id()
+    campaigns.update(call_id, default_drip_id=dripc['campaign_id'])
+    assert campaigns.get(dripc['campaign_id'])['is_running']
+    assert campaigns.wiring_problems() == [], campaigns.wiring_problems()
+    assert 'put the lead on no drip' not in client.get('/today').text

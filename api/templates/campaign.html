@@ -21,6 +21,22 @@
     {{ pace.held }}.</span>
 </div>
 {% endif %}
+{% if stop_confirm %}
+<div class="banner warn">
+  <b>Stop {{ c.name }}?</b> {{ fed_by|length }} call campaign{{ '' if fed_by|length == 1 else 's' }}
+  feed{{ 's' if fed_by|length == 1 else '' }} this drip
+  &mdash; {% for f in fed_by %}<b>{{ f.name }}</b>{% if not loop.last %}, {% endif %}{% endfor %}.
+  While it is stopped, a lead of theirs that gets email&nbsp;1 joins
+  <b>no drip at all</b>: nothing follows the opener. The wiring is kept and takes
+  effect again when this drip restarts.
+  <form class="inline" method="post" action="/campaign/{{ c.campaign_id }}/stop"
+        style="margin-left:10px">
+    <input type="hidden" name="confirm" value="yes">
+    <button type="submit" class="danger">Stop {{ c.name }} anyway</button>
+  </form>
+  <a href="/campaign/{{ c.campaign_id }}" style="margin-left:10px">Cancel</a>
+</div>
+{% endif %}
 {% if msg %}<div class="banner{% if 'REJECTED' in msg %} warn{% endif %}">{{ msg }}</div>{% endif %}
 
 <div class="card">
@@ -83,6 +99,34 @@
     </div>
 
     {% if c.type == 'drip' %}
+    {# ⚠️ THE WIRING, READ FROM THIS END. default_drip_id lives on the CALL
+       campaign, so without this a drip could not say who feeds it - and a
+       relationship visible from one side only is one nobody can audit. #}
+    <div class="card">
+      <h2>Fed by</h2>
+      {% if fed_by %}
+      <p class="dim" style="margin-top:0">These call campaigns put their leads on
+         this drip when email&nbsp;1 is sent. Many may point here; that is normal.</p>
+      <table style="box-shadow:none;max-width:520px">
+        <tr><th>Call campaign</th><th></th></tr>
+        {% for f in fed_by %}
+        <tr><td><a href="/campaign/{{ f.campaign_id }}">{{ f.name }}</a></td>
+            <td>{% if f.is_running %}<span class="pill completed">RUNNING</span>
+                {% else %}<span class="dim">stopped</span>{% endif %}</td></tr>
+        {% endfor %}
+      </table>
+      {% if not c.is_running %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>This drip is stopped</b>, so
+        their leads currently join <b>nothing</b> after email&nbsp;1.</p>
+      {% endif %}
+      {% else %}
+      <p class="dim" style="margin-bottom:0">No call campaign points here. Leads
+         reach this drip only by being <b>imported</b> onto it, or added by hand
+         from a lead page. Set a call campaign's <b>Follow-up drip</b> to this one
+         to feed it.</p>
+      {% endif %}
+    </div>
+
     <div class="card">
       <h2>Sending pace</h2>
       <p class="dim" style="margin-top:0">Reputation belongs to the
