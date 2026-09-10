@@ -382,7 +382,33 @@
 {% for t in timeline %}
   <div class="tl-item {{ t.kind }}">
     <div class="tl-when">{{ t.at.strftime('%Y-%m-%d %H:%M') }} &middot; {{ t.kind }}{% if t.stage %} &middot; {{ t.stage }}{% endif %}</div>
-    <div>{{ t.summary }}</div>
+    <div>{{ t.summary }}{% if t.kind == 'email' and t.subject %}
+        &mdash; &ldquo;{{ t.subject|truncate(64) }}&rdquo;{% endif %}</div>
+
+    {# ⚠️ CALLS AND EMAILS IN ONE TIMELINE. This is the one place the whole
+       relationship belongs together - called, emailed, clicked, replied - which
+       is why /drips took the email COLUMNS off the leads list and left this page
+       whole. #}
+    {% if t.kind == 'email' %}
+      <div class="dim">
+        {% if not t.sent %}<b>prepared, not sent</b> &mdash; this row is what stops
+          the next tick sending the same step twice{% else %}to {{ t.to_email }}
+          {% if t.sent_by %} &middot; by {{ t.sent_by }}{% endif %}{% endif %}
+      </div>
+    {% elif t.kind == 'click' %}
+      <div class="dim">
+        {% if t.subject %}&ldquo;{{ t.subject|truncate(58) }}&rdquo;{% endif %}
+        {% if t.minutes is not none %}
+          &middot; <b>{{ t.minutes }}m after that send</b>
+        {% else %}
+          &middot; <span title="no recorded send time - a forwarded mail can be
+            clicked with no send of its own">timing unknown</span>
+        {% endif %}
+      </div>
+    {% elif t.kind == 'email_problem' %}
+      <div class="dim">⚠️ {{ t.to_email }}{% if t.detail %} &mdash; {{ t.detail|truncate(120) }}{% endif %}</div>
+    {% endif %}
+
     {% if t.kind == 'call' %}
       {% if t.agent_score is not none %}
         <div>

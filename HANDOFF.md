@@ -512,6 +512,62 @@ went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
 
+## The drip has its own area now: /drips (2026-09-10)
+
+**Three screens, three jobs**, because the same firm needs different facts
+depending on what you are doing with it:
+
+| screen | columns | why |
+|---|---|---|
+| `/` Leads | firm, campaign, queue, phone, stage, status, contact, calls, demands/mo, agent, outcome, last call | the CALL view. Seventeen columns wrapped every row, and this is the screen read first |
+| `/drips` | firm, contact, email, step sent, last sent, clicks by step, next step due, status | the SEQUENCE view. No phone, no attempts, no agent score - on a drip those are noise |
+| `/leads/<id>` | everything, calls and emails in ONE timeline | the one place the whole relationship belongs together |
+
+The email columns that came off the leads list are `Email`, `Follow-up`, `Emails`
+and `Last email`. **The email-state FILTER stayed**: it is how a lead with a draft
+waiting gets found from the call view, and a filter is not a column.
+
+### The sequence editor is one definition, included twice
+
+`api/templates/_sequence.html`, included by `campaign.html` and `drips.html`. An
+include rather than a copy - two copies of an editor drift, and the one nobody is
+looking at is the one that rots. Breaks 117 and 119 anchor into it and were
+retargeted when it moved; nothing else pointed at that markup.
+
+### The per-step table, and why it is buildable
+
+    step 1   sent 340   clicked 22   6.5%
+    step 2   sent 310   clicked 41  13.2%
+
+`drip.step_stats()`. This is **the whole reason to run a sequence** - which email
+is doing the work, which one to cut - and it works because the click token is per
+SEND, not per lead: `email_sends` is one row per `(lead_id, step_id)` with its own
+`click_token`, and `email_clicks.send_id` points back at it. The brief said per
+step and per step is what shipped; `email_clicks.lead_id` exists alongside for the
+timeline, which is what made it look per-lead.
+
+Break 132 joins clicks on `lead_id` instead: every step gets credited with every
+click that lead ever made, all four rates converge, and the table reads as
+plausible while being useless. **Counts are of SENT rows only** - a prepared row
+with `sent_at IS NULL` may still fail, and counting it understates every rate.
+
+### The timeline renders emails from their SOURCE tables
+
+A send writes twice: an `activity` row saying `drip step 2 sent` as prose, and the
+`email_sends` row that knows the step position, subject and time. Lead detail
+renders the second and **skips** the first (`_EMAIL_ACTIVITY_KINDS`, plus a
+regex for the drip row whose kind is shared with STOP events). Without the skip
+every email appears twice. Break 133.
+
+A drip **STOP is kept** - it carries the reason. Bounces and refusals come from
+`email_audit` for outcomes other than sent, because a bounce that shows nowhere is
+a lead failing silently. A `prepared, not sent` row says so rather than looking
+sent.
+
+⚠️ `activity` rows of kind `call` are skipped too, and always were: calls render
+from the `calls` table with their scores. A test that inserts an activity-only
+call is asserting against its own fixture - that cost one red test here.
+
 ## Sending pace: four layers, and the hourly cap is the throttle (2026-09-10)
 
 The dialer had spacing and a daily cap. The sender had **neither** - `drip.run_once`

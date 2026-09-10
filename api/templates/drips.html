@@ -1,0 +1,113 @@
+{% extends "base.html" %}{% block title %}Drips · Caller{% endblock %}
+{% block body %}
+<h1>Drips</h1>
+<p class="sub">Email sequences. <b>No phone, no attempts, no agent score</b> &mdash;
+   on a drip those columns are noise. The call view is
+   <a href="/">Leads</a>; a single lead's whole history, calls and emails in one
+   timeline, is on its own page.</p>
+
+{% if not drips %}
+  <p class="dim">No drip campaigns yet. Create one on <a href="/campaigns">Campaigns</a>.</p>
+{% else %}
+
+<div class="toolbar" style="margin-bottom:12px">
+  <form class="inline" method="get" action="/drips">
+    <label class="dim">Drip
+      <select name="drip" onchange="this.form.submit()">
+        {% for d in drips %}
+        <option value="{{ d.campaign_id }}"
+                {% if d.campaign_id|string == c.campaign_id|string %}selected{% endif %}>
+          {{ d.name }}{% if not d.is_running %} (stopped){% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+  <span class="livedot {{ 'on' if c.is_running else 'off' }}"></span>
+  <span class="dim">{{ 'running' if c.is_running else 'stopped &mdash; steps do not send'|safe }}</span>
+  <form class="inline" method="post"
+        action="/campaign/{{ c.campaign_id }}/{{ 'stop' if c.is_running else 'start' }}">
+    <button type="submit" class="{{ 'danger' if c.is_running else 'ghost' }}">
+      {{ 'Stop' if c.is_running else 'Start' }}</button></form>
+  <a href="/campaign/{{ c.campaign_id }}" class="dim">sender &amp; pace &rarr;</a>
+</div>
+
+{% if msg %}<div class="banner">{{ msg }}</div>{% endif %}
+
+<div class="card">
+  <div class="metric">
+    <div class="m"><b>{{ roster|length }}</b><span>leads on this drip</span></div>
+    <div class="m"><b>{{ pace.sendable or 0 }}</b><span>sendable now</span></div>
+    <div class="m"><b>{{ pace.held or 0 }}</b><span>waiting on pace</span></div>
+    <div class="m"><b>{{ pace.sent_hour or 0 }}/{{ pace.hourly_cap }}</b><span>this hour</span></div>
+    <div class="m"><b>{{ pace.sent_today or 0 }}/{{ pace.daily_cap }}</b><span>today</span></div>
+  </div>
+</div>
+
+{# ⚠️ THE WHOLE REASON TO RUN A SEQUENCE: which email is doing the work, and which
+   one to cut. Buildable because the click token is per SEND - email_sends is one
+   row per (lead, step) and email_clicks.send_id points back at it - so every click
+   already resolves to a step. A per-lead click count cannot answer this. #}
+<h2 style="margin-top:18px">Per step</h2>
+<table style="max-width:820px">
+<tr><th>Step</th><th>Subject</th><th>When</th>
+    <th class="right">Sent</th><th class="right">Clicked</th><th class="right">%</th></tr>
+{% for s in step_stats %}
+<tr>
+  <td><b>{{ s.position }}</b>{% if not s.enabled %}
+      <span class="pill human_review">OFF</span>{% endif %}</td>
+  <td>{{ s.subject|truncate(46) }}</td>
+  <td class="dim">{% if s.position == 1 %}
+        {% if s.delay_minutes %}{{ (s.delay_minutes // 1440) }}d after joining
+        {% else %}on joining{% endif %}
+      {% else %}day {{ s.delay_days }}{% endif %}</td>
+  <td class="right">{{ s.sent }}</td>
+  <td class="right">{{ s.clicked }}</td>
+  <td class="right">{% if s.sent %}<b>{{ s.pct }}%</b>{% else %}<span class="dim">&mdash;</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% if not step_stats %}<p class="dim"><b>No steps yet</b> &mdash; this drip sends nothing.</p>
+{% elif not any_sent %}
+<p class="dim">Nothing has been sent from this drip yet, so every rate is
+   &mdash;. Rates count SENT rows only: a prepared send that has not gone out
+   would inflate the denominator and understate every step on the page.</p>
+{% endif %}
+
+<h2 style="margin-top:18px">Leads on this drip</h2>
+{% if not roster %}
+  <p class="dim">None yet. A lead joins when <b>email&nbsp;1</b> is sent &mdash;
+     either by its call campaign, or as step&nbsp;1 for an imported lead.</p>
+{% else %}
+<table>
+<tr><th>Firm</th><th>Contact</th><th>Email</th><th class="right">Step sent</th>
+    <th>Last sent</th><th>Clicks by step</th><th>Next step due</th><th>Status</th></tr>
+{% for l in roster %}
+<tr>
+  <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a>
+      {% if l.lead_source == 'import' %}<span class="pill" title="imported, never called">import</span>{% endif %}</td>
+  <td class="dim">{{ l.dm_name or '—' }}</td>
+  <td class="dim">{{ l.dm_email or '—' }}
+      {% if l.do_not_send %}<span class="pill dnc" title="on the email do-not-send list">no send</span>{% endif %}</td>
+  <td class="right">{% if l.steps_sent %}{{ l.steps_sent }}
+        <span class="dim">(last: {{ l.last_step }})</span>
+      {% else %}<span class="dim">0</span>{% endif %}</td>
+  <td class="dim">{% if l.last_sent %}{{ l.last_sent.strftime('%b %-d %-I:%M%p')|lower }}
+      {% else %}&mdash;{% endif %}</td>
+  <td class="dim">{% if l.clicks %}<b>{{ l.clicks }}</b> &mdash; {{ l.clicked_steps }}
+      {% else %}&mdash;{% endif %}</td>
+  <td class="dim">{% if l.replied_at %}<span class="pill completed">replied &mdash; stopped</span>
+      {% elif l.next_due %}step {{ l.next_step }} &middot; {{ l.next_due.strftime('%b %-d %-I:%M%p')|lower }}
+      {% else %}<span class="dim">sequence finished</span>{% endif %}</td>
+  <td><span class="pill">{{ l.status }}</span></td>
+</tr>
+{% endfor %}
+</table>
+<p class="dim">&ldquo;Next step due&rdquo; is the SCHEDULE. A cap or closed
+   business hours shifts when it actually goes out without changing whether it is
+   coming &mdash; the waiting count is above.</p>
+{% endif %}
+
+{% include '_sequence.html' %}
+
+{% endif %}
+{% endblock %}

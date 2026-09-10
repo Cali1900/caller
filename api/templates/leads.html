@@ -168,9 +168,14 @@
     <input type="checkbox" id="selall"></th>
   {{ sh('firm', 'Firm') }}<th>Campaign</th><th>Queue</th><th>Phone</th>
   {{ sh('stage', 'Stage') }}{{ sh('status', 'Status') }}
-  <th>Contact</th><th>Email</th><th>Follow-up</th>
-  {{ sh('calls', 'Calls', 'right') }}{{ sh('emails', 'Emails', 'right') }}
-  {{ sh('last_email', 'Last email') }}
+  {# ⚠️ THIS IS THE CALL VIEW. Email, Follow-up, Emails and Last email moved to
+     /drips, where the sequence facts belong - step sent, clicks by step, next due.
+     Seventeen columns wrapped every row, and this is the screen read first, so it
+     is the one that has to stay scannable. Contact stays: it is who to ask for
+     when the phone is answered. The email-state FILTER above stays too - it is
+     how a lead with a draft waiting gets found from here. #}
+  <th>Contact</th>
+  {{ sh('calls', 'Calls', 'right') }}
   {{ sh('volume', 'Demands/mo', 'right') }}
   {{ sh('agent', 'Agent', 'right') }}{{ sh('outcome', 'Outcome', 'right') }}
   {{ sh('last_call', 'Last call') }}</tr>
@@ -198,19 +203,7 @@
   <td class="dim">{{ 'L2' if l.has_confirmed_email else 'L1' }}</td>
   <td><span class="pill {{ l.status }}">{{ l.status }}</span></td>
   <td>{{ l.dm_name or '' }}{% if l.dm_title %}<br><span class="dim">{{ l.dm_title }}</span>{% endif %}</td>
-  <td>{% if l.dm_email %}{{ l.dm_email }}
-        {% if l.dm_email_confirmed %}<span class="pill completed">confirmed</span>
-        {% else %}<span class="pill human_review">unconfirmed</span>{% endif %}{% endif %}</td>
-  <td>{% if l.email_state == 'replied' %}<span class="es replied">replied</span>
-      {% elif l.email_state == 'clicked' %}<span class="es clicked">clicked{% if l.first_minutes is not none %}
-        · {{ l.first_minutes }}m after send{% endif %}</span>{% if l.clicks > 1 %}
-        <span class="dim">×{{ l.clicks }}</span>{% endif %}
-      {% elif l.email_state == 'sent' %}<span class="es sent">sent {{ l.emailed_at | ago }}</span>
-      {% elif l.email_state == 'draft_ready' %}<span class="es ready">draft ready</span>
-      {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
   <td class="right dim">{{ l.call_count or 0 }}</td>
-  <td class="right dim">{{ l.email_count or 0 }}</td>
-  <td class="dim">{{ l.last_email_at.strftime('%b %d %H:%M') if l.last_email_at else '' }}</td>
   <td class="right">{% if l.demands_per_month is not none %}<b title="{{ l.demands_per_month_raw }}">{{ l.demands_per_month }}</b>
       {% elif l.demands_per_month_raw %}<span class="dim" title="{{ l.demands_per_month_raw }}">said?</span>
       {% else %}<span class="dim">&mdash;</span>{% endif %}</td>

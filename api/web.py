@@ -120,6 +120,13 @@ def _header(conn, cfg):
 # whole system is built to avoid, so it surfaces here.
 #
 # Excludes replied/archived/terminal: those have stopped ON PURPOSE.
+# Activity kinds whose events are rendered from email_sends/email_clicks instead,
+# with the step, the subject and the click delay. Skipped when walking `activity`
+# so one send is one timeline entry. NAMED, not matched on prose - except the drip
+# row, which shares its kind with STOP events that must be kept.
+_EMAIL_ACTIVITY_KINDS = ('email_sent', 'sent_manual', 'click')
+_DRIP_SEND_SUMMARY = re.compile(r'^drip step \d+ sent$')
+
 _STALLED_AFTER_EMAIL = """
     (l.emailed_at IS NOT NULL
      AND l.drip_campaign_id IS NULL
@@ -660,6 +667,40 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
                 """SELECT * FROM activity WHERE lead_id = %s
                     ORDER BY created_at DESC LIMIT 200""", (lead_id,))
             acts = cur.fetchall()
+            # ⚠️ EMAILS FROM THEIR SOURCE TABLES, not from the activity summary.
+            # The activity row says "drip step 2 sent" as prose; email_sends knows
+            # the step POSITION, the subject and the send time, and email_clicks
+            # knows which send was clicked and how long after. Rendering the prose
+            # threw all of that away, which is why the timeline had calls in
+            # detail and emails as one grey line.
+            cur.execute(
+                """SELECT es.send_id, es.seq, es.sent_at, es.prepared_at,
+                          es.subject, es.sent_by, es.to_email,
+                          st.position, st.subject AS step_subject
+                     FROM email_sends es
+                     LEFT JOIN drip_steps st ON st.step_id = es.step_id
+                    WHERE es.lead_id = %s
+                    ORDER BY coalesce(es.sent_at, es.prepared_at) DESC""",
+                (lead_id,))
+            sends = cur.fetchall()
+            cur.execute(
+                """SELECT ec.clicked_at, ec.minutes_since_sent, st.position,
+                          es.subject, es.seq
+                     FROM email_clicks ec
+                     LEFT JOIN email_sends es ON es.send_id = ec.send_id
+                     LEFT JOIN drip_steps st  ON st.step_id = es.step_id
+                    WHERE ec.lead_id = %s
+                    ORDER BY ec.clicked_at DESC""", (lead_id,))
+            email_clicks = cur.fetchall()
+            # BOUNCES AND REFUSALS. A bounce that shows nowhere is a lead failing
+            # silently - the argument that put 'bounced' on the status filter.
+            cur.execute(
+                """SELECT created_at, outcome, detail, to_email
+                     FROM email_audit
+                    WHERE lead_id = %s
+                      AND outcome NOT IN ('sent_drip','sent','sent_manual')
+                    ORDER BY created_at DESC LIMIT 40""", (lead_id,))
+            email_problems = cur.fetchall()
 
     timeline = []
     for c in calls:
@@ -681,12 +722,42 @@ def lead_detail(request: Request, lead_id: str, saved: str = ''):
             'where_it_broke': c['where_it_broke'], 'their_words': c['their_words'],
             'needs_human': c['needs_human'], 'score_error': c['score_error'],
         })
+    # ⚠️ SENDS AND CLICKS ARE RENDERED FROM email_sends/email_clicks, so their
+    # activity rows are SKIPPED here or every email would appear twice - once in
+    # detail and once as prose. _EMAIL_ACTIVITY_KINDS names them explicitly
+    # rather than matching on summary text, and the one-entry-per-send property
+    # has its own test.
     for a in acts:
         if a['kind'] == 'call':
             continue          # already rendered above, with its scores
+        if a['kind'] in _EMAIL_ACTIVITY_KINDS:
+            continue          # rendered below, with the step and the subject
+        if a['kind'] == 'drip' and _DRIP_SEND_SUMMARY.match(a['summary'] or ''):
+            continue          # ditto - but a drip STOP is kept, it says why
         timeline.append({'at': a['created_at'], 'kind': a['kind'],
                          'stage': a['stage'], 'summary': a['summary'],
                          'detail': a['detail']})
+    for e in sends:
+        # A step position when the send belongs to a drip step; email 1 from the
+        # call path has step_id NULL, and calling that "step 1" would be a guess.
+        what = (f'step {e["position"]} sent' if e['position']
+                else 'email 1 sent')
+        timeline.append({
+            'at': e['sent_at'] or e['prepared_at'], 'kind': 'email',
+            'summary': what, 'subject': e['subject'] or e['step_subject'],
+            'sent': e['sent_at'] is not None, 'to_email': e['to_email'],
+            'sent_by': e['sent_by'], 'step': e['position']})
+    for cl in email_clicks:
+        timeline.append({
+            'at': cl['clicked_at'], 'kind': 'click',
+            'summary': ('CLICKED' + (f' - step {cl["position"]}'
+                                     if cl['position'] else ' - email 1')),
+            'subject': cl['subject'],
+            'minutes': cl['minutes_since_sent']})
+    for pr in email_problems:
+        timeline.append({'at': pr['created_at'], 'kind': 'email_problem',
+                         'summary': pr['outcome'].replace('_', ' '),
+                         'detail': pr['detail'], 'to_email': pr['to_email']})
     timeline.sort(key=lambda t: t['at'], reverse=True)
 
     try:
@@ -1589,6 +1660,59 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
         'preview': drafts_mod.preview(camp, lead=pv_lead),
         'preview_lead': pv_lead, 'preview_real': pv_real,
         'running': campaigns.running()})
+
+
+@router.get('/drips', response_class=HTMLResponse)
+def drips_page(request: Request, drip: str = '', msg: str = ''):
+    """
+    THE DRIP AREA - separate from calls, not a filter on the shared leads list.
+
+    ⚠️ WHY A SEPARATE PAGE RATHER THAN COLUMNS ON /leads. The two views want
+    different facts about the same firm. A call needs phone, attempts and scores;
+    a sequence needs step sent, clicks by step and next due. Putting both on one
+    table gave 17 columns and a row that wrapped - and the shared list is the
+    screen read first, so it is the one that must stay scannable.
+
+    Lead DETAIL stays whole: calls and emails in ONE timeline, because that is the
+    one place the entire relationship belongs together.
+    """
+    cfg = _cfg()
+    with db.get_conn() as conn:
+        hdr = _header(conn, cfg)
+    drips = [c for c in campaigns.list_all() if c['type'] == 'drip']
+    if not drips:
+        return templates.TemplateResponse(request, 'drips.html', {
+            'hdr': hdr, 'drips': [], 'msg': msg})
+    # The picked drip, or the first. An id that is not a drip falls back rather
+    # than 404ing: a stale bookmark should land somewhere useful.
+    chosen = next((c for c in drips if str(c['campaign_id']) == str(drip)),
+                  drips[0])
+    cid = chosen['campaign_id']
+    stats = _drip_mod.step_stats(cid)
+    pv_lead, pv_real = drafts_mod.preview_lead(cid)
+    return templates.TemplateResponse(request, 'drips.html', {
+        'hdr': hdr, 'drips': drips, 'c': chosen, 'msg': msg,
+        'step_stats': stats,
+        'any_sent': any(r['sent'] for r in stats),
+        'roster': _drip_mod.roster(cid),
+        'pace': _drip_mod.held(cid),
+        # ⚠️ THE SEQUENCE EDITOR IS AN INCLUDE, so it needs exactly the context
+        # the campaign page gives it. Anything missing renders as empty rather
+        # than erroring, which is how a template silently loses a control.
+        'drip_steps': _drip_mod.steps(cid),
+        'step_previews': {
+            st['position']: {
+                'subject': drafts_mod.render(
+                    st['subject'], drafts_mod.values_for(pv_lead, chosen)),
+                'body': drafts_mod.render(
+                    st['body'], drafts_mod.values_for(pv_lead, chosen))}
+            for st in _drip_mod.steps(cid)},
+        'source_split': _drip_mod.source_split(cid),
+        'preview_candidates': drafts_mod.preview_candidates(cid),
+        'sample_id': drafts_mod.SAMPLE_ID,
+        'sample_lead': drafts_mod.SAMPLE_LEAD,
+        'placeholders': drafts_mod.PLACEHOLDERS,
+        'seq_msg': ''})
 
 
 @router.get('/funnel', response_class=HTMLResponse)

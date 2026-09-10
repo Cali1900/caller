@@ -9,7 +9,10 @@
 # Removing the option leaves a <select> with nothing in it when the drip is new,
 # so the browser posts no lead_id and the operator has no way to choose the
 # example even though the endpoint would render it.
-TARGET = 'api/templates/campaign.html'
+# ⚠️ RETARGETED 2026-09-10: the sequence editor moved into _sequence.html, a
+# partial included by BOTH /campaign/<id> and the new /drips page. One definition
+# rather than two copies - so this break now covers the picker on both screens.
+TARGET = 'api/templates/_sequence.html'
 EXPECT = 'test_the_preview_works_with_no_leads_at_all'
 LABEL = 'drop the example from the picker, leaving it empty on a new drip'
 OLD = """          {% if not preview_candidates %}
