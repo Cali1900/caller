@@ -45,8 +45,11 @@ def test_the_drips_page_shows_email_columns_and_no_call_columns(db, dripc, clien
     r = client.get(f'/drips?drip={cid}')
     assert r.status_code == 200, r.text[:400]
     body = r.text
+    # 'Sends' and 'In the sequence' replaced 'Next step due' and 'Status' on
+    # 2026-09-10: the first showed delay arithmetic rather than when the mail
+    # would go, and the second showed the CALL status, which means nothing here.
     for want in ('Firm', 'Contact', 'Email', 'Step sent', 'Last sent',
-                 'Clicks by step', 'Next step due', 'Status'):
+                 'Clicks by step', 'Sends', 'In the sequence'):
         assert want in body, f'the roster is missing the {want!r} column'
     assert 'Roster Firm' in body
     # ⚠️ AND NOT THE CALL COLUMNS. These mean nothing on a drip and their absence
@@ -123,8 +126,10 @@ def test_a_replied_lead_reads_as_stopped_not_as_due(db, dripc, client):
             cur.execute("UPDATE leads SET replied_at = now() WHERE lead_id = %s",
                         (lid,))
     body = client.get(f'/drips?drip={cid}').text
-    assert 'replied &mdash; stopped' in body or 'replied — stopped' in body, \
+    assert 'stopped' in body and 'replied' in body, \
         'a replied lead must not read as having a step due'
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['drip_state'] == 'stopped' and row['state_detail'] == 'replied', row
 
 
 def test_the_sequence_editor_is_on_the_drips_page(db, dripc, client):
@@ -457,3 +462,119 @@ def test_a_correctly_wired_campaign_produces_no_warning(db, dripc, client):
     assert campaigns.get(dripc['campaign_id'])['is_running']
     assert campaigns.wiring_problems() == [], campaigns.wiring_problems()
     assert 'put the lead on no drip' not in client.get('/today').text
+
+
+# ==========================================================================
+# the roster answers drip questions, in drip terms
+# ==========================================================================
+
+def test_the_status_column_is_the_DRIPS_not_the_CALLS(db, dripc, client):
+    """
+    ⚠️ leads.status IS THE CALL STATUS. 'completed' means the dialer finished
+    with the lead and says NOTHING about the sequence - a lead can be
+    'completed' and mid-drip, which is exactly what it was showing.
+
+    The drip state comes from the same exclusions due() applies, so the roster
+    and the sender cannot disagree about where a lead is.
+    """
+    cid = dripc['campaign_id']
+    lid = _lead(db, days_ago=11, company='Done Calling',
+                phone_e164='+15553330200', status='completed')
+    _join(db, lid, cid, sent_steps=1)
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['status'] == 'completed', 'the call status should be unchanged'
+    assert row['drip_state'] in ('waiting', 'sending', 'queued', 'held'), \
+        f"a mid-sequence lead reads as {row['drip_state']!r}"
+
+    body = client.get(f'/drips?drip={cid}').text
+    assert 'In the sequence' in body, 'the column is still labelled Status'
+
+
+def test_a_send_time_is_moved_into_the_FIRMS_business_hours(db, dripc, client):
+    """
+    ⚠️ THE COLUMN MUST ANSWER "WHEN WILL THIS SEND", NOT SHOW THE ARITHMETIC.
+    The raw schedule said 1:38am - true, and outside every sending window, so
+    nothing was ever going at 1:38am. Same reasoning as showing the call queue's
+    real spacing rather than the configured interval.
+    """
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    cid = dripc['campaign_id']
+    # a 09:00-17:00 Mon-Fri week, so a 2am due time cannot be a send time
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE campaign_windows
+                              SET enabled = (dow BETWEEN 1 AND 5),
+                                  start_time = '09:00', end_time = '17:00'
+                            WHERE campaign_id = %s""", (cid,))
+    lid = _lead(db, days_ago=11, company='Night Owl', phone_e164='+15553330201')
+    _join(db, lid, cid, sent_steps=1)
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['sends_at'] is not None, row
+
+    local = row['sends_at'].astimezone(ZoneInfo(row['timezone']))
+    assert 9 <= local.hour < 17, \
+        f'the send time is {local:%a %H:%M} local - outside business hours'
+    assert local.weekday() < 5, f'the send time is a {local:%A}'
+    assert row['sends_at'] >= row['next_due'], \
+        'a send cannot be scheduled BEFORE it is due'
+    assert row['sends_at_local'], 'no firm-local rendering of the send time'
+
+
+def test_next_open_reads_the_FIRMS_clock_not_ours(db, dripc):
+    """Two leads, same window, timezones a day apart get different instants."""
+    import datetime as _dt
+    cid = dripc['campaign_id']
+    # ⚠️ A NARROW WINDOW, deliberately. The dripc fixture opens all hours so that
+    # schedule tests do not depend on the wall clock - and with every hour open
+    # any instant is already inside the window, so both timezones would return
+    # the same answer and this test would pass without testing anything.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE campaign_windows
+                              SET enabled = true, start_time = '09:00',
+                                  end_time = '17:00'
+                            WHERE campaign_id = %s""", (cid,))
+    wins = drip._window_rows(cid)
+    # 09:00 UTC is 02:00 in Los Angeles and 05:00 in New York - shut in both, and
+    # each opens at 09:00 on its OWN clock, which is a different instant.
+    at = _dt.datetime(2026, 9, 15, 9, 0, tzinfo=_dt.timezone.utc)
+    la = drip.next_open(at, 'America/Los_Angeles', wins)
+    ny = drip.next_open(at, 'America/New_York', wins)
+    assert la is not None and ny is not None
+    assert la != ny, 'the window was evaluated in one timezone for both firms'
+
+
+def test_a_lead_on_a_stopped_drip_reads_paused_not_waiting(db, dripc, client):
+    cid = dripc['campaign_id']
+    lid = _lead(db, days_ago=11, company='Paused Firm', phone_e164='+15553330202')
+    _join(db, lid, cid, sent_steps=1)
+    campaigns.stop(cid)
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['drip_state'] == 'paused', row
+    assert 'drip stopped' in row['state_detail'], row
+    assert row['sends_at'] is None, \
+        'a paused lead must not advertise a send time it will not honour'
+
+
+def test_a_held_lead_says_WHICH_cap_is_holding_it(db, dripc, client):
+    """"held" without a reason is the same as no answer."""
+    cid = dripc['campaign_id']
+    open_all_hours(cid)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE campaign_configs SET email_daily_cap = 1,
+                                  email_hourly_cap = 1 WHERE campaign_id = %s""",
+                        (cid,))
+            # one already sent today, so the cap is spent
+            lid0 = _lead(db, days_ago=11, phone_e164='+15553330203')
+            cur.execute("""INSERT INTO email_sends
+                               (lead_id, seq, to_email, sent_at, sent_by,
+                                click_token)
+                           VALUES (%s, 50, 'a@b.test', now(), 'operator',
+                                   'tok-held-cap')""", (lid0,))
+    lid = _lead(db, days_ago=11, company='Capped Firm', phone_e164='+15553330204')
+    _join(db, lid, cid)
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['drip_state'] == 'held', row
+    assert 'cap' in row['state_detail'], row

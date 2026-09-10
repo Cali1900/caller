@@ -16,10 +16,10 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Wiring | `C1` &rarr; `Drip 1`, set in the UI. Visible from both ends, and `/today` warns while `Drip 1` is stopped |
-| Tests | 761 passed, 1 skipped |
-| Break pass | **136 definitions** (136–137 added for the wiring warnings, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
+| Tests | 766 passed, 1 skipped |
+| Break pass | **138 definitions** (136–139 added since, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
-| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **stopped**). C1's follow-up drip is `Drip 1` |
+| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING** as of 2026-09-10). C1's follow-up drip is `Drip 1` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
 | Email | 1 lead on a drip (`texLaw`), 1 lead with `emailed_at`, **1** `email_sends` row, 4 clicks, 4 live steps on Drip 1 |
 
@@ -549,6 +549,48 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## The drip roster answers drip questions (2026-09-10)
+
+Two columns were reporting numbers instead of answers.
+
+### `Status` was the CALL status
+
+`leads.status` said **`completed`**, which means the dialer finished with the lead
+and says nothing whatever about the sequence — a lead can be `completed` and
+mid-drip. The column is now **In the sequence**, derived from the same exclusions
+`due()` applies so the roster and the sender cannot disagree:
+
+| state | when |
+|---|---|
+| `stopped` | `replied`, `do not send`, or a terminal status — with the reason beside it |
+| `paused` | the drip itself is stopped, so nothing advances |
+| `finished` | no unsent enabled step remains |
+| `held` | due now, and a cap or closed hours is holding it — **with which one** |
+| `sending` / `queued` | going next, or N places back in the queue |
+| `waiting` | its step is not due yet |
+
+Break 139. A `held` with no reason is the same as no answer, so the reason is part
+of the state.
+
+### `Next step due` was delay arithmetic, not a send time
+
+It read **`sep 15 1:38am`** — true, and outside every sending window, so nothing
+was ever going at 1:38am. The column is now **Sends**: the schedule advanced by
+`next_open()` to the first instant inside an enabled window **in the firm's own
+timezone**, then through the pace queue (one per jittered gap, inside the hourly
+and daily caps). The raw scheduled time stays in the tooltip, because the
+difference between the two is the interesting part. Break 138.
+
+⚠️ **Rendered in the FIRM's clock, with yours beside it.** A UTC timestamp read as
+`4:00pm` for a 9:00am send — nobody's clock. The window that decides the time is
+the firm's, so that is the number shown first; the operator's own time follows
+when it differs.
+
+Same reasoning as showing the call queue's real spacing rather than the configured
+interval: **a column that reports the computation leaves the reader to do the last
+step**, and the whole point of per-firm business hours is that the last step is
+not obvious.
 
 ## Wiring a call campaign to a drip is a RUNTIME act, in the UI (2026-09-10)
 

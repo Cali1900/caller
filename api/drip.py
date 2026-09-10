@@ -773,6 +773,64 @@ def step_stats(campaign_id) -> list:
             return [dict(r) for r in cur.fetchall()]
 
 
+# Statuses that end a sequence wherever the lead is in it. TERMINAL_STOP is the
+# SQL form of the same list; this is what the roster shows a person.
+_TERMINAL_STATUSES = ('dnc', 'bad_email', 'won', 'lost', 'demo_booked',
+                      'unsubscribed', 'archived')
+
+
+def _window_rows(campaign_id) -> dict:
+    """{dow: (start_time, end_time)} for ENABLED days only."""
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT dow, start_time, end_time FROM campaign_windows
+                            WHERE campaign_id = %s AND enabled""", (campaign_id,))
+            return {r['dow']: (r['start_time'], r['end_time'])
+                    for r in cur.fetchall()}
+
+
+def next_open(at, tzname, windows, days_ahead: int = 14):
+    """
+    The first instant at or after `at` that falls inside an enabled window, in
+    the LEAD's timezone. None when no day is enabled at all.
+
+    ⚠️ THIS IS THE DIFFERENCE BETWEEN A SCHEDULE AND AN ANSWER. The raw delay
+    arithmetic said a step was due at 1:38am - true, and outside every sending
+    window, so the mail was never going at 1:38am. A column that reports the
+    computation rather than the outcome makes the reader do the last step, and
+    the whole point of business hours is that the last step is not obvious.
+
+    Same reasoning as showing the call queue's real spacing instead of the
+    configured interval.
+    """
+    from zoneinfo import ZoneInfo
+    if not windows:
+        return None
+    try:
+        tz = ZoneInfo(tzname)
+    except Exception:
+        return None
+    local = at.astimezone(tz)
+    for _ in range(days_ahead + 1):
+        # Postgres dow: 0 = Sunday, matching EXTRACT(dow) in PREFERENCE_WINDOW.
+        dow = (local.weekday() + 1) % 7
+        win = windows.get(dow)
+        if win:
+            start, end = win
+            open_at = local.replace(hour=start.hour, minute=start.minute,
+                                    second=0, microsecond=0)
+            close_at = local.replace(hour=end.hour, minute=end.minute,
+                                     second=0, microsecond=0)
+            if local < open_at:
+                return open_at.astimezone(datetime.timezone.utc)
+            if local <= close_at:
+                return local.astimezone(datetime.timezone.utc)
+        # next day, at midnight local, and try again
+        local = (local + datetime.timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+    return None
+
+
 def roster(campaign_id, limit: int = 500) -> list:
     """
     The leads on this drip, with EMAIL facts only.
@@ -847,7 +905,120 @@ def roster(campaign_id, limit: int = 500) -> list:
                  WHERE l.drip_campaign_id = %(cid)s
                  ORDER BY coalesce(p.last_sent, l.drip_entered_at) DESC NULLS LAST
                  LIMIT %(lim)s""", {'cid': campaign_id, 'lim': limit})
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+    return _with_drip_state(campaign_id, rows)
+
+
+def _with_drip_state(campaign_id, rows) -> list:
+    """
+    Add `drip_state`, `state_detail` and `sends_at` to each roster row.
+
+    ⚠️ THE STATUS COLUMN ON A DRIP MUST BE THE DRIP'S. leads.status is the CALL
+    status - 'completed' means the dialer finished with the lead and says nothing
+    at all about the sequence. On this screen the question is always "where is
+    this lead in the sequence", and the answer has to come from the same
+    exclusions due() applies, or the roster and the sender disagree.
+
+    `sends_at` is when the mail will ACTUALLY go: the schedule advanced to the
+    next open window, then through the pace queue. The raw due time is kept as
+    `next_due` because the two differ and the difference is worth seeing.
+    """
+    from api import campaigns as _c
+    camp = _c.get(campaign_id) or {}
+    wins = _window_rows(campaign_id)
+    op_tz = _op_tz()
+    counts = sent_counts(campaign_id)
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    hourly_left = max(0, (counts.get('hourly_cap') or 0)
+                      - (counts.get('sent_hour') or 0))
+    daily_left = max(0, (counts.get('daily_cap') or 0)
+                     - (counts.get('sent_today') or 0))
+    gap = ((camp.get('email_gap_min_seconds', 60)
+            + camp.get('email_gap_max_seconds', 300)) / 2.0) or 60
+
+    # THE QUEUE, in the order due() returns them: earliest due first. A lead's
+    # place in it is what decides when its mail goes, so the estimate has to be
+    # built from the whole set rather than per row.
+    ready = sorted(
+        [r for r in rows
+         if r['next_due'] and r['replied_at'] is None and not r['do_not_send']
+         and r['status'] not in _TERMINAL_STATUSES],
+        key=lambda r: r['next_due'])
+    slot = 0
+    for r in rows:
+        r['sends_at'] = None
+        r['state_detail'] = ''
+        if r['replied_at']:
+            r['drip_state'], r['state_detail'] = 'stopped', 'replied'
+        elif r['do_not_send']:
+            r['drip_state'], r['state_detail'] = 'stopped', 'do not send'
+        elif r['status'] in _TERMINAL_STATUSES:
+            r['drip_state'], r['state_detail'] = 'stopped', r['status']
+        elif not r['next_due']:
+            r['drip_state'] = 'finished'
+        elif not camp.get('is_running'):
+            r['drip_state'], r['state_detail'] = 'paused', 'drip stopped'
+        else:
+            # 1. THE WINDOW. Never before business hours in the FIRM's timezone.
+            at = next_open(max(r['next_due'], now),
+                           r['timezone'] or op_tz, wins)
+            if at is None:
+                r['drip_state'] = 'held'
+                r['state_detail'] = 'no business hours are enabled'
+                continue
+            # 2. THE PACE. One email per gap, in queue order, inside the caps.
+            if r['next_due'] <= now:
+                i = ready.index(r) if r in ready else slot
+                if i >= daily_left:
+                    r['drip_state'] = 'held'
+                    r['state_detail'] = "today's cap is spent"
+                    at = next_open(now + datetime.timedelta(days=1),
+                                   r['timezone'] or op_tz, wins) or at
+                elif i >= hourly_left:
+                    r['drip_state'] = 'held'
+                    r['state_detail'] = 'hourly cap'
+                    at = max(at, now + datetime.timedelta(hours=1))
+                else:
+                    at = max(at, now + datetime.timedelta(seconds=gap * i))
+                    r['drip_state'] = 'sending' if i == 0 else 'queued'
+                    if i:
+                        r['state_detail'] = f'{i} ahead of it'
+                slot += 1
+            else:
+                r['drip_state'] = 'waiting'
+                if at > r['next_due']:
+                    r['state_detail'] = 'outside business hours until then'
+            r['sends_at'] = at
+    # ⚠️ RENDERED IN THE FIRM'S OWN TIMEZONE, because the window that decides it
+    # is the firm's. A UTC timestamp here reads as 4:00pm for a 9:00am send and
+    # is nobody's clock - not the operator's and not the recipient's. The
+    # operator's time comes with it, since "when will this send" is also a
+    # question about their own day.
+    for r in rows:
+        r['sends_at_local'], r['sends_at_op'] = _both_clocks(
+            r.get('sends_at'), r.get('timezone') or op_tz, op_tz)
+        r['next_due_local'], _ = _both_clocks(
+            r.get('next_due'), r.get('timezone') or op_tz, op_tz)
+    return rows
+
+
+def _both_clocks(at, tzname, op_tz):
+    """(their time, your time) as short strings, or ('', '')."""
+    if at is None:
+        return '', ''
+    from zoneinfo import ZoneInfo
+
+    def _fmt(zone):
+        try:
+            local = at.astimezone(ZoneInfo(zone))
+        except Exception:
+            return at.strftime('%b %-d %-I:%M%p').lower() + ' UTC'
+        return local.strftime('%b %-d %-I:%M%p').lower()
+
+    theirs = _fmt(tzname)
+    yours = _fmt(op_tz)
+    return theirs, (yours if yours != theirs else '')
 
 
 def held(campaign_id=None) -> dict:

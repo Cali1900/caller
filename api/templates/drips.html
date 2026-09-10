@@ -86,7 +86,7 @@
 {% else %}
 <table>
 <tr><th>Firm</th><th>Contact</th><th>Email</th><th class="right">Step sent</th>
-    <th>Last sent</th><th>Clicks by step</th><th>Next step due</th><th>Status</th></tr>
+    <th>Last sent</th><th>Clicks by step</th><th>Sends</th><th>In the sequence</th></tr>
 {% for l in roster %}
 <tr>
   <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a>
@@ -101,16 +101,30 @@
       {% else %}&mdash;{% endif %}</td>
   <td class="dim">{% if l.clicks %}<b>{{ l.clicks }}</b> &mdash; {{ l.clicked_steps }}
       {% else %}&mdash;{% endif %}</td>
-  <td class="dim">{% if l.replied_at %}<span class="pill completed">replied &mdash; stopped</span>
-      {% elif l.next_due %}step {{ l.next_step }} &middot; {{ l.next_due.strftime('%b %-d %-I:%M%p')|lower }}
-      {% else %}<span class="dim">sequence finished</span>{% endif %}</td>
-  <td><span class="pill">{{ l.status }}</span></td>
+  {# ⚠️ WHEN IT WILL ACTUALLY GO, not the delay arithmetic. The raw schedule said
+     1:38am - true, and outside every sending window, so nothing was ever going
+     at 1:38am. sends_at is that time advanced through business hours in the
+     FIRM's timezone and then through the pace queue. The raw figure is kept in
+     the tooltip because the difference is the interesting part. #}
+  <td class="dim">{% if l.sends_at %}step {{ l.next_step }} &middot;
+        <span title="scheduled {{ l.next_due_local }} their time &mdash; moved to the next open window, then its place in the send queue">{{ l.sends_at_local }}</span>
+        <span class="dim">their time{% if l.sends_at_op %} &middot; {{ l.sends_at_op }} yours{% endif %}</span>
+      {% else %}&mdash;{% endif %}</td>
+  {# ⚠️ THE DRIP'S STATUS, NOT THE CALL'S. leads.status said "completed", which
+     means the dialer finished with this lead and says nothing about the
+     sequence. Derived from the same exclusions due() applies, so the roster and
+     the sender cannot disagree. #}
+  <td><span class="pill {{ 'completed' if l.drip_state in ('sending','waiting','queued')
+                           else 'human_review' if l.drip_state == 'held' else '' }}">{{ l.drip_state }}</span>
+      {% if l.state_detail %}<span class="dim">{{ l.state_detail }}</span>{% endif %}</td>
 </tr>
 {% endfor %}
 </table>
-<p class="dim">&ldquo;Next step due&rdquo; is the SCHEDULE. A cap or closed
-   business hours shifts when it actually goes out without changing whether it is
-   coming &mdash; the waiting count is above.</p>
+<p class="dim">&ldquo;Sends&rdquo; is when the mail will actually go &mdash; the
+   schedule, moved to the next open window in the <b>firm's</b> timezone, then
+   through the pace queue. Hover it for the raw scheduled time. &ldquo;In the
+   sequence&rdquo; is the drip's own state, not the call status: a lead the
+   dialer marked <code>completed</code> may be mid-sequence here.</p>
 {% endif %}
 
 {% include '_sequence.html' %}
