@@ -280,6 +280,46 @@ soft-deleted rows keep their positions. `drip_steps_position` is already
 `UNIQUE (campaign_id, position) WHERE deleted_at IS NULL`, which is the same
 intent expressed correctly, and `PARK_OFFSET` exists to reorder underneath it.
 
+### ⚠️ STANDING RULE — NOT NULL does not mean "has a value"
+
+`email_sends.to_email` was `text NOT NULL` from the day it was created, and the
+database still ended up holding two rows that claimed a send to nobody. Migration
+036's backfill wrote `coalesce(l.dm_email, '')`, because it had to satisfy the
+constraint and had nothing to write.
+
+**A writer that must satisfy NOT NULL and has nothing to say will write the empty
+string** — and from then on every reader has to know that `''` means absent. That
+knowledge lives nowhere, so it is forgotten, and `''` starts being counted: the
+drip roster read "1 sent, sequence finished" for a lead that had received nothing.
+
+The same shape in the same table, one column over: `sent_at timestamptz NOT NULL
+DEFAULT now()`. Any insert that did not mention it declared a send. **The DEFAULT
+did the lying** — no code ever decided to claim those emails had gone.
+
+So, for any column where absence is possible:
+
+| what you want | what to write |
+|---|---|
+| it must have a real value | `NOT NULL` **and** `CHECK (btrim(col) <> '')` |
+| it may be absent | nullable, and **no default that fabricates content** |
+| it records an event | require its attribution: `CHECK (at IS NULL OR by IS NOT NULL)` |
+
+That last one is the general form of the fix: **an event column and its actor
+column travel together.** `sent_at` without `sent_by` is a claim nobody made.
+
+The corollary for handlers, which cost a separate field the same day: **absent is
+not empty.** `Form('')` makes a missing field arrive as `''`, indistinguishable
+from a box the operator cleared — so a partial POST silently blanked whatever it
+did not mention (`api/web.py`'s `lead_edit` erased `dm_email`, which ends a drip;
+`campaign_save` erased notes). Declare optional form fields `Form(None)` and write
+only what was posted. Breaks 134 and 135.
+
+⚠️ And when a constraint like this goes on, **expect the test fixtures to fail
+first**. Twenty did here, because `_join()` inserted `sent_at` with no `sent_by` —
+fabricating the exact shape the constraint exists to forbid. A fixture that builds
+impossible data is not testing the real thing, so fix the fixture, never the
+constraint.
+
 ### ⚠️ STANDING RULE — a table designed to OUTLIVE A LEAD will outlive TEST ISOLATION
 
 `tests/conftest.py` truncates between tests, and `TRUNCATE ... CASCADE` only

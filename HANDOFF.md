@@ -4,7 +4,7 @@ Outbound calling for CounselorAI. Dials personal-injury firms through Retell,
 scores every call, drafts a follow-up email that a person sends by hand.
 
 **Read this for state. Do not trust anyone's memory, including mine.**
-Last updated 2026-09-09. Every number in the table below was read from
+Last updated 2026-09-10. Every number in the table below was read from
 `caller_db`, not carried over from the previous edit.
 
 ---
@@ -14,11 +14,13 @@ Last updated 2026-09-09. Every number in the table below was read from
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260909_040_step_editor.sql` |
-| Tests | 692 passed, 1 skipped |
-| Break pass | **103 definitions** (97–104 added for the drip). Full pass GREEN across all 103 at 2026-09-09T17:23Z, suite 632. The FIRST run of that pass FAILED — break 100 reported GREEN because a drip test was passing with zero clicks; see masked-guard row 12 in README.md |
-| Campaigns | `C1` only (type `call`), **stopped**. `C2` no longer exists |
-| Data | 1,087 leads — **all 1,087 in the pool, 0 queued** — 2 calls, 3 suppressed, 0 archived |
+| Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
+| Tests | 755 passed, 1 skipped |
+| Break pass | **134 definitions.** Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
+| Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
+| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **stopped**). C1's follow-up drip is `Drip 1` |
+| Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
+| Email | 1 lead on a drip (`texLaw`), 1 lead with `emailed_at`, **1** `email_sends` row, 4 clicks, 4 live steps on Drip 1 |
 
 **NOTHING IS DIALING, for THREE independent reasons.** Any one of them alone
 would be enough; all three are deliberate:
@@ -34,14 +36,49 @@ separate deliberate act on `/leads`. **Do not assume `C1` is running because
 someone said so — read `is_running`.** It was believed to be running on
 2026-09-09 and was not.
 
+**AND NOTHING EMAILS EITHER**, for reasons worth keeping separate from the
+dialing ones:
+
+1. **`Drip 1` is stopped.** `RUNNING_STOP` excludes every step of a stopped
+   drip, and `drip_for()` refuses to route a lead INTO a stopped drip — so a
+   lead getting email 1 today joins no drip at all. That is the live answer to
+   "C1 is wired to Drip 1 and leads still go nowhere": the wiring is right and
+   the destination is off. The call campaign's screen says so in the
+   Follow-up drip card.
+2. **`email_1_mode` is `'manual'`** everywhere, so `sender.due()` selects
+   nothing. Drafts are generated on capture and sent by hand.
+3. The **email dev guard** (`guards.assert_emailable`) is the last line and
+   fails closed.
+
+Starting `Drip 1` is what turns email on. Unlike starting a call campaign, it
+needs no queueing step — a lead is on the drip or it is not — so treat it as the
+more consequential of the two switches.
+
 ### ⚠️ Open before this is "done"
 
-1. **Rename `leads.stage`** — see "Naming" below. Recorded, not done.
-2. Auto-send is BUILT and deliberately not wired — see the standing decision
-   on it below, and `tests/test_no_dead_config.py`.
-3. `archived_contacts` has a reader (`archive.contacts()`) and tests but **no
-   template** — the lead detail screen does not yet show "emailed Sep 2026, 2
-   clicks, said no on Sep 8".
+All three items that stood here on 2026-09-09 are **done** and were verified
+against the database, not from memory: `leads.stage` is renamed (no `%stage%`
+column remains on `leads`), `archived_contacts` renders on lead detail, and
+auto-send's wiring is now described accurately under Standing decisions — the
+worker DOES call both senders, paced.
+
+What is actually open:
+
+1. **No WARM-UP RAMP.** `email_daily_cap` is a fixed number, so "10 this week,
+   25 next" means lowering it by hand each week. A new sending domain earns
+   volume; a cap cannot express earning it over time.
+2. **`enter()` has no email guard.** A lead with no address can be put on a drip
+   by hand — `texLaw` was, before it had one — and it then sits in the backlog
+   looking live while every tick refuses it. It should refuse loudly at
+   assignment, the way the phone+timezone pair does.
+3. **Break filenames are not zero-padded**, so the pass runs them in lexical
+   order (`100_` before `10_` before `44_`) and `--from=N` is a POSITION, not a
+   break number. ~134 renames; nobody has asked for it.
+4. **Reply ingest stays parked** and reply detection stays MANUAL. Read the
+   fail-closed section before assuming otherwise — it is the one paragraph here
+   that stops `REPLIED_STOP` being read as more than it is.
+5. The four in `BACKLOG.md`: `B-batch-review`, `B-objection-scoring`,
+   `B-scorer-model-cost`, `B-demands-volume`.
 
 ---
 
@@ -511,6 +548,48 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## Phantom sends, and why the fix was a constraint (2026-09-10)
+
+Two `email_sends` rows claimed a send that never happened: `sent_at` set, `to_email`
+empty, `sent_by` NULL, both on stopped campaigns. One was linked to a drip step, so
+the roster showed a lead as **"1 sent, sequence finished"** on a four-step drip it
+had received nothing from.
+
+**Migration 036's own backfill wrote them**, carrying per-lead click tokens onto
+send rows so live tracked links kept working:
+
+```sql
+SELECT l.lead_id, NULL, 1, coalesce(l.dm_email, ''), NULL,
+       coalesce(l.emailed_at, now()), l.emailed_by, l.click_token
+  FROM leads l WHERE l.click_token IS NOT NULL;
+```
+
+For a lead with a token but no send, both `coalesce`s invented one. `now()` is
+evaluated once per statement, which is why the fabricated rows share a microsecond
+— that shared timestamp is the evidence it was one operation, not two events.
+
+**Nothing was transmitted.** No `email_audit` row, no `sent_by`, no recipient, and
+the leads' own `emailed_at` was still NULL — the rows claimed a send the leads did
+not. That asymmetry is the fastest way to test any future suspicion: `email_audit`
+records every attempt including refusals, so a send with no audit row did not
+happen.
+
+Migration 042 (see the README rule, *NOT NULL does not mean "has a value"*):
+
+    email_sends_has_recipient       CHECK (btrim(to_email) <> '')
+    email_sends_sent_is_attributed  CHECK (sent_at IS NULL OR sent_by IS NOT NULL)
+
+**PREPARED stays a real state** — `sent_at` NULL with a live token, which is what
+lets a draft's tracked link work before the mail goes. It just cannot be anonymous.
+
+Two callers coerced a missing address to `''` and now refuse instead:
+`clicks.token_for` (a tracked link for a lead with nowhere to send it) and
+`drip.record_send`. The CHECK makes it impossible; the refusals make it legible by
+naming the lead. Break 135.
+
+⚠️ **Deleting phantom rows must never delete one a click points at.** A click is
+evidence of a real open whatever the send row says about itself.
 
 ## The drip has its own area now: /drips (2026-09-10)
 
@@ -1126,30 +1205,50 @@ UNKNOWN TOKEN STILL REDIRECTS so a scanner learns nothing from a 404.
 section below. **Reply ingest stays parked** and reply detection stays MANUAL;
 read the fail-closed warning above before assuming otherwise.
 
+**Built 2026-09-10**, all of it pushed and covered by the full pass:
+
+| | |
+|---|---|
+| Sending pace | gap, hourly cap, daily cap, business hours in the FIRM's timezone. Migration 041, breaks 124–130 |
+| `/drips` | the drip's own area — roster, per-step sent/clicked/%, the sequence editor. Breaks 132–133 |
+| Follow-up drip selector | on the call campaign's page, plus the warning when it is none. Break 131 |
+| Four save-loss fixes | non-contiguous indices, blank clones, refusals eating typed copy, step 1's ceiling. Breaks 120–123 |
+| Phantom sends | migration 042's two CHECKs, and the two coercions that could rewrite them. Break 135 |
+| Absent is not empty | a partial POST can no longer blank a field it never mentioned. Break 134 |
+
 Still specified and **not built**: the four in `BACKLOG.md` —
 `B-batch-review`, `B-objection-scoring`, `B-scorer-model-cost`,
-`B-demands-volume`.
+`B-demands-volume` — plus the warm-up ramp and the `enter()` email guard listed
+under "Open before this is done".
 
 ---
 
 ## Standing decisions
 
-* **Nothing auto-sends TODAY — and that is a decision, not a gap.**
-  Auto-send is fully BUILT: `api/autosend.py` is the gate (seven exclusions,
-  breaks 41–47) and `api/sender.py` is the only thing that puts campaign mail
-  on the wire. It is off in two independent ways:
-    1. `campaign_configs.email_1_mode` defaults to `'manual'`, and
-       `autosend.eligibility()` returns NOT-OK for anything but `'auto'`.
-    2. **`sender.run_once()` is deliberately NOT wired into `api/worker.py`**
-       while the drip is parked. `web.py` calls only `send_manual()` — the
-       "Send now" button a person presses.
-  So setting a campaign to `'auto'` today sends nothing. That is intentional,
-  and `tests/test_no_dead_config.py` asserts the worker does not call the
-  sender loop so the next person reads a decision instead of a missing line.
-  **Wiring one line into the worker turns on automated outbound email to law
-  firms.** Do it deliberately, with the drip's reply gate in place, or not at
-  all. Drafts are generated on capture and sent by hand; anything after a
-  reply, Sean sends from his own inbox.
+* **EMAIL 1 does not auto-send. A RUNNING DRIP DOES send its steps.**
+  ⚠️ This entry said the opposite until 2026-09-10 and was the most misleading
+  paragraph in the file. `sender.run_once()` and `drip.run_once()` are BOTH wired
+  into `api/worker.py` now — that happened when the drip shipped, along with the
+  reply gate it was conditional on. The test in
+  `tests/test_no_dead_config.py` was INVERTED rather than deleted: it is
+  `test_the_worker_runs_both_send_loops`, and break 94 now guards the opposite of
+  what it once did — that the call is never quietly dropped, because a drip that
+  silently stops advancing is worse than a loud break.
+
+  What remains true, and what each switch does:
+    1. **Email 1 is off by configuration.** `campaign_configs.email_1_mode`
+       defaults to `'manual'` and `autosend.eligibility()` returns NOT-OK for
+       anything else, so `sender.due()` selects nothing. Drafts are generated on
+       capture and sent by hand.
+    2. **A drip's steps are gated by `is_running` on the DRIP campaign.**
+       Starting a drip is what turns automated outbound email to law firms on.
+       There is no queueing step to forget: a lead is on the drip or it is not.
+    3. Both share one paced slot in the worker — one email per jittered gap,
+       drip first — plus the hourly and daily caps and business hours. See the
+       pacing section.
+  Anything after a reply, Sean sends from his own inbox. Reply detection stays
+  MANUAL, so the gate that stops a drip mailing someone who already answered is
+  a person ticking a box — read the fail-closed section before relying on it.
 * **Links, never attachments.** The sample demand is a link; there is a guard
   test pinning that it is never attached. No media library.
 * **No open tracking** — Apple pre-loads pixels, the number is noise. Replies
