@@ -430,13 +430,17 @@ def overlaps(campaign_id=None) -> list:
     return out
 
 
-# ⚠️ `engaged` MEANS THEY ANSWERED. A drip accepting it keeps emailing someone
-# who replied or clicked, which is the opposite of what the reply-stop is for.
-# That can be deliberate - a nurture sequence for warm leads - so it WARNS.
+# ⚠️ `engaged` MEANS THEY REPLIED. A drip accepting it keeps emailing someone who
+# answered, which is the opposite of what the reply-stop is for. That can be
+# deliberate - a nurture sequence - so it WARNS rather than refusing.
+#
+# `clicked` is deliberately NOT here: a click is interest, not an answer, and a
+# drip that drops a firm the moment it reads the sample is the worst version of
+# this feature. `clicked` is also the natural gate for a warm-lead sequence.
 CAUTION_STATUSES = {
-    'engaged': ('they replied or clicked - a drip accepting this keeps emailing '
-                'someone who already answered, which is the opposite of the '
-                'reply-stop'),
+    'engaged': ('they REPLIED - a drip accepting this keeps emailing someone who '
+                'already answered, which is the opposite of the reply-stop. A '
+                'click is `clicked`, not this: interest is not an answer'),
     'demo_pending': ('a demo is already booked with them - a cold sequence '
                      'reads badly at that point'),
     'human_review': 'these are flagged for you to look at, not to be mailed',

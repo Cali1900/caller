@@ -14,7 +14,12 @@ forward through stages it can observe, and a human moves it anywhere.
 """
 
 # Forward order. Only these are auto-advanceable.
-RANK = {'emailed': 1, 'engaged': 2, 'demo_booked': 3, 'won': 4}
+# ⚠️ `clicked` SITS BETWEEN `emailed` AND `engaged`, so the ladder stays
+# forward-only: a click promotes emailed -> clicked, and a reply promotes either
+# to engaged. A click is INTEREST, NOT AN ANSWER - that has been the rule since
+# click tracking was built, and it decides whether a firm keeps hearing from us
+# now that status governs sending.
+RANK = {'emailed': 1, 'clicked': 2, 'engaged': 3, 'demo_booked': 4, 'won': 5}
 
 # Statuses the system must never touch automatically.
 #

@@ -199,7 +199,12 @@ def record(token: str, user_agent: str = '', ip: str = None):
             mins = cur.fetchone()['minutes_since_sent']
             # A click is engagement - the strongest signal short of a reply.
             from api import pipeline
-            pipeline.advance(cur, lead['lead_id'], 'engaged', 'clicked the sample link')
+            # ⚠️ `clicked`, NOT `engaged`. A click is interest, not an answer.
+            # Advancing to `engaged` conflated the two, and once status governed
+            # drip membership it ENDED THE SEQUENCE for a firm that had just read
+            # the sample - the worst version of this feature.
+            pipeline.advance(cur, lead['lead_id'], 'clicked',
+                             'clicked the sample link')
             cur.execute(
                 """INSERT INTO activity (lead_id, kind, summary, detail)
                    VALUES (%s, 'click', 'clicked the sample link', %s)""",

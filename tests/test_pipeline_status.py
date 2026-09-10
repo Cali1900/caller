@@ -76,10 +76,28 @@ def test_sending_email_1_advances_to_emailed(db):
     assert _status(lid) == 'emailed'
 
 
-def test_a_click_advances_to_engaged(db, client):
+def test_a_click_advances_to_clicked_not_engaged(db, client):
+    """
+    ⚠️ CHANGED 2026-09-10: `engaged` means they REPLIED. A click is interest, not
+    an answer - the standing rule since click tracking was built - and once drip
+    membership became derived from status, recording a click as `engaged` ENDED
+    THE SEQUENCE for a firm that had just read the sample.
+
+    `clicked` is its own rung between `emailed` and `engaged`, so the ladder stays
+    forward-only and a reply still outranks a click.
+    """
     lid = _lead(status='emailed', phone='+14245558201')
     client.get(f'/c/{clicks.token_for(lid)}', follow_redirects=False)
-    assert _status(lid) == 'engaged'
+    assert _status(lid) == 'clicked'
+
+
+def test_a_reply_outranks_a_click_on_the_ladder(db, client):
+    """clicked -> engaged is forward; engaged -> clicked is not."""
+    from api import pipeline
+    lid = _lead(status='clicked', phone='+14245558299')
+    assert pipeline.may_advance('clicked', 'engaged') is True
+    assert pipeline.may_advance('engaged', 'clicked') is False
+    assert pipeline.may_advance('emailed', 'clicked') is True
 
 
 def test_a_click_never_drags_a_booked_lead_backwards(db, client):

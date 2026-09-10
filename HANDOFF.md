@@ -16,10 +16,10 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
-| Tests | 774 passed, 1 skipped |
-| Break pass | **138 definitions** (136–139 added since, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
+| Tests | 777 passed, 1 skipped |
+| Break pass | **139 definitions** (136–139 added since, verified RED individually; the last FULL pass was over 134). Full pass OK across all 134 at **2026-09-10T04:23Z** — every removal turned its OWN named test red, all 14 chunks restore-verified against the md5 manifest, and the suite green with the guards back. Recorded in `.break_pass_last` |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
-| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed` and `imported` |
+| Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
 | Email | 1 lead on a drip (`texLaw`), 1 lead with `emailed_at`, **1** `email_sends` row, 4 clicks, 4 live steps on Drip 1 |
 
@@ -603,18 +603,25 @@ worker sends one email per jittered gap, so two drips' mail to one firm is
 60–300s apart rather than simultaneous. Before the gap this key would have been a
 burst. Within a drip the rule is unchanged, and break 104 still guards it.
 
-**3. ⚠️ A CLICK NOW REMOVES A LEAD FROM AN `emailed`-ONLY DRIP.** `clicks.record()`
-promotes to `engaged` (`pipeline.advance`), so under a gate accepting only
-`emailed` a click ends the sequence — contradicting the standing rule that *a
-click is interest, not an answer; only a reply stops it.*
+**3. ⚠️ A CLICK GOT ITS OWN STATUS — `engaged` NOW MEANS THEY REPLIED.**
+`clicks.record()` advanced to `engaged`, conflating "they replied" with "they read
+the sample". Harmless while status governed dialling; decisive once it governed
+SENDING, because a drip accepting `emailed` lost the lead the moment it clicked —
+**a firm that read the sample stopped hearing from us**, invisibly, with nothing
+failing.
 
-`engaged` conflates two different facts: they replied, or they clicked. That was
-harmless while status governed dialling. **Now that status governs sending it
-decides whether a warm lead keeps hearing from us.** Both cases are asserted
-(`test_a_click_falls_a_lead_out_of_an_emailed_only_gate`) rather than left to be
-discovered from a firm that went quiet. **This wants a decision:** accept
-`engaged` on the drip, or give a click its own status so a reply and a click stop
-meaning the same thing.
+`clicked` is its own rung, **between `emailed` and `engaged`**, so `pipeline.RANK`
+stays forward-only: a click promotes `emailed`→`clicked`, a reply promotes either
+to `engaged`, and `clicked`→`emailed` is refused. **`replied_at` is untouched and
+separate** — `REPLIED_STOP` is not a status check, so a reply stops a sequence
+whatever any gate accepts, including one that accepts `engaged`.
+
+Migration 046 re-labelled the existing rows: a lead with clicks and no
+`replied_at` became `clicked`; one with `replied_at` stayed `engaged`. `Drip 1`
+accepts `clicked`, so a click no longer ends its sequence. Break 140.
+
+`clicked` is deliberately **not** in `CAUTION_STATUSES` — accepting it is the
+correct default, and it is also the natural gate for a warm-lead drip later.
 
 ### The four rules and where each lives
 

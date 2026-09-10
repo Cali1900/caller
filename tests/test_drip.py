@@ -322,7 +322,7 @@ def test_a_click_does_NOT_stop_the_sequence(db, dripc):
     """
     lid = _lead(db, days_ago=40)
     campaigns.update(dripc['campaign_id'],
-                     accepted_statuses=['emailed', 'engaged'])
+                     accepted_statuses=['emailed', 'clicked'])
     _join(db, lid, dripc['campaign_id'], sent_steps=1)
     with dbm.get_conn() as conn:
         with conn.cursor() as cur:
@@ -1765,17 +1765,16 @@ def test_no_token_is_minted_for_a_lead_with_no_address(db):
         'a token was minted for a lead with nowhere to send it'
 
 
-def test_a_click_falls_a_lead_out_of_an_emailed_only_gate(db, dripc):
+def test_a_click_sets_clicked_not_engaged(db, dripc):
     """
-    ⚠️ THE FLIP SIDE, ASSERTED SO IT CANNOT BE A SURPRISE. clicks.record()
-    promotes the lead to `engaged`, so a drip accepting only `emailed` loses that
-    lead the moment it clicks - the sequence stops for someone who just showed
-    interest.
+    ⚠️ `engaged` MEANS THEY REPLIED. A click is interest, not an answer - the
+    standing rule since click tracking was built, and it decides whether a firm
+    keeps hearing from us now that status governs sending.
 
-    This is the status gate working exactly as designed, and it is a consequence
-    worth having in a test rather than discovering from a firm that went quiet.
-    Accepting `engaged` on the drip is what keeps them in; that is the operator's
-    call, and the config screen warns either way.
+    clicks.record() used to advance to `engaged`, conflating the two. A drip
+    accepting `emailed` but not `clicked` still loses the lead when it clicks -
+    that is the gate working as designed and the operator's call. What must never
+    happen is a click being recorded as an ANSWER.
     """
     from api import campaigns as _c
     lid = _lead(db, days_ago=40, phone_e164='+15553339777')
@@ -1791,8 +1790,10 @@ def test_a_click_falls_a_lead_out_of_an_emailed_only_gate(db, dripc):
                             ORDER BY seq LIMIT 1""", (lid,))
             tok = cur.fetchone()['click_token']
     assert clicks.record(tok, user_agent='t') is not None
-    assert _get_lead(db, lid)['status'] == 'engaged', \
-        'the premise: a click promotes the lead'
+    assert _get_lead(db, lid)['status'] == 'clicked', \
+        'a click was recorded as `engaged` - that means they ANSWERED'
+    assert _get_lead(db, lid)['replied_at'] is None, \
+        'a click set replied_at - only a reply may do that'
     assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
         'the gate did not drop a lead whose status left the accepted set'
 
@@ -1921,3 +1922,35 @@ def test_email_1_is_attributed_to_step_1_so_the_sequence_can_finish(db, dripc):
     stats = {r['position']: r for r in drip.step_stats(cid)}
     assert stats[1]['sent'] == 1, \
         f"step 1 still reads {stats[1]['sent']} sent for a lead that received it"
+
+
+def test_a_reply_still_outranks_a_click_and_stops_everything(db, dripc):
+    """
+    replied_at is unchanged and separate: REPLIED_STOP is not a status check, so a
+    reply stops the sequence whatever any gate accepts. The ladder is forward-only
+    - a click promotes emailed -> clicked, a reply promotes either to engaged.
+    """
+    from api import campaigns as _c, pipeline
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed', 'clicked', 'engaged'])
+    lid = _lead(db, days_ago=11, phone_e164='+15553338200')
+    _join(db, lid, cid, sent_steps=1)
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], 'the premise'
+
+    # a gate that accepts `engaged` still cannot outrank the reply itself
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE leads SET status='engaged', replied_at=now()
+                            WHERE lead_id=%s""", (lid,))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'a replied lead was still selected because a gate accepted `engaged`'
+
+    # AND THE RUNGS ARE IN ORDER: clicked cannot go back to emailed.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='clicked' WHERE lead_id=%s",
+                        (lid,))
+            assert pipeline.advance(cur, lid, 'emailed', 'test') is False, \
+                'the pipeline went backwards from clicked to emailed'
+            assert pipeline.advance(cur, lid, 'engaged', 'test') is True, \
+                'a reply could not promote a clicked lead'

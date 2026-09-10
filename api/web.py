@@ -62,7 +62,7 @@ templates.env.filters['ago'] = _ago
 STATUSES = ['new', 'queued', 'dialing', 'completed', 'callback', 'no_answer',
             'email_path', 'demo_pending', 'dnc', 'max_attempts', 'failed',
             'human_review', 'paused',
-            'emailed', 'engaged', 'demo_booked', 'won', 'lost',
+            'emailed', 'clicked', 'engaged', 'demo_booked', 'won', 'lost',
             'lost_no_response', 'bad_email', 'archived',
             # An email-only lead: never called, never mailed. Its own status
             # rather than 'new' (which means waiting to be dialled, and these
@@ -1086,8 +1086,8 @@ MANUAL_STATUSES = (
     'new', 'queued', 'completed', 'callback', 'no_answer', 'email_path',
     'max_attempts', 'failed', 'paused', 'human_review', 'demo_pending',
     # the pipeline
-    'emailed', 'engaged', 'demo_booked', 'won', 'lost', 'lost_no_response',
-    'bad_email',
+    'emailed', 'clicked', 'engaged', 'demo_booked', 'won', 'lost',
+    'lost_no_response', 'bad_email',
 )
 
 
