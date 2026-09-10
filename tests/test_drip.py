@@ -294,13 +294,37 @@ def test_inserting_a_step_does_not_send_backwards(db, dripc):
 # ==========================================================================
 
 def test_a_recorded_reply_stops_the_sequence(db, dripc):
-    """The gate. Once replied_at is set, nothing more goes out."""
+    """
+    The gate. Once replied_at is set, nothing more goes out.
+
+    ⚠️ THE GATE MUST ACCEPT `engaged`, OR THIS TEST PROVES NOTHING.
+    record_reply() sets replied_at AND status = 'engaged'. With a gate of
+    ['emailed'] the STATUS excludes the lead, REPLIED_STOP is never consulted,
+    and removing it changes nothing - break 99 reported GREEN on the full pass
+    for exactly that reason.
+
+    ⚠️ AND THIS IS THE GUARD THAT MATTERS MOST. Reply detection is manual, so
+    REPLIED_STOP is what stands between a firm that answered and another
+    automated email. The status gate happens to cover it TODAY only because no
+    drip accepts `engaged` - and accepting `engaged` is a configuration the
+    operator is explicitly allowed to choose. A guard that is covered by
+    accident is not covered.
+
+    So the gate accepts `engaged` here, and only REPLIED_STOP can do the work.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed', 'engaged'])
     lid = _lead(db, days_ago=40)
-    _join(db, lid, dripc['campaign_id'], sent_steps=1)
+    _join(db, lid, cid, sent_steps=1)
     assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], 'premise'
+
     stages.record_reply(lid, note='not interested')
+    assert _get_lead(db, lid)['status'] == 'engaged', \
+        'the premise: a reply sets engaged, which this gate ACCEPTS'
     assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
-        'a lead that replied is still being dripped'
+        'a lead that replied is still being dripped - and the gate cannot be '\
+        'what stopped it, because this gate accepts its status'
 
 
 def test_a_click_does_NOT_stop_the_sequence(db, dripc):
@@ -308,17 +332,19 @@ def test_a_click_does_NOT_stop_the_sequence(db, dripc):
     A click is interest, not an answer. Stopping on one would silence the
     sequence exactly when it is working. ONLY A REPLY STOPS IT.
 
-    ⚠️ AND THE STATUS GATE CHANGED WHAT THAT DEPENDS ON. clicks.record() promotes
-    the lead to `engaged` (api/clicks.py, pipeline.advance), so under a gate
-    accepting only `emailed` a CLICK now takes the lead out of the drip - the
-    click stops the sequence after all, by a route nobody chose.
+    ⚠️ AND A CLICK HAS ITS OWN STATUS SO THIS STAYS TRUE. clicks.record() used to
+    advance to `engaged`, conflating "they replied" with "they read the sample" -
+    harmless while status governed dialling, decisive once it governed SENDING,
+    because a firm that read the sample stopped hearing from us.
 
-    `engaged` conflates two different facts: they replied, or they clicked. That
-    was harmless while status only governed dialling. Now that status governs
-    SENDING it decides whether a warm lead keeps hearing from us, and the drip
-    accepting `engaged` is what preserves the original rule. That is a decision
-    about who receives mail, so the gate here states it explicitly rather than
-    inheriting it.
+    It advances to `clicked` now, one rung below `engaged`, and a drip accepting
+    `clicked` keeps the sequence running. replied_at still stops everything,
+    separately: REPLIED_STOP is not a status check.
+
+    (This docstring described the OLD behaviour for one commit after the code
+    changed, because an earlier edit to it failed silently and was not checked. A
+    comment describing behaviour that has changed is a false witness - the same
+    shape as masked-guard row 17.)
     """
     lid = _lead(db, days_ago=40)
     campaigns.update(dripc['campaign_id'],
