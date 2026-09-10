@@ -44,7 +44,22 @@ TOTAL=$(ls scripts/breaks/*.py | wc -l)
 # The checkpoint is only valid for the set of definitions it was made against.
 # Adding or renaming a break shifts every index after it, so a resume against a
 # changed set would skip guards while reporting a complete pass.
-FINGERPRINT=$(ls scripts/breaks/*.py | md5sum | cut -d' ' -f1)
+#
+# ⚠️ AND IT MUST COVER THE CODE UNDER TEST, NOT JUST THE FILE LIST. This hashed
+# `ls scripts/breaks/*.py`, so editing api/ between chunks left the fingerprint
+# unchanged and the resume looked valid - a complete pass reported over code that
+# had partly been replaced. That happened on 2026-09-10: two masked guards were
+# fixed in api/drip.py at chunk 11, and the re-run resumed at 11 with breaks 1-10
+# still "recorded green" against the previous content of that file.
+#
+# So the fingerprint is the CONTENT of every break definition plus the content of
+# every file they target. Any edit to either invalidates the checkpoint, which is
+# the only honest answer: a guard verified against code that no longer exists has
+# not been verified.
+_targets=$(grep -h "^TARGET" scripts/breaks/*.py \
+             | sed "s/^TARGET *= *['\"]//;s/['\"].*$//" | sort -u)
+FINGERPRINT=$(cat scripts/breaks/*.py $_targets 2>/dev/null \
+                | md5sum | cut -d' ' -f1)
 
 # A STALE ANCHOR COSTS TWENTY MINUTES TO FIND at chunk eight, and a second
 # to find here. It also catches the worse case - an anchor matching twice,

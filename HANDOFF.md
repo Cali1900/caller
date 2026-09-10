@@ -1255,7 +1255,7 @@ do-not-send is `email_do_not_send` (migration 029), read by
 `archive.is_do_not_send()` and checked in `autosend.eligibility()` AND again in
 both `sender.send_one()` and `sender.send_manual()`. Breaks 80–81.
 
-## Three defects found in the SAFETY TOOLING itself
+## Four defects found in the SAFETY TOOLING itself
 
 All three shared one shape: **the tool reported success without doing the
 thing.** Worth knowing about, because that shape is not caught by tests passing.
@@ -1294,6 +1294,26 @@ thing.** Worth knowing about, because that shape is not caught by tests passing.
    start at all. It now looks for the `caller-caller-api-run` container — the
    thing that would actually deadlock the database. **A safety check that fires
    on itself is worse than none: it trains you to bypass it.**
+
+### 4. The resume checkpoint did not cover the code under test (2026-09-10)
+
+`break_pass_all.sh` fingerprinted its checkpoint with `ls scripts/breaks/*.py` —
+**the file list, not the code**. So editing `api/` between chunks left the
+fingerprint unchanged and a resume looked valid.
+
+It happened immediately: the pass stopped at chunk 11–20 with two masked guards,
+both fixed in `api/drip.py`, and the re-run **resumed at 11 with breaks 1–10 still
+recorded green against the previous content of that file**. It would have reported
+a complete pass over 139 while ten of them were proven against code that no longer
+existed.
+
+The fingerprint is now the CONTENT of every break definition plus the content of
+every file they target, so any edit to either invalidates the checkpoint. That is
+the only honest answer: **a guard verified against code that no longer exists has
+not been verified.**
+
+Same family as the other three, and as the masked guards themselves — a report
+that reads as a verification and carries no evidence for the thing it claims.
 
 ## The ladder ENDS at L2 (2026-09-08)
 
