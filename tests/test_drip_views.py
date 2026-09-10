@@ -43,14 +43,21 @@ def test_the_drips_page_shows_email_columns_and_no_call_columns(db, dripc, clien
     lid = _lead(db, days_ago=11, company='Roster Firm')
     _join(db, lid, cid, sent_steps=2)
 
-    r = client.get(f'/drips?drip={cid}')
+    # ⚠️ THE ROSTER MOVED to /drips/<id>/leads on 2026-09-10. The config page had
+    # stacked four things with four jobs; the roster is the only one about
+    # individual firms.
+    r = client.get(f'/drips/{cid}/leads')
     assert r.status_code == 200, r.text[:400]
     body = r.text
     # 'Sends' and 'In the sequence' replaced 'Next step due' and 'Status' on
     # 2026-09-10: the first showed delay arithmetic rather than when the mail
     # would go, and the second showed the CALL status, which means nothing here.
-    for want in ('Firm', 'Contact', 'Email', 'Step sent', 'Last sent',
-                 'Clicks by step', 'Sends', 'In the sequence'):
+    # The final column set from the 2026-09-10 brief: 'Step sent' became
+    # 'In the sequence' (a NUMBER, not a repeat of the schedule), and 'Clicks by
+    # step' became 'Clicks' - it counts what the firm actually clicked, email 1
+    # included, so "by step" was no longer true.
+    for want in ('Firm', 'Contact', 'Email', 'In the sequence', 'Last sent',
+                 'Clicks', 'Sends'):
         assert want in body, f'the roster is missing the {want!r} column'
     assert 'Roster Firm' in body
     # ⚠️ AND NOT THE CALL COLUMNS. These mean nothing on a drip and their absence
@@ -516,7 +523,7 @@ def test_the_status_column_is_the_DRIPS_not_the_CALLS(db, dripc, client):
     assert row['drip_state'] in ('waiting', 'sending', 'queued', 'held'), \
         f"a mid-sequence lead reads as {row['drip_state']!r}"
 
-    body = client.get(f'/drips?drip={cid}').text
+    body = client.get(f'/drips/{cid}/leads').text
     assert 'In the sequence' in body, 'the column is still labelled Status'
 
 
@@ -634,3 +641,172 @@ def test_a_held_lead_says_WHICH_cap_is_holding_it(db, dripc, client):
     row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
     assert row['drip_state'] == 'held', row
     assert 'cap' in row['state_detail'], row
+
+
+# ==========================================================================
+# the roster redesign: its own page, a number, and a pill that does something
+# ==========================================================================
+
+def test_a_lead_emailed_only_by_the_call_campaign_shows_a_REAL_last_sent(db, dripc, client):
+    """
+    ⚠️ THE DRIP'S VIEW WAS LITERAL INSTEAD OF USEFUL. LAST SENT read "—" for a firm
+    that HAD been emailed, because the query counted only this drip's steps and
+    email 1 carries step_id NULL. The firm was emailed; the screen said nothing
+    happened.
+    """
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, company='Called First',
+                phone_e164='+15553330500')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='emailed' WHERE lead_id=%s", (lid,))
+            # email 1, from the call campaign: no step_id at all
+            cur.execute("""INSERT INTO email_sends
+                               (lead_id, seq, to_email, sent_at, sent_by,
+                                from_email, click_token)
+                           VALUES (%s, 1, 'a@b.test', now() - interval '3 days',
+                                   'operator', 'info@counselorai.io',
+                                   'tok-last-1')""", (lid,))
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['last_sent'] is not None, \
+        'a firm that received email 1 reads as never emailed'
+    assert row['last_what'] == 'email 1', \
+        f"the source is not named: {row['last_what']!r}"
+    body = client.get(f'/drips/{cid}/leads').text
+    assert 'email 1' in body, 'the page does not name what was last sent'
+
+
+def test_a_lead_with_no_drip_sends_reads_0_not_waiting(db, dripc, client):
+    """
+    ⚠️ A NUMBER, NOT A WORD. "waiting" repeated the schedule the next column
+    already gives and answered nothing. A lead arriving from the caller reads 0 -
+    this drip has sent it nothing, which is both true and the thing worth knowing.
+    """
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, company='Nothing Yet',
+                phone_e164='+15553330501')
+    _join(db, lid, cid)
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['progress'] == '0', f"expected '0', got {row['progress']!r}"
+    assert row['drip_state'] not in ('stopped', 'done', 'held'), row['drip_state']
+
+    # AND PARTWAY THROUGH READS "n of total".
+    lid2 = _lead(db, days_ago=11, company='Partway', phone_e164='+15553330502')
+    _join(db, lid2, cid, sent_steps=2)
+    row2 = [r for r in drip.roster(cid) if r['lead_id'] == lid2][0]
+    assert row2['progress'] == '2 of 4', row2['progress']
+
+
+def test_a_lead_that_no_longer_qualifies_STAYS_VISIBLE_as_stopped(db, dripc, client):
+    """
+    ⚠️ IT USED TO VANISH. Filtering strictly on the gate meant a firm disappeared
+    from the page the moment it replied - mid-sequence, no row, no reason - which
+    is the invisibility every other guard here exists to prevent. It stays, marked
+    stopped, WITH the reason.
+    """
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, company='Gone Quiet', phone_e164='+15553330503')
+    _join(db, lid, cid, sent_steps=1)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='paused' WHERE lead_id=%s", (lid,))
+
+    rows = {r['company']: r for r in drip.roster(cid)}
+    assert 'Gone Quiet' in rows, \
+        'a firm this drip had mailed vanished when its status changed'
+    assert rows['Gone Quiet']['drip_state'] == 'stopped'
+    assert 'paused' in rows['Gone Quiet']['state_detail'], \
+        'the reason it left is not on the row'
+
+    # AND A LEAD THAT NEVER RECEIVED ANYTHING still does not appear - there is
+    # nothing to show, and a roster of everyone who ever failed to qualify is noise.
+    never = _lead(db, days_ago=11, company='Never Here',
+                  phone_e164='+15553330504')
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='won' WHERE lead_id=%s", (never,))
+    assert 'Never Here' not in {r['company'] for r in drip.roster(cid)}
+
+
+def test_the_pill_gives_both_clocks_and_names_every_layer(db, dripc, client):
+    """
+    ⚠️ BOTH TIMES, ALWAYS - the whole subject of the column is which clock applies.
+    And "why this date" names each layer that moved it, because a date with no
+    reasoning is a number to be trusted or doubted and nothing else.
+    """
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, company='Pill Firm',
+                phone_e164='+15553330505', timezone='America/New_York')
+    _join(db, lid, cid, sent_steps=1)
+    row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
+    assert row['sends_at_local'], 'no firm-local time'
+    assert row['sends_at_op'], \
+        'no operator-local time - a lead in another timezone must show both'
+    assert row['why'], 'the date is given with no reasoning at all'
+    assert any('Step' in w for w in row['why']), row['why']
+
+    body = client.get(f'/drips/{cid}/leads').text
+    for want in ('Their time', 'Your time', 'Why this date', 'SEND NOW'):
+        assert want in body, f'the pill is missing {want!r}'
+
+
+def test_send_now_skips_the_TIMING_and_nothing_else(db, dripc, client):
+    """
+    ⚠️ THE EXCLUSIONS ARE NOT THE TIMING. row_for_send() builds the row selection
+    would have built for a step that is NOT due - that is the override - and hands
+    it to the SAME send_step, so every exclusion inside that transaction still
+    applies. A hand-rolled send with its own guard list is how one gets forgotten.
+    """
+    from api import archive
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=0, company='Not Due Yet',
+                phone_e164='+15553330506')
+    _join(db, lid, cid, sent_steps=1)
+
+    # step 3 is 10 days out: nothing has selected it, and SEND NOW still finds it.
+    step3 = drip.steps(cid)[2]
+    assert not [r for r in drip.due()
+                if str(r['lead_id']) == str(lid)
+                and r['step_id'] == step3['step_id']], 'the premise: not due'
+    row = drip.row_for_send(cid, lid, step3['step_id'])
+    assert row is not None and row['position'] == 3, row
+
+    # BUT AN EXCLUDED LEAD IS STILL REFUSED. The address is on the do-not-send
+    # list, which is not a timing question.
+    archive.do_not_send('pat@whitfield.test', 'unsubscribed', 'test')
+    r = drip.send_step(_cfg_for_tests(), row)
+    assert r['sent'] is False, 'SEND NOW sent to a do-not-send address'
+    assert 'do-not-send' in r['detail'] or 'ineligible' in r['detail'], r
+
+    # AND A STEP FROM ANOTHER DRIP IS NOT SENDABLE THROUGH THIS ONE.
+    other = campaigns.create('DRIP-OTHER-SN', campaign_type='drip')['campaign_id']
+    drip.save_steps(other, [{'delay_days': 0, 'subject': 's', 'body': 'b'}])
+    assert drip.row_for_send(cid, lid, drip.steps(other)[0]['step_id']) is None
+
+
+def test_send_now_asks_before_it_fires(db, dripc, client):
+    """It puts mail on the wire, so it confirms - the same shape as every other
+    control here that can."""
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, company='Confirm Me', phone_e164='+15553330507')
+    _join(db, lid, cid, sent_steps=1)
+    step = drip.steps(cid)[1]
+    r = client.post(f'/drips/{cid}/leads/{lid}/send-now',
+                    data={'step_id': str(step['step_id'])},
+                    follow_redirects=False)
+    assert 'confirm_send' in r.headers['location'], r.headers['location']
+    body = client.get(r.headers['location'].split('?', 1)[1]
+                      and f'/drips/{cid}/leads?confirm_send={lid}:{step["step_id"]}').text
+    assert 'Yes' in body and 'send step' in body, \
+        'the confirmation does not say what it is about to do'
+
+
+def _cfg_for_tests():
+    from api.config import load_config
+    return load_config()

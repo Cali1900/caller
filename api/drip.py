@@ -891,13 +891,25 @@ def roster(campaign_id, limit: int = 500) -> list:
     from status_changed_at, later steps from emailed_at. It deliberately ignores the
     pace layers: a cap shifts when a mail goes out, and a roster that showed
     "next: never" for a lead behind a cap would be lying about the sequence.
+
+    ⚠️ TWO QUESTIONS, TWO CTEs. "How far through THIS drip" and "when was this firm
+    last emailed" are different, and answering both from one join is what made a
+    firm that had received email 1 read as "—", never emailed. `own` counts this
+    drip's steps; `any_send` counts every send to the lead whatever produced it.
+
+    ⚠️ AND IT INCLUDES LEADS THAT NO LONGER QUALIFY, if this drip has sent them
+    something. Filtering strictly on the gate meant a firm VANISHED from the page
+    the moment it replied - mid-sequence, with no row and no reason - which is the
+    same invisibility every other guard here exists to prevent. A lead that never
+    received anything and does not qualify still does not appear: there is nothing
+    to show.
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                WITH sent AS (
-                    SELECT es.lead_id, es.step_id, es.sent_at, es.send_id,
-                           st.position
+                -- THIS DRIP's steps: the sequence number.
+                WITH own AS (
+                    SELECT es.lead_id, es.sent_at, st.position
                       FROM email_sends es
                       JOIN drip_steps st ON st.step_id = es.step_id
                      WHERE es.sent_at IS NOT NULL
@@ -905,17 +917,48 @@ def roster(campaign_id, limit: int = 500) -> list:
                 ),
                 per_lead AS (
                     SELECT lead_id, count(*) AS steps_sent,
-                           max(sent_at) AS last_sent, max(position) AS last_step
-                      FROM sent GROUP BY lead_id
+                           max(position) AS last_step
+                      FROM own GROUP BY lead_id
+                ),
+                -- ⚠️ EVERY SEND TO THE LEAD, whatever produced it. email 1 from a
+                -- call campaign carries step_id NULL, so the join above drops it -
+                -- which is how a firm that HAD been emailed read as "never".
+                any_send AS (
+                    SELECT es.lead_id, es.sent_at, es.send_id,
+                           st.position, st.campaign_id AS step_campaign
+                      FROM email_sends es
+                      LEFT JOIN drip_steps st ON st.step_id = es.step_id
+                     WHERE es.sent_at IS NOT NULL
+                ),
+                last_any AS (
+                    SELECT lead_id, sent_at AS last_sent,
+                           -- NAME WHAT IT WAS. "step 2" only when it is a step of
+                           -- THIS drip; another drip's step is not this drip's
+                           -- step 2, and calling it that would be a lie that reads
+                           -- as fact.
+                           CASE WHEN position IS NULL THEN 'email 1'
+                                WHEN step_campaign = %(cid)s
+                                     THEN 'step ' || position
+                                ELSE 'another drip' END AS last_what
+                      FROM (SELECT *, row_number() OVER (PARTITION BY lead_id
+                                        ORDER BY sent_at DESC) AS rn
+                              FROM any_send) x
+                     WHERE rn = 1
                 ),
                 clicks AS (
-                    SELECT s.lead_id,
-                           string_agg(DISTINCT 'step ' || s.position, ', '
-                                      ORDER BY 'step ' || s.position) AS by_step,
-                           count(*) AS n
-                      FROM sent s
+                    SELECT s.lead_id, count(*) AS n,
+                           string_agg(DISTINCT
+                             CASE WHEN s.position IS NULL THEN 'email 1'
+                                  WHEN s.step_campaign = %(cid)s
+                                       THEN 'step ' || s.position
+                                  ELSE 'another drip' END, ', ') AS by_step
+                      FROM any_send s
                       JOIN email_clicks ec ON ec.send_id = s.send_id
                      GROUP BY s.lead_id
+                ),
+                total AS (
+                    SELECT count(*) AS n FROM drip_steps
+                     WHERE campaign_id = %(cid)s AND deleted_at IS NULL AND enabled
                 ),
                 nxt AS (
                     SELECT l.lead_id,
@@ -926,7 +969,10 @@ def roster(campaign_id, limit: int = 500) -> list:
                                     ELSE l.emailed_at
                                          + (st.delay_days || ' days')::interval
                                END) AS due_at,
-                           min(st.position) AS next_step
+                           min(st.position) AS next_step,
+                           -- the step_id that goes with that position, for SEND NOW
+                           (array_agg(st.step_id ORDER BY st.position))[1]
+                               AS next_step_id
                       FROM leads l
                       JOIN campaign_configs gc ON gc.campaign_id = %(cid)s
                       JOIN drip_steps st ON st.campaign_id = %(cid)s
@@ -941,22 +987,29 @@ def roster(campaign_id, limit: int = 500) -> list:
                        l.emailed_at, l.replied_at, l.status_changed_at,
                        l.lead_source, l.timezone,
                        coalesce(p.steps_sent, 0) AS steps_sent,
-                       p.last_sent, p.last_step,
+                       la.last_sent, la.last_what, p.last_step,
+                       (SELECT n FROM total) AS total_steps,
                        coalesce(cl.n, 0) AS clicks, cl.by_step AS clicked_steps,
-                       n.due_at AS next_due, n.next_step,
+                       n.due_at AS next_due, n.next_step, n.next_step_id,
                        EXISTS (SELECT 1 FROM email_do_not_send d
                                 WHERE d.email = lower(btrim(l.dm_email)))
                            AS do_not_send
                   FROM leads l
                   LEFT JOIN per_lead p ON p.lead_id = l.lead_id
+                  LEFT JOIN last_any la ON la.lead_id = l.lead_id
                   LEFT JOIN clicks   cl ON cl.lead_id = l.lead_id
                   LEFT JOIN nxt      n  ON n.lead_id = l.lead_id
                   JOIN campaign_configs gc2 ON gc2.campaign_id = %(cid)s
                  -- ⚠️ WHO IS ON THIS DRIP IS A QUESTION ABOUT STATUS. There is no
                  -- membership column to read; the roster asks the same question
                  -- the sender asks, so the two cannot disagree about who is here.
-                 WHERE l.status = ANY(gc2.accepted_statuses)
-                 ORDER BY coalesce(p.last_sent, l.status_changed_at) DESC NULLS LAST
+                 -- QUALIFIES NOW, **OR** THIS DRIP HAS SENT IT SOMETHING. The
+                 -- second half is what keeps a firm visible after it replies
+                 -- instead of vanishing mid-sequence with no row and no reason.
+                 WHERE (l.status = ANY(gc2.accepted_statuses)
+                        OR p.steps_sent IS NOT NULL)
+                 ORDER BY coalesce(la.last_sent, l.status_changed_at)
+                          DESC NULLS LAST
                  LIMIT %(lim)s""", {'cid': campaign_id, 'lim': limit})
             rows = [dict(r) for r in cur.fetchall()]
     return _with_drip_state(campaign_id, rows)
@@ -998,45 +1051,93 @@ def _with_drip_state(campaign_id, rows) -> list:
          if r['next_due'] and r['replied_at'] is None and not r['do_not_send']
          and r['status'] not in _TERMINAL_STATUSES],
         key=lambda r: r['next_due'])
+    accepted = camp.get('accepted_statuses') or []
     slot = 0
     for r in rows:
         r['sends_at'] = None
         r['state_detail'] = ''
+        r['why'] = []
+        # ⚠️ A NUMBER IN THE NORMAL CASE, a word only when something ended or
+        # blocked it. "waiting" repeated the schedule the next column already
+        # gives and answered nothing; "0" says the drip has sent this lead
+        # nothing, which is what a firm arriving from the caller actually is.
+        n, total = r['steps_sent'], r['total_steps'] or 0
+        r['progress'] = (str(n) if n in (0, 1) or not total
+                         else f'{n} of {total}')
         if r['replied_at']:
             r['drip_state'], r['state_detail'] = 'stopped', 'replied'
         elif r['do_not_send']:
             r['drip_state'], r['state_detail'] = 'stopped', 'do not send'
         elif r['status'] in _TERMINAL_STATUSES:
             r['drip_state'], r['state_detail'] = 'stopped', r['status']
+        elif r['status'] not in accepted:
+            # IT WAS IN THIS DRIP AND IS NOT ANY MORE. Only reachable because the
+            # roster keeps leads this drip has sent to - see roster().
+            r['drip_state'] = 'stopped'
+            r['state_detail'] = f"status is {r['status']}, which this drip does not accept"
         elif not r['next_due']:
-            r['drip_state'] = 'finished'
+            r['drip_state'] = 'done'
         elif not camp.get('is_running'):
             r['drip_state'], r['state_detail'] = 'paused', 'drip stopped'
         else:
             # 1. THE WINDOW. Never before business hours in the FIRM's timezone.
+            # ⚠️ NAME EVERY LAYER THAT MOVED IT. A date with no reasoning is a
+            # number to be trusted or doubted and nothing else; a held lead with
+            # no reason is the same as no answer.
+            step_no = r['next_step']
+            if step_no == 1:
+                mins = next((st['delay_minutes'] or 0)
+                            for st in steps(campaign_id)
+                            if st['position'] == 1)
+                r['why'].append(
+                    f'Step 1 sends {mins // 1440} day(s) after the status changed'
+                    f' to {r["status"]}.' if mins else
+                    'Step 1 sends as soon as the lead qualifies.')
+            else:
+                days = next((st['delay_days'] for st in steps(campaign_id)
+                             if st['position'] == step_no), None)
+                r['why'].append(
+                    f'Step {step_no} sends {days} days after the first send.')
+
             at = next_open(max(r['next_due'], now),
                            r['timezone'] or op_tz, wins)
             if at is None:
                 r['drip_state'] = 'held'
                 r['state_detail'] = 'no business hours are enabled'
+                r['why'].append('No business hours are enabled, so nothing can '
+                                'go out at all.')
                 continue
+            if at > max(r['next_due'], now):
+                r['why'].append(
+                    'Moved to the next open window in the firm\'s timezone '
+                    f'({r["timezone"] or op_tz}).')
             # 2. THE PACE. One email per gap, in queue order, inside the caps.
             if r['next_due'] <= now:
                 i = ready.index(r) if r in ready else slot
                 if i >= daily_left:
                     r['drip_state'] = 'held'
                     r['state_detail'] = "today's cap is spent"
+                    r['why'].append(
+                        f"Today's cap of {counts.get('daily_cap')} is spent "
+                        f"({counts.get('sent_today')} sent), so it waits for "
+                        f"tomorrow.")
                     at = next_open(now + datetime.timedelta(days=1),
                                    r['timezone'] or op_tz, wins) or at
                 elif i >= hourly_left:
                     r['drip_state'] = 'held'
                     r['state_detail'] = 'hourly cap'
+                    r['why'].append(
+                        f"The hourly cap of {counts.get('hourly_cap')} is spent "
+                        f"({counts.get('sent_hour')} sent this hour).")
                     at = max(at, now + datetime.timedelta(hours=1))
                 else:
                     at = max(at, now + datetime.timedelta(seconds=gap * i))
                     r['drip_state'] = 'sending' if i == 0 else 'queued'
                     if i:
                         r['state_detail'] = f'{i} ahead of it'
+                        r['why'].append(
+                            f'{i} lead(s) ahead of it in the pace queue, one '
+                            f'every {int(gap)}s.')
                 slot += 1
             else:
                 r['drip_state'] = 'waiting'
@@ -1184,6 +1285,36 @@ def upcoming(within_hours: int = 24, limit: int = 200):
 # ---------------------------------------------------------------------------
 # sending a step
 # ---------------------------------------------------------------------------
+
+def row_for_send(campaign_id, lead_id, step_id):
+    """
+    The row send_step expects, for ONE lead and ONE step, ignoring the schedule.
+
+    ⚠️ THE SAME SHAPE due() RETURNS, deliberately. SEND NOW skips only the timing,
+    so it must hand send_step exactly what selection would have handed it - then
+    every exclusion inside that transaction applies unchanged. A hand-rolled send
+    with its own guard list is how one gets forgotten.
+
+    None when the step is not on this drip or the lead has no address: refused in
+    the caller's terms rather than as a constraint violation deeper down.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT l.lead_id, l.company, l.dm_email, l.dm_name, l.emailed_at,
+                       s.step_id, s.position, s.delay_days, s.subject, s.body,
+                       c.campaign_id AS drip_campaign_id, c.name AS drip_name,
+                       now() AS due_at
+                  FROM leads l
+                  JOIN campaign_configs c ON c.campaign_id = %s
+                  JOIN drip_steps s ON s.campaign_id = c.campaign_id
+                                   AND s.step_id = %s AND s.deleted_at IS NULL
+                 WHERE l.lead_id = %s
+                   AND btrim(coalesce(l.dm_email, '')) <> ''""",
+                (campaign_id, step_id, lead_id))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
 
 def send_step(cfg, row) -> dict:
     """

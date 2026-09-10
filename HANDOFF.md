@@ -16,8 +16,8 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
-| Tests | 777 passed, 1 skipped |
-| Break pass | **139 definitions.** Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
+| Tests | 783 passed, 1 skipped |
+| Break pass | **142 definitions** (140–142 added for the roster redesign, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -549,6 +549,55 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## The drip roster: its own page, a number, and a pill that acts (2026-09-10)
+
+    /drips?drip=<id>        config - gate, pacing, sender, per-step rates, editor
+    /drips/<id>/leads       the roster, on its own
+
+Split because the config screen had stacked four things with four jobs. The
+per-step `sent / clicked / %` table **stays on config**: it is about the SEQUENCE,
+not about individual firms.
+
+    FIRM · CONTACT · EMAIL · IN THE SEQUENCE · LAST SENT · CLICKS · SENDS
+
+### Three things that were reporting instead of answering
+
+**LAST SENT counted only this drip's steps**, so a firm that had received email 1
+from its call campaign read `—` — an inner join on `drip_steps` dropped `step_id
+NULL` before anything else happened. **Two questions need two CTEs**: `own` counts
+this drip's steps for the sequence number, `any_send` counts every send for LAST
+SENT and CLICKS, each labelled (`email 1`, `step 2`, `another drip`). Break 140.
+
+**IN THE SEQUENCE is a number.** `0` when this drip has sent nothing — which is
+what a lead arriving from the caller *is* — `1`, `2 of 4`, and a **word** only when
+something ended or blocked it: `done`, `stopped`, `held`, `paused`. "waiting"
+repeated the schedule the next column already gives.
+
+**⚠️ A LEAD THAT NO LONGER QUALIFIES STAYS VISIBLE.** The roster used to filter
+strictly on the gate, so a firm mid-sequence **vanished the moment it replied** —
+no row, no reason. It now stays if this drip has sent it something, marked
+`stopped` with the status that removed it. One that never received anything and
+does not qualify still does not appear: nothing to show. Break 141.
+
+### The pill is the control
+
+A `<details>` panel, not a fetch — it works with no javascript, and its two forms
+are **siblings**, because forms cannot nest and that already made the sequence
+editor unusable once. It carries both clocks always (the column's whole subject is
+which clock applies), a *why this date* list naming **every layer that moved it**
+— step delay, the business-hours clamp, position in the pace queue, which cap is
+holding it — the status dropdown, `View lead`, and `SEND NOW`.
+
+⚠️ **SEND NOW SKIPS THE TIMING AND NOTHING ELSE.** The delay, business hours and
+the pace queue live in SELECTION; every exclusion lives inside `send_step`'s
+transaction. So `row_for_send()` builds the row selection would have built and
+hands it to the **same** `send_step` — not a second path with its own copy of the
+guards, which is the kind that eventually forgets one. It refuses a step belonging
+to another drip, and confirms before firing. Break 142.
+
+The status dropdown posts to the **same** `/leads/<id>/status` route as lead
+detail, with a `back` parameter: one control, two places, one meaning.
 
 ## ⚠️ DRIP MEMBERSHIP IS DERIVED FROM STATUS (2026-09-10)
 

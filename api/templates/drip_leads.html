@@ -1,0 +1,124 @@
+{% extends "base.html" %}{% block title %}{{ c.name }} leads · Caller{% endblock %}
+{% block body %}
+<h1>{{ c.name }} &mdash; leads</h1>
+<p class="sub">
+  <a href="/drips?drip={{ c.campaign_id }}">&larr; the sequence and its per-step rates</a>
+  &nbsp;·&nbsp;
+  <a href="/campaign/{{ c.campaign_id }}">gate, pacing and sender</a>
+  &nbsp;·&nbsp;
+  {% if c.is_running %}<span class="livedot on"></span> running
+  {% else %}<span class="livedot off"></span> <b>stopped</b> &mdash; nothing sends
+  {% endif %}
+</p>
+{% if msg %}<div class="banner{% if 'REJECT' in msg or 'REFUSED' in msg %} warn{% endif %}">{{ msg }}</div>{% endif %}
+
+{% if not roster %}
+  <p class="dim">Nobody. A lead is here while its <b>status</b> is one of
+     {% for st in c.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+     &mdash; and it stays visible after it leaves, if this drip has sent it
+     anything.</p>
+{% else %}
+<table>
+<tr><th>Firm</th><th>Contact</th><th>Email</th>
+    <th title="How far through THIS drip. A number normally; a word only when something ended or blocked it">In the sequence</th>
+    <th>Last sent</th><th class="right">Clicks</th><th>Sends</th></tr>
+{% for l in roster %}
+<tr>
+  <td><a href="/leads/{{ l.lead_id }}">{{ l.company }}</a></td>
+  <td class="dim">{{ l.dm_name or '—' }}</td>
+  <td class="dim">{{ l.dm_email or '—' }}
+      {% if l.do_not_send %}<span class="pill dnc" title="on the email do-not-send list">no send</span>{% endif %}</td>
+
+  {# ⚠️ A NUMBER IN THE NORMAL CASE. "waiting" repeated the schedule the next
+     column already gives and answered nothing. A word only when the sequence
+     ended or something is blocking it. #}
+  <td>{% if l.drip_state in ('stopped', 'done', 'held', 'paused') %}
+        <span class="pill {{ 'human_review' if l.drip_state == 'held' else '' }}">{{ l.drip_state }}</span>
+        {% if l.state_detail %}<span class="dim">{{ l.state_detail }}</span>{% endif %}
+      {% else %}<b>{{ l.progress }}</b>
+      {% endif %}</td>
+
+  {# ⚠️ THE REAL LAST SEND, whatever produced it. This read "—" for a firm that
+     had received email 1 from its call campaign, because the query only counted
+     THIS drip's steps - the drip's view being literal instead of useful. #}
+  <td class="dim">{% if l.last_sent %}{{ l.last_sent.strftime('%b %-d') }}
+        <span class="dim">{{ l.last_what }}</span>
+      {% else %}&mdash;{% endif %}</td>
+
+  <td class="right dim">{% if l.clicks %}<b>{{ l.clicks }}</b>
+        <span class="dim">{{ l.clicked_steps }}</span>
+      {% else %}&mdash;{% endif %}</td>
+
+  {# THE PILL IS THE CONTROL. A <details> rather than a fetch: it works with no
+     javascript, and the panel's two forms are SIBLINGS - forms cannot nest, which
+     is what made the sequence editor unusable once already. #}
+  <td>{% if l.sends_at %}
+      <details class="card" style="margin:0;padding:6px">
+        <summary style="cursor:pointer">step {{ l.next_step }} &middot;
+          {{ l.sends_at_local }}</summary>
+        <div style="padding:8px 2px 2px">
+          <p style="margin:0 0 6px"><b>This email sends on or around</b></p>
+          <table style="box-shadow:none;margin:0 0 8px">
+            <tr><td class="dim">Their time</td><td><b>{{ l.sends_at_local }}</b>
+                <span class="dim">{{ l.timezone or operator_tz }}</span></td></tr>
+            <tr><td class="dim">Your time</td><td><b>{{ l.sends_at_op or l.sends_at_local }}</b>
+                <span class="dim">{{ operator_tz }}</span></td></tr>
+          </table>
+          <p class="dim" style="margin:0 0 4px"><b>Why this date</b></p>
+          <ul class="dim" style="margin:0 0 8px 16px">
+            {% for w in l.why %}<li>{{ w }}</li>{% endfor %}
+            {% if not l.why %}<li>Its delay has elapsed and the window is open.</li>{% endif %}
+          </ul>
+
+          {# THE STATUS DROPDOWN IS RIGHT HERE, and does exactly what the one on
+             lead detail does - including dropping the lead out of this drip. #}
+          <form method="post" action="/leads/{{ l.lead_id }}/status" class="toolbar"
+                style="margin:0 0 6px">
+            <input type="hidden" name="back" value="/drips/{{ c.campaign_id }}/leads">
+            <select name="status">
+              {% for st in manual_statuses %}
+              <option value="{{ st }}" {% if st == l.status %}selected{% endif %}>{{ st }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="ghost">Change status</button>
+          </form>
+          <p class="dim" style="margin:0 0 8px">⚠️ A status this drip does not
+            accept removes the lead from it &mdash; it will receive no further
+            steps. This drip accepts
+            {% for st in c.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+
+          <div class="toolbar" style="margin:0">
+            <a href="/leads/{{ l.lead_id }}" class="ghost">View lead</a>
+            {% if confirm_send == l.lead_id|string ~ ':' ~ l.next_step_id|string %}
+            <form method="post" class="inline"
+                  action="/drips/{{ c.campaign_id }}/leads/{{ l.lead_id }}/send-now">
+              <input type="hidden" name="step_id" value="{{ l.next_step_id }}">
+              <input type="hidden" name="confirm" value="yes">
+              <button type="submit" class="danger">Yes &mdash; send step
+                {{ l.next_step }} to {{ l.company }} now</button>
+            </form>
+            <a href="/drips/{{ c.campaign_id }}/leads">Cancel</a>
+            {% else %}
+            <form method="post" class="inline"
+                  action="/drips/{{ c.campaign_id }}/leads/{{ l.lead_id }}/send-now">
+              <input type="hidden" name="step_id" value="{{ l.next_step_id }}">
+              <button type="submit" class="gold">SEND NOW</button>
+            </form>
+            {% endif %}
+          </div>
+          <p class="dim" style="margin:6px 0 0">SEND NOW skips the <b>timing</b>
+            only &mdash; the step delay, business hours and the pace queue. Every
+            exclusion still applies: do-not-send, suppression, no address, a
+            recorded reply, and the drip's own switch.</p>
+        </div>
+      </details>
+      {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+<p class="dim">&ldquo;Sends&rdquo; is when the mail will actually go: the schedule,
+   moved to the next open window in the <b>firm's</b> timezone, then through the
+   pace queue. Click it for both clocks, the reasoning, and the controls.
+   {% if pace.held %}<b>{{ pace.held }}</b> waiting on pace right now.{% endif %}</p>
+{% endif %}
+{% endblock %}

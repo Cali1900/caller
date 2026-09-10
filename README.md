@@ -245,6 +245,29 @@ Cheap, mechanical, and it caught what three rounds of care did not. The same
 shape as everything else in this file: prefer a check that reads the real artefact
 over a claim about the thing that produces it.
 
+### ⚠️ STANDING RULE — verify the guards you TOUCHED; a full pass is on request only
+
+Default: after a change, run `break_pass.sh --only=<def>` for each break whose
+guard or test the change touched. Minutes, not hours.
+
+A **full** `break_pass_all.sh` runs only when Sean asks for one. It is ~40 minutes
+of compute and, on 2026-09-10, six attempts — and every restart was paid for by a
+finding that individual verification would have caught just as well, because each
+finding was about ONE definition.
+
+What the full pass buys that individual runs do not: it catches a guard masked by
+something OUTSIDE its own definition — break 99's `REPLIED_STOP` was masked by the
+status gate, and break 105's by its own successor. Those are found by running
+everything, not by running the thing you just edited. So it is worth doing
+deliberately, at a point where the tree is otherwise finished, rather than after
+every commit.
+
+Which definitions did a change touch? `TARGET` names the file, `EXPECT` names the
+test:
+
+    grep -l "TARGET = 'api/drip.py'" scripts/breaks/*.py
+    grep -l "EXPECT = 'test_the_thing_i_edited'" scripts/breaks/*.py
+
 ### ⚠️ STANDING RULE — verification may READ live data, never WRITE it
 
 The rule above says fetch the real route before reporting a UI fix. It has a hole,

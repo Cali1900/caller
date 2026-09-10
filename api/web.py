@@ -1164,7 +1164,12 @@ def lead_unarchive(lead_id: str, unarchived_by: str = Form('operator')):
 
 @router.post('/leads/{lead_id}/status')
 def lead_status(lead_id: str, status: str = Form(...),
-                changed_by: str = Form('operator')):
+                changed_by: str = Form('operator'), back: str = Form('')):
+    # ⚠️ `back` RETURNS THE OPERATOR WHERE THEY WERE. The status dropdown exists in
+    # two places now - lead detail and the drip roster's pill - and it is ONE
+    # control: same route, same rules, same timeline entry. What differs is only
+    # where you land, and sending someone to a different screen than the one they
+    # acted on is its own small lie about what happened.
     """
     THE OPERATOR OVERRULES THE SYSTEM.
 
@@ -1183,7 +1188,7 @@ def lead_status(lead_id: str, status: str = Form(...),
                f'use Archive for archived - it needs a reason and a return '
                f'date, and a bare status would rest the lead forever.')
         return RedirectResponse(
-            f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}', status_code=303)
+            (f'{back}?msg={urllib.parse.quote(msg)}' if back else f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}'), status_code=303)
 
     with db.get_conn() as conn:
         with conn.cursor() as cur:
@@ -1223,7 +1228,7 @@ def lead_status(lead_id: str, status: str = Form(...),
                        'would leave the lead un-archived but unusable, and '
                        'invisible to the nightly sweep.')
                 return RedirectResponse(
-                    f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+                    (f'{back}?msg={urllib.parse.quote(msg)}' if back else f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}'),
                     status_code=303)
             if was == status:
                 return RedirectResponse(
@@ -1236,7 +1241,7 @@ def lead_status(lead_id: str, status: str = Form(...),
                    VALUES (%s,'status','status changed BY HAND',%s)""",
                 (lead_id, f'{was} -> {status}  (by {changed_by or "operator"})'))
     msg = f'Status set to {status} by hand (was {was}).'
-    return RedirectResponse(f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}',
+    return RedirectResponse((f'{back}?msg={urllib.parse.quote(msg)}' if back else f'/leads/{lead_id}?saved={urllib.parse.quote(msg)}'),
                             status_code=303)
 
 
@@ -1778,8 +1783,8 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
         'hdr': hdr, 'drips': drips, 'c': chosen, 'msg': msg,
         'step_stats': stats,
         'any_sent': any(r['sent'] for r in stats),
-        'roster': _drip_mod.roster(cid),
         'pace': _drip_mod.held(cid),
+        'roster_count': len(_drip_mod.roster(cid)),
         # WHO FEEDS IT. The wiring lives on the CALL campaign, so without this
         # the drip area cannot answer "where do these leads come from" - and it
         # is the screen the drip work actually happens on.
@@ -1801,6 +1806,67 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
         'sample_lead': drafts_mod.SAMPLE_LEAD,
         'placeholders': drafts_mod.PLACEHOLDERS,
         'seq_msg': ''})
+
+
+@router.get('/drips/{campaign_id}/leads', response_class=HTMLResponse)
+def drip_leads_page(request: Request, campaign_id: str, msg: str = '',
+                    confirm_send: str = ''):
+    """
+    THE ROSTER, on its own page.
+
+    ⚠️ SPLIT FROM THE CONFIG PAGE because that screen had stacked the metrics, the
+    per-step table, the roster and the sequence editor - four things with four
+    different jobs, and the roster is the only one that is about individual firms.
+    The per-step table stays on config: it is about the SEQUENCE, not the leads.
+    """
+    cfg = _cfg()
+    with db.get_conn() as conn:
+        hdr = _header(conn, cfg)
+    camp = campaigns.get(campaign_id)
+    if camp is None or camp['type'] != 'drip':
+        return HTMLResponse('<p>no such drip</p>', status_code=404)
+    return templates.TemplateResponse(request, 'drip_leads.html', {
+        'hdr': hdr, 'c': camp, 'msg': msg,
+        'roster': _drip_mod.roster(campaign_id),
+        'pace': _drip_mod.held(campaign_id),
+        'operator_tz': cfg.OPERATOR_TIMEZONE,
+        # The status dropdown lives in the pill, so it needs the same list and the
+        # same warning the lead page uses - one control, two places, one meaning.
+        'manual_statuses': MANUAL_STATUSES,
+        'status_sends': _drip_mod.sending_statuses(),
+        'confirm_send': confirm_send})
+
+
+@router.post('/drips/{campaign_id}/leads/{lead_id}/send-now')
+def drip_send_now(campaign_id: str, lead_id: str, step_id: str = Form(...),
+                  confirm: str = Form('')):
+    """
+    Send one step to one lead NOW, overriding the schedule.
+
+    ⚠️ IT SKIPS THE TIMING AND NOTHING ELSE. The step delay, business hours and
+    the pace queue all live in SELECTION; every exclusion - do-not-send,
+    suppression, no address, replied, the campaign switch, the dev guard - lives
+    inside send_step's transaction. So this builds the row selection would have
+    built and calls the SAME send_step: not a second path with its own copy of the
+    guards, which is the kind that eventually forgets one.
+
+    Confirmed first, because it puts mail on the wire.
+    """
+    if confirm != 'yes':
+        return RedirectResponse(
+            f'/drips/{campaign_id}/leads?confirm_send={lead_id}:{step_id}',
+            status_code=303)
+    row = _drip_mod.row_for_send(campaign_id, lead_id, step_id)
+    if row is None:
+        msg = ('REJECTED: that step is not on this drip, or the lead has no '
+               'address - nothing was sent.')
+    else:
+        r = _drip_mod.send_step(_cfg(), row)
+        msg = (f'Sent step {row["position"]} to {row["company"]} now.'
+               if r['sent'] else f'REFUSED: {r["detail"]}')
+    return RedirectResponse(
+        f'/drips/{campaign_id}/leads?msg={urllib.parse.quote(msg)}',
+        status_code=303)
 
 
 @router.get('/funnel', response_class=HTMLResponse)
