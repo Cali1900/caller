@@ -245,6 +245,38 @@ Cheap, mechanical, and it caught what three rounds of care did not. The same
 shape as everything else in this file: prefer a check that reads the real artefact
 over a claim about the thing that produces it.
 
+### ⚠️ STANDING RULE — a control that reads NOTHING is worse than a missing one
+
+`/upload-form` offered a **kind** select ("a CALL list" / "an EMAIL list") and a
+**drip picker** for months, and the handler read **neither**. Every upload went
+through the call parser, so an email-only CSV had every row rejected for a missing
+phone — immediately after the screen offered to import it. On top of that the picker
+was **invisible**, because `leads.html` guards it with `{% if drips %}` and the page
+never passed `drips`. Two independent reasons one control did nothing.
+
+A missing control is obviously missing. **A dead one makes a promise the code does
+not keep**, and from the operator's side there is no way to tell the difference
+until a real list goes in.
+
+    ./scripts/check_dead_controls.py
+
+Walks every `<form>` in every template, collects the field names inside it, finds
+the handler for its `action` — **and for any `formaction` on a button inside it** —
+and reports fields that handler never mentions. It runs in the **pre-commit hook**
+and in the **suite** (`test_no_dead_config.py` shells out to the same script, so
+there is one definition of "is this control wired"; a check that only runs on commit
+is one a `--no-verify` skips silently).
+
+It is static and approximate on purpose: a smoke alarm, not a compiler. Fields read
+off `request.form()` by index, JS clone placeholders and client-side `required`
+gates are listed in `KNOWN_OK` **with a reason each** — a suppression with no reason
+is how the next one gets waved through, and a check whose output is mostly noise is
+a check nobody runs.
+
+⚠️ **It was proved against the real bug before being trusted**: with the upload
+handler reverted to ignoring both controls, it names them; with the fix in, 118
+fields all read.
+
 ### ⚠️ STANDING RULE — say so BEFORE removing something that was asked for
 
 On 2026-09-11 a brief corrected an earlier one: the status gate had deleted

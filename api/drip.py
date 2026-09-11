@@ -484,37 +484,18 @@ def gate_counts(statuses=None) -> dict:
             return {r['status']: r['n'] for r in cur.fetchall()}
 
 
-def overlaps(campaign_id=None) -> list:
-    """
-    Statuses accepted by MORE THAN ONE running drip, with the drips that share
-    them. A lead with such a status receives every one of those sequences.
-
-    ⚠️ A WARNING, NOT A REFUSAL. Product news and a follow-up sequence are
-    different conversations and both can be legitimate for one firm. The point is
-    that it is a decision made at CONFIG time rather than a discovery made when a
-    firm gets two emails in one afternoon.
-    """
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""SELECT campaign_id, name, accepted_statuses
-                             FROM campaign_configs
-                            WHERE type = 'drip' AND is_running""")
-            drips = [dict(r) for r in cur.fetchall()]
-    by_status = {}
-    for d in drips:
-        for st in d['accepted_statuses'] or []:
-            by_status.setdefault(st, []).append(d)
-    out = []
-    for st, ds in sorted(by_status.items()):
-        if len(ds) < 2:
-            continue
-        if campaign_id and not any(str(d['campaign_id']) == str(campaign_id)
-                                   for d in ds):
-            continue
-        out.append({'status': st, 'drips': ds,
-                    'names': [d['name'] for d in ds]})
-    return out
-
+# ⚠️ overlaps() IS DELETED, 2026-09-11, and this note is why.
+#
+# It reported statuses accepted by more than one running drip, because under
+# gate-only membership such a lead received BOTH sequences. Wiring made that
+# structurally impossible: a lead is wired to exactly ONE drip - by its call
+# campaign's default_drip_id, or by its batch's import_drip_id - so a shared status
+# is now harmless and normal.
+#
+# Removed rather than left in place: A WARNING THAT CANNOT FIRE TRAINS PEOPLE TO
+# IGNORE WARNINGS, and the ones that do fire here have to mean something. The
+# property it protected is now asserted directly instead -
+# test_two_drips_accepting_one_status_CANNOT_both_send.
 
 # ⚠️ `engaged` MEANS THEY REPLIED. A drip accepting it keeps emailing someone who
 # answered, which is the opposite of what the reply-stop is for. That can be

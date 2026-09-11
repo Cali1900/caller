@@ -392,9 +392,10 @@ def test_two_drips_accepting_one_status_CANNOT_both_send(db, dripc, client):
     imported batch by its single import_drip_id. A lead can be wired to ONE drip, so
     a shared status is no longer a double-send.
 
-    The warning still renders and can no longer fire. That is flagged for Sean
-    rather than removed, because he asked for it - but a warning that cannot fire
-    trains people to ignore warnings, so it needs a decision.
+    The warning was DELETED on 2026-09-11: a warning that cannot fire trains people
+    to ignore warnings, and the ones that do fire here have to mean something. This
+    test is what replaces it - the property asserted directly instead of watched
+    for.
     """
     cid = dripc['campaign_id']
     campaigns.update(cid, accepted_statuses=['imported'])
@@ -402,9 +403,10 @@ def test_two_drips_accepting_one_status_CANNOT_both_send(db, dripc, client):
     campaigns.start(other)
     campaigns.update(other, accepted_statuses=['imported'])
 
-    ov = drip.overlaps(cid)
-    assert ov and ov[0]['status'] == 'imported', ov
-    assert set(ov[0]['names']) == {dripc['name'], 'DRIP-NEWS'}, ov
+    # drip.overlaps() is DELETED - see the note at its former site in drip.py. The
+    # shared status is now a fact about configuration with no consequence, so there
+    # is nothing to report and the only thing worth asserting is the consequence's
+    # absence, below.
 
     # ⚠️ OVERLAP NOW ONLY REACHES A LEAD WITH NO CALL CAMPAIGN. A call campaign has
     # ONE default_drip_id, so a wired lead cannot be in two drips at once - that is
@@ -438,9 +440,10 @@ def test_two_drips_accepting_one_status_CANNOT_both_send(db, dripc, client):
     assert picked == {str(cid)}, \
         f'a lead reached more than the one drip it is wired to: {picked}'
 
+    # AND NEITHER SCREEN WARNS ANY MORE, because there is nothing to warn about.
     for url in (f'/campaign/{cid}', f'/drips/{cid}/sequence'):
-        assert 'both accept' in client.get(url).text, \
-            f'{url} does not warn about the overlap'
+        assert 'both accept' not in client.get(url).text, \
+            f'{url} still carries a warning that can no longer fire'
 
 
 def test_stopping_a_drip_with_leads_asks_first(db, dripc, client):

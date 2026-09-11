@@ -159,13 +159,7 @@
       <p class="dim" style="margin-bottom:0">⚠️ <b>{{ st }}</b> &mdash; {{ caution[st] }}.</p>
       {% endif %}{% endfor %}
 
-      {# ⚠️ OVERLAP IS ALLOWED AND WARNED ABOUT, at config time rather than when
-         a firm gets two emails in one afternoon. #}
-      {% for o in overlaps %}
-      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ o.names | join(' and ') }}</b>
-         both accept <code>{{ o.status }}</code> &mdash; a lead with that status
-         will receive <b>both</b> sequences.</p>
-      {% endfor %}
+      
       {% if not c.accepted_statuses %}
       <p class="dim" style="margin-bottom:0">⚠️ <b>This drip accepts nobody</b>
          &mdash; no status is ticked, so it sends nothing at all.</p>

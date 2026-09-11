@@ -72,11 +72,7 @@
     right now. <a href="/campaign/{{ c.campaign_id }}">change the gate</a>
   {% else %}<b>no status</b> &mdash; this drip accepts nobody and sends nothing.
     <a href="/campaign/{{ c.campaign_id }}">set its gate</a>{% endif %}</p>
-{% for o in overlaps %}
-<div class="banner warn">⚠️ <b>{{ o.names | join(' and ') }}</b> both accept
-  <code>{{ o.status }}</code> &mdash; a lead with that status receives
-  <b>both</b> sequences.</div>
-{% endfor %}
+
 
 <h2 style="margin-top:18px">Per step</h2>
 <table style="max-width:820px">

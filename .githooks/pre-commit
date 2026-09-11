@@ -45,3 +45,18 @@ if [[ -d .break_pass_state ]]; then
   echo "  ./scripts/guard_break_pass.sh           is it safe to edit now?" >&2
   exit 1
 fi
+
+# ⚠️ A FORM FIELD NO HANDLER READS IS WORSE THAN A MISSING ONE. /upload-form
+# offered a "kind" select and a drip picker for months and read neither, so every
+# email-only CSV had every row rejected for a missing phone - immediately after the
+# screen offered to import it. A missing control is obviously missing; a DEAD one
+# tells the operator the thing works.
+#
+# Cheap enough to run on every commit, and it only speaks when something is wrong.
+if ! ./scripts/check_dead_controls.py; then
+  echo >&2
+  echo "REFUSING TO COMMIT: see above. Either wire the field, delete it, or add" >&2
+  echo "it to KNOWN_OK in scripts/check_dead_controls.py WITH THE REASON - a" >&2
+  echo "suppression with no reason is how the next one gets waved through." >&2
+  exit 1
+fi

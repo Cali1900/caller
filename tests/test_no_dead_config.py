@@ -230,3 +230,26 @@ def test_the_worker_runs_both_send_loops():
     assert 'email_1_mode' in camp.CONFIG_FIELDS
     assert hasattr(autosend.HoldReason, 'NOT_AUTO')
     assert hasattr(autosend.HoldReason, 'DRIP_STOPPED')
+
+
+def test_no_form_field_goes_unread_by_its_handler():
+    """
+    ⚠️ A DEAD CONTROL TELLS THE OPERATOR THE THING WORKS.
+
+    /upload-form offered a `kind` select ("a CALL list" / "an EMAIL list") and a
+    drip picker for months and read NEITHER: every upload went through the call
+    parser, so an email-only CSV had every row rejected for a missing phone
+    immediately after the screen offered to import it. The picker was invisible on
+    top of that, because the page never passed `drips` to the template.
+
+    That is worse than a missing feature. A missing control is obviously missing;
+    this one made a promise the code did not keep, and from the operator's side
+    there was no way to tell the difference until a real list was uploaded.
+
+    In the suite as well as the pre-commit hook, because a check that only runs on
+    commit is a check that a --no-verify skips silently.
+    """
+    import subprocess
+    r = subprocess.run(['python3', 'scripts/check_dead_controls.py'],
+                       cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr

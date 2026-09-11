@@ -1678,7 +1678,6 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     # which other running drips accept the same status.
     is_drip = camp['type'] == 'drip'
     gate_counts = _drip_mod.gate_counts() if is_drip else {}
-    overlaps = _drip_mod.overlaps(campaign_id) if is_drip else []
     # ⚠️ THE RUNNING DRIPS AND WHAT THEY ACCEPT, for the FOLLOW-UP note on a CALL
     # campaign's page. The default_drip_id selector used to be there. It is gone
     # because nothing wires a drip any more - but a screen that simply LOSES a
@@ -1718,7 +1717,7 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
             tz_fallback = cur.fetchone()['n']
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
-        'gate_counts': gate_counts, 'overlaps': overlaps,
+        'gate_counts': gate_counts,
         'drip_options': drip_options, 'drip_chosen': drip_chosen,
         'fed_by': fed_by, 'drip_lead_counts': drip_lead_counts,
         'statuses': STATUSES, 'caution': _drip_mod.CAUTION_STATUSES,
@@ -1799,7 +1798,6 @@ def drip_sequence_page(request: Request, campaign_id: str, msg: str = ''):
         # WHO FEEDS IT. The wiring lives on the CALL campaign, so without this
         # the drip area cannot answer "where do these leads come from" - and it
         # is the screen the drip work actually happens on.
-        'overlaps': _drip_mod.overlaps(cid),
         'drip_lead_counts': _drip_mod.qualifying_counts(),
         # ⚠️ THE SEQUENCE EDITOR IS AN INCLUDE, so it needs exactly the context
         # the campaign page gives it. Anything missing renders as empty rather

@@ -60,8 +60,14 @@ if [[ -z "${BREAK_PASS:-}" ]]; then
   fi
 fi
 
+# ⚠️ scripts/ IS MOUNTED READ-ONLY so a test can run a repo check rather than
+# reimplementing it. test_no_dead_config.py shells out to
+# scripts/check_dead_controls.py: one definition of "is this control wired", used
+# by the suite and by the pre-commit hook, because two copies of a check disagree
+# eventually and the one nobody runs is the one that rots.
 docker compose run --rm --no-deps \
   -v "$(pwd)/api:/app/api" \
   -v "$(pwd)/tests:/app/tests" \
   -v "$(pwd)/migrations:/app/migrations" \
+  -v "$(pwd)/scripts:/app/scripts:ro" \
   caller-api python -m pytest tests/ "$@"
