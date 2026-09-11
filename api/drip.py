@@ -376,15 +376,17 @@ def qualifies_for(lead) -> list:
             out = []
             for r in cur.fetchall():
                 r = dict(r)
-                # IMPORTED: no call campaign, so the gate is the only condition.
-                if lead.get('campaign_id') is None:
-                    r['why'] = (f"status is {lead['status']}, and it has no call "
-                                f"campaign - imported leads enter on the gate alone")
-                elif r['wired']:
+                if r['wired']:
                     r['why'] = (f"wired from {r['wired_from']}, "
                                 f"status is {lead['status']}")
+                elif (lead.get('import_drip_id')
+                      and str(lead['import_drip_id']) == str(r['campaign_id'])):
+                    # WIRED BY ITS BATCH. An imported lead has no call campaign, so
+                    # the choice was made at upload - the same explicit decision
+                    # with the batch as its unit.
+                    r['why'] = (f"wired at upload, status is {lead['status']}")
                 else:
-                    # Passes the gate, wired elsewhere: NOT in this drip.
+                    # Passes the gate, wired elsewhere or nowhere: NOT in this drip.
                     continue
                 out.append(r)
             return out
@@ -441,7 +443,7 @@ MEMBER_SQL = """
      AND (EXISTS (SELECT 1 FROM campaign_configs src
                    WHERE src.campaign_id = l.campaign_id
                      AND src.default_drip_id = %(cid)s)
-          OR l.campaign_id IS NULL))
+          OR l.import_drip_id = %(cid)s))
 """
 
 
@@ -465,7 +467,7 @@ def qualifying_counts() -> dict:
                                    AND (EXISTS (SELECT 1 FROM campaign_configs src
                                                  WHERE src.campaign_id = l.campaign_id
                                                    AND src.default_drip_id = c.campaign_id)
-                                        OR l.campaign_id IS NULL)
+                                        OR l.import_drip_id = c.campaign_id)
                             WHERE c.type = 'drip'
                             GROUP BY c.campaign_id""")
             return {r['cid']: r['n'] for r in cur.fetchall()}
@@ -655,17 +657,23 @@ RUNNING_STOP = "AND c.is_running AND c.type = 'drip'"
 # `status` can carry and must not be made to - the same one-field-two-jobs fault
 # this codebase keeps paying for.
 #
-# ⚠️ IMPORTED LEADS ENTER ON THE GATE ALONE, deliberately. Wiring is a property of
-# the CALL campaign and an imported lead has none, so there is nothing to wire it
-# with. Tested as `campaign_id IS NULL` rather than `lead_source = 'import'`:
-# lead_source RECORDS where a lead came from, while the absence of a call campaign
-# is the structural fact that decides. A lead given a phone and moved onto a
-# campaign is wired by that campaign from then on, whatever its provenance says.
+# ⚠️ AN IMPORTED LEAD IS WIRED BY ITS BATCH, at upload. It has no call campaign, so
+# a person chooses the drip when the CSV goes in - the same explicit decision, with
+# the batch as the unit instead of the campaign.
+#
+# It used to enter on the GATE ALONE, and that carve-out had the same flaw the
+# wiring exists to fix: import a California list and a Hawaii list, both `imported`,
+# and every drip accepting `imported` received both. A lead wired nowhere receives
+# nothing, and /today says so rather than leaving it silent.
+#
+# NOT an assignment column. drip_campaign_id was "which drip owns this lead" - a
+# second fact that could disagree with status. This is WIRING only: the gate still
+# decides, every selection, so a status change still stops a send mid-sequence.
 WIRED = """
     AND (EXISTS (SELECT 1 FROM campaign_configs src
                   WHERE src.campaign_id = l.campaign_id
                     AND src.default_drip_id = c.campaign_id)
-         OR l.campaign_id IS NULL)
+         OR l.import_drip_id = c.campaign_id)
 """
 
 GATE = 'AND l.status = ANY(c.accepted_statuses)'

@@ -263,7 +263,7 @@ def parse_email_csv(text: str):
     return ok, rejects
 
 
-def upload_emails(text: str):
+def upload_emails(text: str, drip_campaign_id=None):
     """
     Insert email-only leads into the POOL. Returns a report.
 
@@ -275,6 +275,13 @@ def upload_emails(text: str):
 
     LANDS IN THE POOL, never queued and never on a drip by this function alone.
     Uploading has never been the thing that starts contact and it is not going to
+    ⚠️ `drip_campaign_id` IS THE BATCH'S WIRING, and it is the same explicit
+    decision a call campaign makes with default_drip_id - an imported lead has no
+    campaign, so the batch is the unit. Without it, importing a California list and
+    a Hawaii list sent both to every drip accepting `imported`.
+
+    The GATE still decides whether a wired lead receives anything, every selection.
+
     become it: the batch lands as `imported` and is picked up by whichever
     act, and when it is given the leads are put on that drip explicitly and the
     activity line says so.
@@ -290,21 +297,33 @@ def upload_emails(text: str):
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             for r in rows:
+                # The batch's wiring, bound per row because the INSERT binds the
+                # row dict. ONE value for the whole upload: it is the batch's
+                # decision, not a per-lead one.
+                r['drip_campaign_id'] = drip_campaign_id
                 cur.execute(
                     """INSERT INTO leads (company, dm_email, website, dm_name,
                                           city, state, segment, external_ref,
                                           demands_per_month,
                                           demands_per_month_raw,
-                                          lead_source, pool_status, status)
+                                          lead_source, pool_status, status,
+                                          import_drip_id)
                        SELECT %(company)s, %(dm_email)s, %(website)s, %(dm_name)s,
                               %(city)s, %(state)s, COALESCE(%(segment)s,'default'),
                               %(external_ref)s, %(demands_per_month)s,
                               %(demands_per_month_raw)s,
                               -- ⚠️ 'imported', NOT 'new'. 'new' means "waiting to
                               -- be dialled", and these have no phone. The status
-                              -- IS the drip gate now, so it has to say what the
-                              -- lead actually is.
-                              'import', 'pool', 'imported'
+                              -- is half the drip condition, so it has to say what
+                              -- the lead actually is.
+                              'import', 'pool', 'imported',
+                              -- ⚠️ AND THE BATCH'S WIRING, the other half. An
+                              -- imported lead has no call campaign to be wired by,
+                              -- so the person uploading chooses the drip - once,
+                              -- for the batch. NULL is allowed and means wired
+                              -- nowhere, which /today surfaces rather than leaving
+                              -- silent.
+                              %(drip_campaign_id)s
                         WHERE NOT EXISTS (
                               SELECT 1 FROM leads l
                                WHERE lower(btrim(l.dm_email)) = %(dm_email)s)

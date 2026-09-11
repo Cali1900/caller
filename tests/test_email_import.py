@@ -440,7 +440,10 @@ def test_step_1_is_due_immediately_for_a_lead_with_no_emailed_at(db, dripc):
     a separate sequence_started_at column, i.e. two columns that must agree
     forever; emailed_at already means "when the sequence started".
     """
-    upload.upload_emails(CSV)
+    # ⚠️ WIRED AT UPLOAD. An unwired batch is wired nowhere and receives nothing -
+    # which is the point of 048: two imported lists no longer both go to every drip
+    # accepting `imported`.
+    upload.upload_emails(CSV, drip_campaign_id=dripc['campaign_id'])
     lead = _by_email(db, 'intake@whitfield.test')
     assert lead['emailed_at'] is None
     # ⚠️ NOTHING ROUTED IT. The batch landed as `imported` and this drip accepts
@@ -458,7 +461,7 @@ def test_step_1_is_due_immediately_for_a_lead_with_no_emailed_at(db, dripc):
 def test_a_later_step_is_not_due_before_the_clock_has_started(db, dripc):
     """Only step 1. Steps 2 and 3 have nothing to measure from yet, and must not
     all fire at once because emailed_at is NULL."""
-    upload.upload_emails(CSV)
+    upload.upload_emails(CSV, drip_campaign_id=dripc['campaign_id'])
     lead = _by_email(db, 'intake@whitfield.test')
     rows = drip._build_select()
     with dbm.get_conn() as conn:
@@ -488,7 +491,7 @@ def test_sending_step_1_starts_the_clock(db, dripc, cfg_env, monkeypatch):
     from api.config import load_config
     cfg = load_config()
 
-    upload.upload_emails(CSV)
+    upload.upload_emails(CSV, drip_campaign_id=dripc['campaign_id'])
     lead = _by_email(db, 'intake@whitfield.test')
     row = [r for r in drip.due() if str(r['lead_id']) == str(lead['lead_id'])][0]
     res = drip.send_step(cfg, row)
@@ -651,11 +654,23 @@ def test_the_STATUS_decides_which_drips_a_lead_is_in(db, dripc):
     campaigns.update(other, accepted_statuses=['engaged'])
     campaigns.update(dripc['campaign_id'], accepted_statuses=['emailed'])
 
-    assert [d['name'] for d in drip.qualifies_for({'status': 'emailed'})] \
-        == [dripc['name']]
-    assert [d['name'] for d in drip.qualifies_for({'status': 'engaged'})] \
-        == ['DRIP-B']
-    assert drip.qualifies_for({'status': 'won'}) == [], \
+    # ⚠️ A LEAD IS A STATUS **AND** A WIRING. A bare status qualifies for nothing,
+    # which is the correction: the gate says WHETHER, the wiring says WHERE.
+    call_id = running_campaign_id()
+    campaigns.update(call_id, default_drip_id=dripc['campaign_id'])
+    wired = {'status': 'emailed', 'campaign_id': call_id, 'import_drip_id': None}
+    assert [d['name'] for d in drip.qualifies_for(wired)] == [dripc['name']]
+
+    # same wiring, a status the OTHER drip accepts: still not in the other drip,
+    # because nothing wires it there.
+    assert drip.qualifies_for({**wired, 'status': 'engaged'}) == [], \
+        'a lead reached a drip it is not wired to, on status alone'
+
+    # rewire it and the same status now lands
+    campaigns.update(call_id, default_drip_id=other)
+    assert [d['name'] for d in
+            drip.qualifies_for({**wired, 'status': 'engaged'})] == ['DRIP-B']
+    assert drip.qualifies_for({**wired, 'status': 'won'}) == [], \
         'a status no drip accepts must qualify for nothing'
 
 
@@ -682,10 +697,14 @@ def test_a_gate_accepting_SEVERAL_statuses_admits_any_of_them(db, dripc):
     """Replaces the only_drip fallback test - there is no fallback to have."""
     cid = dripc['campaign_id']
     campaigns.update(cid, accepted_statuses=['emailed', 'max_attempts'])
+    call_id = running_campaign_id()
+    campaigns.update(call_id, default_drip_id=cid)
     for st in ('emailed', 'max_attempts'):
         assert any(str(d['campaign_id']) == str(cid)
-                   for d in drip.qualifies_for({'status': st})), st
-    assert not drip.qualifies_for({'status': 'completed'})
+                   for d in drip.qualifies_for({'status': st,
+                                                'campaign_id': call_id})), st
+    assert not drip.qualifies_for({'status': 'completed',
+                                   'campaign_id': call_id})
 
 
 def test_the_gate_is_settable_from_the_screen(db, dripc, client):
@@ -800,3 +819,119 @@ def test_keeping_an_imported_lead_where_it_is_changes_nothing(db, client):
     assert got['status'] == 'imported', \
         f"'keep' changed the status to {got['status']} - it must not"
     assert got['phone_e164'] == '+14245551122', 'the number was not saved'
+
+
+def test_two_imported_lists_do_not_both_go_to_every_drip(db, dripc):
+    """
+    ⚠️ THE CALIFORNIA / HAWAII CASE FOR IMPORTS, and the reason 048 exists.
+
+    Imported leads used to enter on the gate alone, because an imported lead has no
+    call campaign to be wired by. That carve-out had the same flaw the wiring exists
+    to fix one layer down: import a California list and a Hawaii list - both
+    `imported` - and every drip accepting `imported` received BOTH.
+
+    The batch is the unit of the decision, made once at upload by a person.
+    """
+    from api import campaigns as _c
+    california = dripc['campaign_id']
+    _c.update(california, accepted_statuses=['imported'])
+    hawaii = _c.create('DRIP-HI', campaign_type='drip')['campaign_id']
+    _c.start(hawaii)
+    open_all_hours(hawaii)
+    _c.update(hawaii, accepted_statuses=['imported'])
+    drip.save_steps(hawaii, [{'delay_minutes': 0, 'subject': 'Aloha', 'body': 'b'}])
+
+    upload.upload_emails(CSV, drip_campaign_id=california)
+    lead = _by_email(db, 'intake@whitfield.test')
+    picked = {str(r['drip_campaign_id']) for r in drip.due()
+              if str(r['lead_id']) == str(lead['lead_id'])}
+    assert str(california) in picked, 'the wired drip did not select it'
+    assert str(hawaii) not in picked, \
+        'an imported list reached a drip it was not wired to, on status alone'
+
+
+def test_an_unwired_batch_receives_nothing_and_says_so(db, dripc):
+    """
+    ⚠️ NULL IS ALLOWED AND MUST NOT BE SILENT. A batch uploaded with no drip named
+    is wired nowhere, so it receives nothing - which is correct, and would be
+    invisible without the warning. Same failure as a call campaign wired to
+    nothing, and it gets the same treatment.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['imported'])
+    upload.upload_emails(CSV)          # no drip named
+    lead = _by_email(db, 'intake@whitfield.test')
+    assert lead['import_drip_id'] is None
+    assert not [r for r in drip.due()
+                if str(r['lead_id']) == str(lead['lead_id'])], \
+        'an unwired batch was selected by a drip anyway'
+
+    problems = _c.unwired_imports()
+    assert problems and problems[0]['leads'] >= 1, problems
+
+
+def test_a_wired_import_still_answers_to_the_gate(db, dripc):
+    """Wiring is not a bypass: both conditions, every selection."""
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['imported'])
+    upload.upload_emails(CSV, drip_campaign_id=cid)
+    lead = _by_email(db, 'intake@whitfield.test')
+    assert [r for r in drip.due()
+            if str(r['lead_id']) == str(lead['lead_id'])], 'premise'
+
+    # the gate stops refusing it and it stops receiving, wiring unchanged
+    _c.update(cid, accepted_statuses=['emailed'])
+    assert not [r for r in drip.due()
+                if str(r['lead_id']) == str(lead['lead_id'])], \
+        'a wired import kept receiving after the gate stopped accepting it'
+
+
+def test_the_upload_form_honours_KIND_and_the_drip_picker(db, dripc, client):
+    """
+    ⚠️ THE FORM OFFERED TWO CONTROLS THE HANDLER IGNORED. It has had a `kind`
+    select and a drip picker since the email import was built; /upload-form read
+    neither, so an email-only CSV went through the CALL parser and had every row
+    rejected for a missing phone - while the screen had just offered to import it.
+    upload_emails() was reachable only from the test suite.
+
+    And the picker was invisible on top of that: leads.html guards it with
+    `{% if drips %}` and the page never passed `drips`. Two independent reasons one
+    control did nothing.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['imported'])
+    csv = b'company,email\nUploaded Co,up@uploaded.test\n'
+
+    r = client.post('/upload-form',
+                    files={'file': ('list.csv', csv, 'text/csv')},
+                    data={'kind': 'email', 'drip_campaign_id': str(cid)},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text[:300]
+    assert 'REJECT' not in r.headers['location'], r.headers['location']
+    lead = _by_email(db, 'up@uploaded.test')
+    assert lead is not None, 'an email list uploaded through the form was not saved'
+    assert lead['status'] == 'imported'
+    assert str(lead['import_drip_id']) == str(cid), \
+        'the drip picker was ignored - the batch is wired nowhere'
+
+    # AND THE PICKER IS ON THE PAGE, which it was not while `drips` went unpassed.
+    body = client.get('/').text
+    assert 'name="drip_campaign_id"' in body, 'the drip picker is not rendered'
+    assert 'name="kind"' in body
+
+
+def test_the_upload_refuses_a_drip_id_that_is_not_a_drip(db, client):
+    """A call campaign id in that field would wire a batch to something that
+    cannot send."""
+    from tests.conftest import running_campaign_id
+    csv = b'company,email\nBad Wire Co,bad@wire.test\n'
+    r = client.post('/upload-form',
+                    files={'file': ('list.csv', csv, 'text/csv')},
+                    data={'kind': 'email',
+                          'drip_campaign_id': str(running_campaign_id())},
+                    follow_redirects=False)
+    assert 'REJECTED' in r.headers['location'], r.headers['location']
+    assert _by_email(db, 'bad@wire.test') is None, 'it uploaded anyway'

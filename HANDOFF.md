@@ -16,8 +16,8 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Drip membership | **WIRING *and* GATE — both must pass.** `C1 → Drip 1` (wiring), and `Drip 1` accepts `emailed, imported, clicked` (gate). Imported leads have no call campaign, so for them the gate is the only condition |
-| Tests | 794 passed, 1 skipped |
-| Break pass | **146 definitions** (140–146 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
+| Tests | 799 passed, 1 skipped |
+| Break pass | **148 definitions** (140–148 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -678,19 +678,49 @@ to everything that matches. Break 145.
 | `drip.GATE` | is its status on THIS drip's accepted list? |
 | `drip.MEMBER_SQL` | both, as one expression — shared by the roster and every count, so no screen can disagree with the sender |
 
-### ⚠️ Imported leads enter on the GATE ALONE
+### An imported batch is wired AT UPLOAD (048)
 
-Wiring is a property of the **call campaign**, and an imported lead has none —
-there is nothing that could wire it. Tested as `campaign_id IS NULL`, not
-`lead_source = 'import'`: lead_source *records* where a lead came from, while the
-absence of a call campaign is the structural fact that decides. A lead given a
-phone and moved onto a campaign is wired by that campaign from then on, whatever
-its provenance says. Break 146.
+Imported leads first entered on the gate alone, because an imported lead has no call
+campaign to be wired by. **That carve-out carried the same flaw the wiring exists to
+fix:** import a California list and a Hawaii list — both `imported` — and every drip
+accepting `imported` received both.
 
-**Overlap narrowed with this.** A call campaign has one `default_drip_id`, so a
-wired lead cannot be in two drips at once. Two drips accepting one status both send
-only to leads with **no call campaign** — which is what the overlap warning is for
-now.
+So the batch is the unit: `leads.import_drip_id`, chosen by a person on the upload
+form. Same explicit decision, different owner. Break 147.
+
+⚠️ **NOT the assignment column returning.** `drip_campaign_id` was *which drip owns
+this lead* — a second fact free to disagree with status. This is **wiring only**: the
+gate still decides on every selection, so a status change still stops a send
+mid-sequence. Break 146 guards the other half — a batch uploaded with no drip named
+receives nothing, and `/today` says so.
+
+### ⚠️ THE OVERLAP WARNING CAN NO LONGER FIRE — needs a decision
+
+Two drips accepting one status used to both send. **With wiring it is structurally
+impossible:** a call-sourced lead is wired by its campaign's single
+`default_drip_id`, an imported batch by its single `import_drip_id`. A lead is wired
+to exactly one drip, so a shared status is no longer a double-send — it is now
+harmless and normal.
+
+The warning still renders and cannot fire. **Left in place rather than removed,
+because Sean asked for it** — but a warning that cannot fire trains people to ignore
+warnings, so it wants a decision. The test now asserts the new truth: a lead reaches
+only the one drip it is wired to.
+
+### ⚠️ The upload form offered two controls the handler ignored
+
+`/upload-form` has had a **kind** select ("a CALL list" / "an EMAIL list") and a
+**drip picker** since the email import was built, and read **neither**. Every upload
+went through the CALL parser, so an email-only CSV had every row rejected for a
+missing phone — right after the screen offered to import it. `upload_emails()` was
+reachable only from the test suite.
+
+And the picker was **invisible** on top of that: `leads.html` guards it with
+`{% if drips %}` and the page never passed `drips`. **Two independent reasons one
+control did nothing.** Break 148.
+
+A control that does nothing is worse than a missing feature: the screen says it can
+do the thing, and from the user's side there is no way to tell the difference.
 
 ### The four ways a lead can end up receiving nothing
 

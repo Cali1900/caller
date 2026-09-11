@@ -89,6 +89,33 @@ def wiring_problems() -> list:
             return out
 
 
+def unwired_imports() -> list:
+    """
+    Imported batches wired to no drip - they receive nothing and nothing says so.
+
+    ⚠️ THE SAME FAILURE AS A CALL CAMPAIGN WIRED TO NOTHING, and it gets the same
+    treatment. NULL is a legitimate answer at upload, but a legitimate answer that
+    is invisible is how somebody ends up with a list sitting in the database
+    receiving nothing for a month.
+
+    Grouped by status, because the fix - name a drip - is per batch and the batch is
+    gone by the time anyone looks; the status is what is left to filter on.
+    """
+    from api import db as _db
+    with _db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT l.status, count(*) AS leads
+                  FROM leads l
+                 WHERE l.campaign_id IS NULL
+                   AND l.import_drip_id IS NULL
+                   AND l.status NOT IN ('dnc','archived','won','lost',
+                                        'bad_email','lost_no_response')
+                 GROUP BY l.status ORDER BY l.status""")
+            return [dict(r, why='uploaded with no drip named, so wired nowhere')
+                    for r in cur.fetchall()]
+
+
 def orphan_statuses() -> list:
     """
     Statuses held by leads with NO call campaign that no running drip accepts.

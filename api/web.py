@@ -524,6 +524,12 @@ def leads_list(request: Request, q: str = '', status: str = '', stage: str = '',
         'tag': tag, 'all_tags': _all_tags(),
         'stages': STAGES, 'total': total, 'qs': qs, 'page': page, 'msg': msg,
         'campaigns': campaigns.list_all(), 'running': campaigns.running(),
+        # ⚠️ THE DRIP PICKER ON THE UPLOAD FORM NEEDED THIS. The form has had
+        # `{% if drips %}` around it since the email import was built, and this
+        # page never passed `drips` - so the select was invisible, on top of the
+        # handler ignoring it. Two independent reasons one control did nothing.
+        'drips': [c for c in campaigns.list_all()
+                  if c['type'] == 'drip' and c['is_running']],
         'pages': max(1, (total + per - 1) // per)})
 
 
@@ -2232,8 +2238,42 @@ def campaign_stop(campaign_id: str, confirm: str = Form('')):
 
 
 @router.post('/upload-form')
-async def upload_form(file: UploadFile = File(...)):
+async def upload_form(file: UploadFile = File(...), kind: str = Form('call'),
+                      drip_campaign_id: str = Form('')):
+    """
+    ⚠️ THE FORM OFFERED TWO THINGS THIS HANDLER IGNORED. It has had a `kind` select
+    ("a CALL list" / "an EMAIL list") and a drip picker since the email import was
+    built, and this read neither - every upload went through the CALL parser. An
+    email-only CSV therefore had every row rejected for a missing phone, while the
+    screen had just offered to import it. upload_emails() was reachable only from
+    the test suite.
+    """
     text = (await file.read()).decode('utf-8', errors='replace')
+    if kind == 'email':
+        # ⚠️ THE DRIP IS CHOSEN HERE, FOR THE BATCH. An imported lead has no call
+        # campaign to be wired by, so the person uploading decides once - the same
+        # explicit choice a call campaign makes. Without it, a California list and a
+        # Hawaii list both land in every drip accepting `imported`.
+        target = (drip_campaign_id or '').strip() or None
+        if target:
+            d = campaigns.get(target)
+            if d is None or d['type'] != 'drip':
+                return RedirectResponse(
+                    '/?msg=' + urllib.parse.quote(
+                        'REJECTED: that is not a drip campaign. Nothing was '
+                        'uploaded.'), status_code=303)
+        r = upload_mod.upload_emails(text, drip_campaign_id=target)
+        where = (f"wired to {campaigns.get(target)['name']}" if target
+                 else '⚠️ wired to NO drip, so they will receive nothing until a '
+                      'drip is named for them')
+        msg = (f"{r['inserted']} email-only lead(s) added to the pool as "
+               f"`imported`, {r['duplicates']} duplicates, {r['rejected']} "
+               f"rejected - {where}")
+        if r['rejects']:
+            msg += ' (' + '; '.join(f"line {x['line']}: {x['reason']}"
+                                    for x in r['rejects'][:3]) + ')'
+        return RedirectResponse(f'/?msg={urllib.parse.quote(msg)}',
+                                status_code=303)
     r = upload_mod.upload(text)
     msg = (f"{r['inserted']} added to the pool, {r['duplicates']} duplicates, "
            f"{r['rejected']} rejected")
@@ -2288,7 +2328,9 @@ def today_page(request: Request, sent: str = ''):
         # was completely silent.
         'wiring': campaigns.wiring_problems(),
         # The half no campaign can explain - see orphan_statuses().
-        'orphans': campaigns.orphan_statuses()})
+        'orphans': campaigns.orphan_statuses(),
+        # A batch uploaded with no drip named - see unwired_imports().
+        'unwired': campaigns.unwired_imports()})
 
 
 @router.post('/today/send')

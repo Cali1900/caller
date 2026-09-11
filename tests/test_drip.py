@@ -2056,34 +2056,43 @@ def test_a_wired_lead_whose_status_leaves_the_gate_stops_mid_sequence(db, dripc)
         'a wired lead kept receiving after its status left the gate'
 
 
-def test_an_imported_lead_enters_on_the_GATE_ALONE(db, dripc):
+def test_an_imported_lead_is_wired_BY_ITS_BATCH_not_by_the_gate_alone(db, dripc):
     """
-    ⚠️ THE DELIBERATE ASYMMETRY. Wiring is a property of the CALL campaign, and an
-    imported lead has none - there is nothing to wire it with. So for it the gate
-    is the only condition.
+    ⚠️ THIS TEST'S PREMISE WAS REVERSED ON 2026-09-11, and the reversal is the
+    point. It used to assert that an imported lead entered on the GATE ALONE,
+    because it has no call campaign to be wired by.
 
-    Tested through campaign_id IS NULL rather than lead_source, because the absence
-    of a call campaign is the structural fact that decides: a lead given a phone
-    and moved onto a campaign is wired by that campaign from then on, whatever its
-    provenance records.
+    That carve-out had the same flaw the wiring exists to fix: a California list and
+    a Hawaii list are both `imported`, so every drip accepting `imported` received
+    both. The batch is the unit of the decision now - chosen at upload, by a person.
+
+    So: wired batch enters, unwired batch enters nothing. Both halves here, because
+    "receives nothing" is the half that would otherwise be discovered from silence.
     """
     from api import campaigns as _c
     cid = dripc['campaign_id']
     _c.update(cid, accepted_statuses=['imported'])
-    # nothing is wired to this drip at all
-    _wire(running_campaign_id(), None)
-    with dbm.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""INSERT INTO leads (company, dm_email,
-                                  dm_email_confirmed, lead_source, pool_status,
-                                  status, state)
-                           VALUES ('Imported Co','i@imported.test',true,
-                                   'import','pool','imported','CA')
-                        RETURNING lead_id""")
-            lid = cur.fetchone()['lead_id']
-    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
-        'an imported lead did not enter on the gate alone - it has no call ' \
-        'campaign, so there is nothing that could wire it'
+    _wire(running_campaign_id(), None)     # no call campaign feeds this drip
+
+    def _imported(name, email, wired_to):
+        with dbm.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO leads (company, dm_email,
+                                      dm_email_confirmed, lead_source, pool_status,
+                                      status, state, import_drip_id)
+                               VALUES (%s,%s,true,'import','pool','imported','CA',%s)
+                            RETURNING lead_id""", (name, email, wired_to))
+                return cur.fetchone()['lead_id']
+
+    wired = _imported('Wired Co', 'w@imported.test', cid)
+    unwired = _imported('Unwired Co', 'u@imported.test', None)
+
+    due = {str(r['lead_id']) for r in drip.due()}
+    assert str(wired) in due, \
+        'an imported batch wired to this drip at upload did not enter'
+    assert str(unwired) not in due, \
+        'an imported batch wired to NOTHING entered anyway - which is how two ' \
+        'lists both reach every drip that accepts their status'
 
 
 def test_rewiring_a_campaign_does_not_move_leads_already_in_a_drip(db, dripc):

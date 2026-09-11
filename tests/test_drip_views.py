@@ -381,12 +381,20 @@ def test_a_drip_says_which_statuses_it_accepts(db, dripc, client):
         assert 'emailed' in body, f'{url} does not name the accepted status'
 
 
-def test_two_drips_accepting_one_status_both_send_and_it_warns(db, dripc, client):
+def test_two_drips_accepting_one_status_CANNOT_both_send(db, dripc, client):
     """
-    ⚠️ OVERLAP IS ALLOWED AND WARNED ABOUT. Product news and a follow-up sequence
-    are different conversations, so a lead can legitimately be in both - but that
-    is a decision to make at CONFIG time, not a discovery made when a firm gets
-    two emails in one afternoon.
+    ⚠️ THE OVERLAP RISK IS STRUCTURALLY GONE, and this asserts that rather than the
+    old behaviour.
+
+    When the gate was the only condition, two drips accepting one status both sent -
+    so the config screens warned about it. Wiring made that impossible: a
+    call-sourced lead is wired by its campaign's single default_drip_id, and an
+    imported batch by its single import_drip_id. A lead can be wired to ONE drip, so
+    a shared status is no longer a double-send.
+
+    The warning still renders and can no longer fire. That is flagged for Sean
+    rather than removed, because he asked for it - but a warning that cannot fire
+    trains people to ignore warnings, so it needs a decision.
     """
     cid = dripc['campaign_id']
     campaigns.update(cid, accepted_statuses=['imported'])
@@ -420,10 +428,15 @@ def test_two_drips_accepting_one_status_both_send_and_it_warns(db, dripc, client
     # step that is due for it.
     drip.save_steps(other, [{'delay_minutes': 0, 'subject': 'news 1', 'body': 'b'}])
     open_all_hours(other)
+    # WIRED TO ONE OF THEM, which is all a lead can ever be wired to.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('UPDATE leads SET import_drip_id=%s WHERE lead_id=%s',
+                        (cid, lid))
     picked = {str(r['drip_campaign_id']) for r in drip.due()
               if str(r['lead_id']) == str(lid)}
-    assert picked == {str(cid), str(other)}, \
-        f'a lead qualifying for two drips was not selected by both: {picked}'
+    assert picked == {str(cid)}, \
+        f'a lead reached more than the one drip it is wired to: {picked}'
 
     for url in (f'/campaign/{cid}', f'/drips/{cid}/sequence'):
         assert 'both accept' in client.get(url).text, \

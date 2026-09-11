@@ -25,6 +25,23 @@
     matters whether or not the campaign is running.</span>
 </div>
 {% endif %}
+{# ⚠️ A BATCH UPLOADED WITH NO DRIP NAMED. Legitimate, and invisible without this -
+   which is how a list sits in the database receiving nothing for a month. Same
+   failure as a call campaign wired to nothing, so it gets the same treatment. #}
+{% if unwired %}
+<div class="banner warn">
+  <b>{{ unwired|sum(attribute='leads') }} imported lead(s) are wired to no drip.</b>
+  They will receive nothing until a drip is named for them.
+  <ul style="margin:6px 0 0 18px">
+    {% for u in unwired %}
+    <li><code>{{ u.status }}</code> &mdash; {{ u.why }}.
+        <b>{{ u.leads }}</b> lead{{ '' if u.leads == 1 else 's' }}.</li>
+    {% endfor %}
+  </ul>
+  <span class="dim">An imported lead has no call campaign to be wired by, so the
+    drip is chosen when the CSV is uploaded. These were uploaded without one.</span>
+</div>
+{% endif %}
 {% if orphans %}
 <div class="banner warn">
   <b>{{ orphans|length }} status{{ '' if orphans|length == 1 else 'es' }} on leads
