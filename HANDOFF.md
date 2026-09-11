@@ -14,14 +14,14 @@ Last updated 2026-09-10. Every number in the table below was read from
 | | |
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
-| Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
+| Last migration | `20260911_048_imports_are_wired_at_upload.sql` |
 | Drip membership | **WIRING *and* GATE — both must pass.** `C1 → Drip 1` (wiring), and `Drip 1` accepts `emailed, imported, clicked` (gate). Imported leads have no call campaign, so for them the gate is the only condition |
 | Tests | 800 passed, 1 skipped |
-| Break pass | **148 definitions** (140–148 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
-| Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
+| Break pass | **148 definitions** (the ten numbered 140–148 were added since and verified RED individually; the last FULL pass covered the 138 that existed then). Full pass **OK across all 138** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
+| Masked guards | **20**, all named in README.md. Rows 16–20 came out of the full pass on 2026-09-10 — including `REPLIED_STOP`, the guard this system leans on hardest, masked by the status gate |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
-| Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
-| Email | 1 lead on a drip (`texLaw`), 1 lead with `emailed_at`, **1** `email_sends` row, 4 clicks, 4 live steps on Drip 1 |
+| Data | 1,087 leads, **all `lead_source='call'`** — all in the pool, 0 queued. Statuses: 1,085 `new`, 1 `clicked` (Seans Law), 1 `engaged` (texLaw). 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
+| Email | **1 lead qualifies for Drip 1**: Seans Law — wired from C1, status `clicked`. texLaw is `engaged`, which the gate refuses, so it is out. 2 `email_sends` rows (one sent, one prepared), 4 clicks, 4 live steps, 0 imported batches |
 
 **NOTHING IS DIALING, for THREE independent reasons.** Any one of them alone
 would be enough; all three are deliberate:
@@ -37,23 +37,52 @@ separate deliberate act on `/leads`. **Do not assume `C1` is running because
 someone said so — read `is_running`.** It was believed to be running on
 2026-09-09 and was not.
 
-**AND NOTHING EMAILS EITHER**, for reasons worth keeping separate from the
-dialing ones:
+### ⚠️ EMAIL, UNLIKE DIALING, IS ARMED
 
-1. **`Drip 1` is stopped.** `RUNNING_STOP` excludes every step of a stopped
-   drip, and `drip_for()` refuses to route a lead INTO a stopped drip — so a
-   lead getting email 1 today joins no drip at all. That is the live answer to
-   "C1 is wired to Drip 1 and leads still go nowhere": the wiring is right and
-   the destination is off. The call campaign's screen says so in the
-   Follow-up drip card.
-2. **`email_1_mode` is `'manual'`** everywhere, so `sender.due()` selects
-   nothing. Drafts are generated on capture and sent by hand.
-3. The **email dev guard** (`guards.assert_emailable`) is the last line and
-   fails closed.
+`Drip 1` is **RUNNING** and one lead qualifies for it. This is no longer the
+"nothing can send" state the dialing section describes, and the difference matters:
 
-Starting `Drip 1` is what turns email on. Unlike starting a call campaign, it
-needs no queueing step — a lead is on the drip or it is not — so treat it as the
-more consequential of the two switches.
+    Seans Law · wired from C1 · status `clicked` · step 1 · sends sep 15 11:21am
+    their time
+
+**That will send a real email** when its window opens. One thing stops it reaching
+a stranger, and it is the only thing:
+
+    EMAIL_MODE=allowlist
+    EMAIL_ALLOWLIST=etebg@hotmail.com,sean.sharefi@gmail.com
+
+`guards.assert_emailable` fails **closed** — an unknown mode, a missing config or an
+empty list all refuse — and `sean.sharefi@gmail.com` is Sean's own address, so the
+Sep 15 send goes to him. **Widening `EMAIL_ALLOWLIST`, or setting
+`EMAIL_MODE=unrestricted`, is the act that lets this system mail a law firm.** There
+is no second switch behind it.
+
+What is still off, and separately:
+
+* **`email_1_mode` is `'manual'`** on every campaign, so `sender.due()` selects
+  nothing and email 1 never auto-sends. Drafts are generated on capture and sent by
+  hand.
+* **Reply detection is manual**, so `REPLIED_STOP` depends on a person ticking the
+  box. Read the fail-closed section before relying on it.
+
+Pacing applies to everything that does go: one email per jittered 60–300s gap, 15
+an hour, 50 a day, inside the firm's business hours.
+
+### Reading order for the drip
+
+Six sections describe it and later ones correct earlier ones. In order of authority:
+
+1. **WIRING and GATE — both must pass** (2026-09-11) — the current model
+2. **An imported batch is wired at upload** (048) — the same rule for leads with no
+   call campaign
+3. **The drip roster** and **`/drips` is the roster** — the screens
+4. **Sending pace** — the four layers, unchanged by any of the above
+5. **DRIP MEMBERSHIP: the GATE half** (2026-09-10) — right about the gate, **wrong
+   about removing the wiring**; kept because its reasoning about why status decides
+   *whether* is still the reasoning
+6. Anything older about `drip_campaign_id`, `drip_for()`, `only_drip()` or
+   `enter()` is history. Those are gone; where a paragraph still names them it says
+   so inline.
 
 ### ⚠️ Open before this is "done"
 
@@ -68,17 +97,40 @@ What is actually open:
 1. **No WARM-UP RAMP.** `email_daily_cap` is a fixed number, so "10 this week,
    25 next" means lowering it by hand each week. A new sending domain earns
    volume; a cap cannot express earning it over time.
-2. **`enter()` has no email guard.** A lead with no address can be put on a drip
-   by hand — `texLaw` was, before it had one — and it then sits in the backlog
-   looking live while every tick refuses it. It should refuse loudly at
-   assignment, the way the phone+timezone pair does.
-3. **Break filenames are not zero-padded**, so the pass runs them in lexical
+2. **⚠️ RE-POINTING A CALL CAMPAIGN'S DRIP MOVES LEADS THAT ARE ALREADY MID-SEQUENCE.**
+   Sean's rule was "changing it must only affect leads entering AFTERWARDS", and it
+   held while `enter()` stamped `drip_campaign_id` once at assignment. Membership is
+   COMPUTED now — `WIRED` re-reads `default_drip_id` on every selection — so
+   changing `C1 → Drip 2` re-points all 1,085 of C1's leads, including ones that
+   have already had steps from Drip 1. They start Drip 2 at step 1
+   (`ALREADY_SENT_STOP` is keyed on `step_id`, and Drip 2's steps are different
+   rows), which means **a fresh opener to a firm that is mid-thread**. Nothing
+   warns, and no test covers it. The fix is either a stamp at first send
+   (re-introducing the fact that could disagree) or a refusal to re-point a
+   campaign that has leads with sends — it is a decision, not a bug to patch
+   quietly.
+3. **A lead with no address can still qualify for a drip.** `enter()` is gone, so
+   there is no assignment to refuse at — but a lead whose status and wiring both
+   match, with an empty `dm_email`, is selected and then refused at send time on
+   every tick. `email_sends` cannot record it (migration 042's CHECK), so nothing
+   is sent and nothing accumulates, but the roster shows it as waiting. It should
+   say "no address" on the row, the way it says which cap is holding a lead.
+4. **Break filenames are not zero-padded**, so the pass runs them in lexical
    order (`100_` before `10_` before `44_`) and `--from=N` is a POSITION, not a
-   break number. ~134 renames; nobody has asked for it.
-4. **Reply ingest stays parked** and reply detection stays MANUAL. Read the
+   break number. ~148 renames; nobody has asked for it. And the numbers are not
+   identifiers: **140 is used twice** (`140_a_click_is_not_an_answer.py` and
+   `140_last_sent_counts_email_1.py`) and **84 does not exist**, which happens to
+   leave 148 definitions numbered up to 148. Nothing breaks — `--only=` is a
+   PREFIX match, so `--only=140` runs both — but do not count by the highest
+   number, and do not assume a number names one break.
+5. **No check for the INVERSE of a dead control.** `check_dead_controls.py` catches
+   a form field no handler reads. It does **not** catch a handler parameter no form
+   sends — which is how saving a drip's config was a 422 for as long as drip
+   campaigns existed, because `daily_cap` was required and never rendered.
+6. **Reply ingest stays parked** and reply detection stays MANUAL. Read the
    fail-closed section before assuming otherwise — it is the one paragraph here
    that stops `REPLIED_STOP` being read as more than it is.
-5. The four in `BACKLOG.md`: `B-batch-review`, `B-objection-scoring`,
+7. The four in `BACKLOG.md`: `B-batch-review`, `B-objection-scoring`,
    `B-scorer-model-cost`, `B-demands-volume`.
 
 ---
@@ -402,8 +454,8 @@ not exist yet. Break 114.
 
 **Step 1's timing governs IMPORTED leads only**, and the screen says so. A
 call-sourced lead already had email 1 sent by its call campaign (that campaign's
-`email_1_delay_minutes` from `last_called_at`), and `enter()` links that send to
-step 1. Saying nothing would leave an editable control that does nothing for half
+`email_1_delay_minutes` from `last_called_at`), and `send_step()` links that send
+to step 1 the first time step 1 is considered. Saying nothing would leave an editable control that does nothing for half
 the leads.
 
 ### Per-step enable, and the two things it changed
@@ -514,13 +566,17 @@ From that instant it is indistinguishable from a call-sourced lead.
 two columns that must agree forever; `emailed_at` already means "when the
 sequence started".
 
-⚠️ **THE MIRROR CASE WAS A REAL BUG.** A call-sourced lead's email 1 is recorded
-with `step_id NULL` (no drip existed when it went), and `ALREADY_SENT_STOP`
-matches on `step_id` — so the drip's step 1 at delay 0 was unsent and due
-**immediately after email 1**. The firm would get the same opener twice, minutes
-apart. `enter()` now links email 1 to step 1, so both paths agree that step 1
-means "the first email". Break 108. It only surfaced because the import forced
-the question of what step 1 means when there is no call.
+⚠️ **THE MIRROR CASE WAS A REAL BUG, AND ITS EXPLANATION WAS WRONG TWICE.** A
+call-sourced lead's email 1 is recorded with `step_id NULL` (no drip existed when it
+went), and `ALREADY_SENT_STOP` matches on `step_id` — so step 1 looked unsent.
+
+**Corrected 2026-09-10:** what prevents the duplicate opener is `DUE_NOW`, which
+selects `position = 1` only when `emailed_at IS NULL`. A lead that has had email 1
+can never be picked for step 1, link or no link. `enter()` is gone; `link_email_1()`
+runs lazily at selection, and what it actually carries is **attribution and
+completion** — unlinked, step 1 reads "0 sent" for every call-sourced lead and
+`_maybe_finish` never counts it, so the lead never leaves the drip. Break 131 went
+GREEN and that is how the mistaken explanation surfaced.
 
 ### `default_drip_id`: the call campaign chooses its sequence
 
@@ -724,6 +780,21 @@ control did nothing.** Break 148.
 A control that does nothing is worse than a missing feature: the screen says it can
 do the thing, and from the user's side there is no way to tell the difference.
 
+**So it is a check now, not a habit.** `scripts/check_dead_controls.py` walks every
+`<form>` in `api/templates/`, collects every `name="…"`, finds the handler for its
+`action` **and for any `formaction` on a button inside it** (a `formaction` retargets
+the form, so reading only `action` misses fields entirely), and reports any field no
+handler reads. It runs in `.githooks/pre-commit` and as
+`test_no_form_field_goes_unread_by_its_handler` in `tests/test_no_dead_config.py`, so
+`scripts/` is mounted read-only into the test container. Its `KNOWN_OK` list is a
+review decision: each entry carries the reason it is read somewhere the walker
+cannot see — every current one is a field whose name is BUILT (`subject_0`,
+`start_2`, `retry_busy`) and read off `request.form()` by index rather than
+declared as a parameter. Adding to it without a reason defeats the check.
+
+The audit it was written for found ONE live case — the upload form's two controls
+above. Everything else was already wired or already allowlisted.
+
 ### The four ways a lead can end up receiving nothing
 
 `campaigns.wiring_problems()` reports per **call campaign**, because that is where
@@ -767,7 +838,7 @@ disagreement impossible.
 |---|---|
 | `leads.drip_campaign_id` | the gate |
 | `leads.drip_entered_at` | `leads.status_changed_at`, trigger-maintained |
-| `campaign_configs.default_drip_id` | nothing — no routing decision exists |
+| `campaign_configs.default_drip_id` | ⚠️ **RESTORED by migration 047** — this row was wrong. It is the WIRING, and the gate never replaced it |
 | `drip_for()`, `only_drip()` | nothing chooses a drip |
 | `enter()` | its assignment half; its LINK half moved (see below) |
 | `POST /leads/<id>/drip/assign` | nothing — membership cannot be set by hand |
@@ -917,7 +988,7 @@ exclusivity — several call campaigns may feed one drip.
 | rule | how |
 |---|---|
 | any call campaign → any drip, changeable at runtime | a `<select>` on the config form; `campaigns.CONFIG_FIELDS` carries it |
-| changing it affects only leads entering AFTERWARDS | **structural**: `default_drip_id` is read only when email 1 is sent, and `enter()` assigns only `WHERE drip_campaign_id IS NULL`. Break 131 — removing that also re-stamps `drip_entered_at`, restarting step 1's timing mid-thread |
+| changing it affects only leads entering AFTERWARDS | ⚠️ **NO LONGER TRUE — see the open items.** It was structural while `enter()` assigned `drip_campaign_id` once, `WHERE drip_campaign_id IS NULL`. There is no assignment now: `WIRED` re-reads `default_drip_id` on EVERY selection, so re-pointing a call campaign moves every lead it sourced, mid-sequence. Break 131 still exists but now guards email 1's LINK, not this |
 | "none" is legitimate and says so | the card renders *"leads will not enter a drip after email 1"*. An empty string is a real answer, distinct from an absent field, or "none" could never be chosen and a wrong setting could never be cleared |
 | stopping a fed drip warns | `POST /stop` bounces to a confirmation naming the feeding campaigns. Break 136 |
 
@@ -940,12 +1011,10 @@ NULL`. It is a good net and it fires **too late by construction**: by the time i
 matches, email 1 has gone and nothing is following it. It cannot see a campaign
 *configured* to send people nowhere, because no lead has reached the state yet.
 
-`campaigns.wiring_problems()` is the proactive half, on `/today`. Two shapes:
-
-    no drip        default_drip_id IS NULL - the lead will join nothing
-    stopped drip   the drip is set but stopped, and drip_for() refuses to route
-                   into a stopped drip rather than falling back to whatever else
-                   happens to be running
+`campaigns.wiring_problems()` is the proactive half, on `/today`. It had two shapes
+when this was written and has **four** now, because membership needs both wiring and
+gate — see "The four ways a lead can end up receiving nothing" above, which
+supersedes this paragraph. `drip_for()` no longer exists.
 
 Both matter **whether or not the call campaign is running**, because email 1 can be
 sent by hand from any lead page. Break 137. The reactive net stays — the two answer
@@ -1652,10 +1721,26 @@ read the fail-closed warning above before assuming otherwise.
 | Phantom sends | migration 042's two CHECKs, and the two coercions that could rewrite them. Break 135 |
 | Absent is not empty | a partial POST can no longer blank a field it never mentioned. Break 134 |
 
+**Built 2026-09-11**, all pushed; each break verified individually rather than by a
+full pass (see the operating rule — a full pass only when Sean asks for one):
+
+| | |
+|---|---|
+| **WIRING and GATE** | `default_drip_id` restored (047) as a SECOND condition alongside the gate. `drip.WIRED`, `drip.MEMBER_SQL`. Break 145 |
+| Imported batches wired at UPLOAD | `leads.import_drip_id` (048), chosen on the upload form. Breaks 146–148 |
+| `wiring_problems()` rewritten | four causes, each with its own `why` and `fix`, plus `orphan_statuses()` and `unwired_imports()`. Break 137 |
+| The overlap warning DELETED | structurally impossible under wiring; the property is asserted instead of watched |
+| The roster redesign | its own page at `/drips`, LAST SENT counts email 1, IN THE SEQUENCE is a number, the pill is a control with both clocks / "why this date" / status / SEND NOW |
+| `/leads` is the CALL view | phone, attempts, scores. Lead detail keeps calls and emails in ONE timeline |
+| Dead-control check | `scripts/check_dead_controls.py`, in the pre-commit hook and the suite |
+| `scripts/scratch.sh` | `new / new-call / new-lead / snapshot / diff / list / clean` — the safe target for verification, and the snapshot/diff that proves live data was not touched |
+
 Still specified and **not built**: the four in `BACKLOG.md` —
 `B-batch-review`, `B-objection-scoring`, `B-scorer-model-cost`,
-`B-demands-volume` — plus the warm-up ramp and the `enter()` email guard listed
-under "Open before this is done".
+`B-demands-volume` — plus the warm-up ramp, the "only leads entering afterwards"
+guarantee that re-pointing a campaign now breaks, the "no address" marker on the
+roster, and the inverse dead-control check, all listed under "Open before this
+is done".
 
 ---
 
@@ -1685,6 +1770,28 @@ under "Open before this is done".
   Anything after a reply, Sean sends from his own inbox. Reply detection stays
   MANUAL, so the gate that stops a drip mailing someone who already answered is
   a person ticking a box — read the fail-closed section before relying on it.
+* **WIRING and GATE are two different questions, and both must pass.**
+  `campaign_configs.default_drip_id` says WHERE a campaign's leads go; an
+  imported batch's `leads.import_drip_id` says the same for leads with no
+  campaign. `accepted_statuses` says WHETHER a lead is ready. Status cannot
+  express destination — a California drip and a Hawaii drip both accepting
+  `emailed` would each send to every lead. `DRIP_STATUS_GATE.md` describes the
+  gate half only and is superseded on this point; the correction section above
+  is the authority.
+* **An email unsubscribe suppresses EMAIL ONLY.** It writes
+  `email_do_not_send`, never `suppression`. `/dnc` is the only route to
+  `suppression`, and the three lists never merge.
+* **Individual verification for what changed; a FULL pass only when Sean asks
+  for one.** A full pass is ~20 minutes of real source mutation for a change
+  that touched four guards. Verify the guards you touched by name, and commit
+  BEFORE running anything that mutates `api/` — uncommitted work is what a
+  killed pass has destroyed twice.
+* **When something Sean explicitly asked for is about to be removed, say so by
+  name and ask first.** `default_drip_id` was asked for twice and a later brief
+  deleted it; it was listed in a disposition table rather than raised, which is
+  not the same as saying it. The same rule covers a concept being replaced:
+  name the screens that change.
+
 * **Links, never attachments.** The sample demand is a link; there is a guard
   test pinning that it is never attached. No media library.
 * **No open tracking** — Apple pre-loads pixels, the number is noise. Replies
