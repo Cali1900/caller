@@ -245,6 +245,26 @@ Cheap, mechanical, and it caught what three rounds of care did not. The same
 shape as everything else in this file: prefer a check that reads the real artefact
 over a claim about the thing that produces it.
 
+### ⚠️ STANDING RULE — say so BEFORE removing something that was asked for
+
+On 2026-09-11 a brief corrected an earlier one: the status gate had deleted
+`default_drip_id`, which Sean had explicitly asked for **twice** — *"a flow to
+connect ANY call campaign to ANY drip campaign"*, *"nothing hardcoded, all wiring
+done in the UI, by me, at runtime"*.
+
+The removal was **listed** in a disposition table and nobody stopped. Listing a
+deletion is not flagging it: a table of twelve rows reads as inventory, and the one
+row that undoes a thing the user asked for twice looks exactly like the eleven that
+do not.
+
+**So: when a change would remove something explicitly asked for, say that, by
+name, before doing it.** Not in a list — as the question. "This deletes the wiring
+you asked for in <brief>. Confirm?" The cost of asking is one message; the cost of
+not asking was a feature deleted, rebuilt, and eight tests rewritten twice.
+
+Same family as the rule below: the failure is never that the reasoning was absent,
+it is that the reasoning was somewhere nobody was looking.
+
 ### ⚠️ STANDING RULE — when a concept is REMOVED, name the screens that change
 
 Twice now Sean has gone looking for a control that was deliberately deleted:

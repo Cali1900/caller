@@ -349,21 +349,63 @@ def link_email_1(cur, lead_id, step_id) -> bool:
 
 def qualifies_for(lead) -> list:
     """
-    The RUNNING drips this lead currently qualifies for, and why.
+    The drips this lead is in, and WHY - both conditions, named.
 
-    Membership is never a mystery: the answer is always "because status is X".
+    ⚠️ MEMBERSHIP IS NEVER A MYSTERY, and it now has two parts. "wired from C1,
+    status is emailed" is the whole answer; either half alone is a half-truth that
+    reads as the whole one. A lead that passes the gate but is wired elsewhere is
+    NOT in this drip, and saying "status is emailed" would imply it was.
     """
     if not lead or not lead.get('status'):
         return []
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT campaign_id, name, is_running, accepted_statuses
-                     FROM campaign_configs
-                    WHERE type = 'drip' AND %s = ANY(accepted_statuses)
-                    ORDER BY name""", (lead['status'],))
-            return [dict(r, why=f"status is {lead['status']}")
-                    for r in cur.fetchall()]
+                """SELECT d.campaign_id, d.name, d.is_running,
+                          d.accepted_statuses,
+                          src.name AS wired_from,
+                          (src.campaign_id IS NOT NULL) AS wired
+                     FROM campaign_configs d
+                     LEFT JOIN campaign_configs src
+                            ON src.campaign_id = %(cid)s
+                           AND src.default_drip_id = d.campaign_id
+                    WHERE d.type = 'drip'
+                      AND %(st)s = ANY(d.accepted_statuses)
+                    ORDER BY d.name""",
+                {'cid': lead.get('campaign_id'), 'st': lead['status']})
+            out = []
+            for r in cur.fetchall():
+                r = dict(r)
+                # IMPORTED: no call campaign, so the gate is the only condition.
+                if lead.get('campaign_id') is None:
+                    r['why'] = (f"status is {lead['status']}, and it has no call "
+                                f"campaign - imported leads enter on the gate alone")
+                elif r['wired']:
+                    r['why'] = (f"wired from {r['wired_from']}, "
+                                f"status is {lead['status']}")
+                else:
+                    # Passes the gate, wired elsewhere: NOT in this drip.
+                    continue
+                out.append(r)
+            return out
+
+
+def feeders(drip_campaign_id) -> list:
+    """
+    The CALL campaigns wired to this drip.
+
+    ⚠️ THE WIRING READ FROM THE OTHER END. default_drip_id lives on the call
+    campaign, so without this a drip cannot say who feeds it - and a wiring
+    visible from one side only is one nobody can audit without a query. Many
+    campaigns may point at one drip; that is allowed and normal.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT campaign_id, name, is_running
+                             FROM campaign_configs
+                            WHERE type = 'call' AND default_drip_id = %s
+                            ORDER BY name""", (drip_campaign_id,))
+            return [dict(r) for r in cur.fetchall()]
 
 
 def sending_statuses() -> dict:
@@ -387,6 +429,22 @@ def sending_statuses() -> dict:
             return out
 
 
+# ⚠️ ONE EXPRESSION OF MEMBERSHIP, used by the roster and by every count, so no
+# screen can disagree with the sender about who is in a drip. `%(cid)s` is the
+# drip; `l` is the lead. Wired OR unwireable (no call campaign), AND gated.
+MEMBER_SQL = """
+    -- coalesce, so this is a scalar ARRAY expression. `ANY(subquery)` treats the
+    -- subquery as a set of rows and compares text to text[], which is an error
+    -- rather than an empty result.
+    (l.status = ANY(coalesce((SELECT accepted_statuses FROM campaign_configs
+                               WHERE campaign_id = %(cid)s), '{}'))
+     AND (EXISTS (SELECT 1 FROM campaign_configs src
+                   WHERE src.campaign_id = l.campaign_id
+                     AND src.default_drip_id = %(cid)s)
+          OR l.campaign_id IS NULL))
+"""
+
+
 def qualifying_counts() -> dict:
     """
     {campaign_id (str): how many leads qualify} for every drip.
@@ -397,11 +455,17 @@ def qualifying_counts() -> dict:
     """
     with db.get_conn() as conn:
         with conn.cursor() as cur:
+            # BOTH CONDITIONS, or the count on the screen is not the number of
+            # leads the sender will actually mail.
             cur.execute("""SELECT c.campaign_id::text AS cid,
                                   count(l.lead_id) AS n
                              FROM campaign_configs c
                              LEFT JOIN leads l
                                     ON l.status = ANY(c.accepted_statuses)
+                                   AND (EXISTS (SELECT 1 FROM campaign_configs src
+                                                 WHERE src.campaign_id = l.campaign_id
+                                                   AND src.default_drip_id = c.campaign_id)
+                                        OR l.campaign_id IS NULL)
                             WHERE c.type = 'drip'
                             GROUP BY c.campaign_id""")
             return {r['cid']: r['n'] for r in cur.fetchall()}
@@ -579,6 +643,31 @@ RUNNING_STOP = "AND c.is_running AND c.type = 'drip'"
 # together, and a lead matching ANY of them qualifies. Two running drips
 # accepting one status BOTH send - deliberate, and warned about at config time
 # rather than refused.
+# ⚠️ WIRING: **WHERE** A CAMPAIGN'S LEADS GO. The other half of the condition, and
+# the gate cannot do its job. A lead receives a step only if BOTH pass:
+#
+#   WIRED    its call campaign's default_drip_id points at THIS drip
+#   GATE     its status is on THIS drip's accepted list
+#
+# Status cannot express DESTINATION. A California drip and a Hawaii drip both
+# accept `emailed`; on the gate alone every California lead receives the Hawaii
+# sequence too. Geography, or which campaign sourced a lead, is not something
+# `status` can carry and must not be made to - the same one-field-two-jobs fault
+# this codebase keeps paying for.
+#
+# ⚠️ IMPORTED LEADS ENTER ON THE GATE ALONE, deliberately. Wiring is a property of
+# the CALL campaign and an imported lead has none, so there is nothing to wire it
+# with. Tested as `campaign_id IS NULL` rather than `lead_source = 'import'`:
+# lead_source RECORDS where a lead came from, while the absence of a call campaign
+# is the structural fact that decides. A lead given a phone and moved onto a
+# campaign is wired by that campaign from then on, whatever its provenance says.
+WIRED = """
+    AND (EXISTS (SELECT 1 FROM campaign_configs src
+                  WHERE src.campaign_id = l.campaign_id
+                    AND src.default_drip_id = c.campaign_id)
+         OR l.campaign_id IS NULL)
+"""
+
 GATE = 'AND l.status = ANY(c.accepted_statuses)'
 # Terminal states a person or the system has already reached.
 TERMINAL_STOP = ("AND l.status NOT IN ('dnc','bad_email','won','lost',"
@@ -733,6 +822,7 @@ SELECT_DUE = """
        {enabled}
        {already_sent}
        {gate}
+       {wired}
        {due_now}
        {pacing}
      -- The EARLIEST unsent due step for each lead, so a sequence cannot skip
@@ -765,7 +855,7 @@ def _build_select(due_clause=DUE_NOW, pacing=True, pace_sql=None):
         running=RUNNING_STOP, replied=REPLIED_STOP, archived=ARCHIVED_STOP,
         terminal=TERMINAL_STOP, do_not_send=DO_NOT_SEND_STOP,
         enabled=ENABLED_STOP, already_sent=ALREADY_SENT_STOP,
-        gate=GATE, due_now=due_clause,
+        gate=GATE, wired=WIRED, due_now=due_clause,
         pacing=(pace_sql if pace_sql is not None
                 else ((HOURLY_CAP + DAILY_CAP + _email_window())
                       if pacing else '')))
@@ -994,10 +1084,9 @@ def roster(campaign_id, limit: int = 500) -> list:
                            (array_agg(st.step_id ORDER BY st.position))[1]
                                AS next_step_id
                       FROM leads l
-                      JOIN campaign_configs gc ON gc.campaign_id = %(cid)s
                       JOIN drip_steps st ON st.campaign_id = %(cid)s
                                         AND st.deleted_at IS NULL AND st.enabled
-                     WHERE l.status = ANY(gc.accepted_statuses)
+                     WHERE """ + MEMBER_SQL + """
                        AND NOT EXISTS (SELECT 1 FROM email_sends es
                                         WHERE es.lead_id = l.lead_id
                                           AND es.step_id = st.step_id)
@@ -1019,14 +1108,14 @@ def roster(campaign_id, limit: int = 500) -> list:
                   LEFT JOIN last_any la ON la.lead_id = l.lead_id
                   LEFT JOIN clicks   cl ON cl.lead_id = l.lead_id
                   LEFT JOIN nxt      n  ON n.lead_id = l.lead_id
-                  JOIN campaign_configs gc2 ON gc2.campaign_id = %(cid)s
-                 -- ⚠️ WHO IS ON THIS DRIP IS A QUESTION ABOUT STATUS. There is no
-                 -- membership column to read; the roster asks the same question
-                 -- the sender asks, so the two cannot disagree about who is here.
-                 -- QUALIFIES NOW, **OR** THIS DRIP HAS SENT IT SOMETHING. The
-                 -- second half is what keeps a firm visible after it replies
-                 -- instead of vanishing mid-sequence with no row and no reason.
-                 WHERE (l.status = ANY(gc2.accepted_statuses)
+                 -- ⚠️ WHO IS ON THIS DRIP IS TWO QUESTIONS: wired here by its
+                 -- call campaign, AND its status accepted. MEMBER_SQL is the one
+                 -- expression of that, shared with every count, so no screen can
+                 -- disagree with the sender about who is in a drip.
+                 -- IN IT NOW (wired AND gated), **OR** THIS DRIP HAS SENT IT
+                 -- SOMETHING. The second half keeps a firm visible after it
+                 -- replies instead of vanishing mid-sequence with no reason.
+                 WHERE (""" + MEMBER_SQL + """
                         OR p.steps_sent IS NOT NULL)
                  ORDER BY coalesce(la.last_sent, l.status_changed_at)
                           DESC NULLS LAST

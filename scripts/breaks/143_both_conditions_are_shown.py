@@ -12,7 +12,7 @@
 # time, including the case that matters most - no drip running, so email 1 goes out
 # and nothing follows it.
 TARGET = 'api/templates/campaign.html'
-EXPECT = 'test_a_call_campaign_says_what_replaced_the_drip_selector'
+EXPECT = 'test_a_call_campaign_shows_its_wiring_AND_that_drips_gate'
 # ⚠️ THE BREAK ITSELF HAD TO BE FIXED. Its first version inserted an unbalanced
 # `{% if false %}`, which made the template raise - so the test went red from a 500
 # rather than from the missing note, and would have passed for the wrong reason if
@@ -20,6 +20,12 @@ EXPECT = 'test_a_call_campaign_says_what_replaced_the_drip_selector'
 # something ELSE proves nothing about the guard it names.
 #
 # Emptying the loop keeps the template valid and removes exactly the live values.
-LABEL = 'strip the live drip values from the follow-up note'
-OLD = """        {% for d in running_drips %}"""
-NEW = """        {% for d in [] %}"""
+# ⚠️ RETARGETED 2026-09-11. This guarded the note that stood where the selector had
+# been deleted. The selector is BACK - wiring and gate are two conditions and the
+# gate never replaced it - so what needs guarding now is that the screen shows BOTH.
+# Showing the wiring alone implies it is sufficient, and a lead wired here whose
+# status the gate refuses receives nothing, which looks like a wiring fault and is
+# not.
+LABEL = 'show the wiring without saying the gate must also pass'
+OLD = """        A lead arrives when it is <b>wired here AND its status qualifies</b>."""
+NEW = """"""

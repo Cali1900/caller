@@ -53,10 +53,12 @@ def dripc(db):
     cid = c['campaign_id']
     campaigns.start(cid)
     open_all_hours(cid)
-    # ⚠️ THE GATE IS THE MEMBERSHIP. A drip with no accepted_statuses accepts
-    # nobody, so a fixture that forgot this would test a drip that can never
-    # send - and every assertion about selection would pass for the wrong reason.
+    # ⚠️ BOTH CONDITIONS, because membership needs both. The gate says WHETHER a
+    # lead is ready; the wiring says WHERE this campaign's leads go. A fixture
+    # setting only one tests a drip that can never send, and every assertion
+    # about selection would pass for the wrong reason.
     campaigns.update(cid, accepted_statuses=['emailed'])
+    campaigns.update(running_campaign_id(), default_drip_id=cid)
     drip.save_steps(cid, [
         {'delay_days': 0,  'subject': 'Following up', 'body': 'One {{first_name}} {{sample_link}}'},
         {'delay_days': 4,  'subject': 'Second',       'body': 'Two {{sample_link}}'},
@@ -1980,3 +1982,149 @@ def test_a_reply_still_outranks_a_click_and_stops_everything(db, dripc):
                 'the pipeline went backwards from clicked to emailed'
             assert pipeline.advance(cur, lid, 'engaged', 'test') is True, \
                 'a reply could not promote a clicked lead'
+
+
+# ==========================================================================
+# WIRING AND GATE ARE TWO CONDITIONS AND BOTH MUST PASS
+# ==========================================================================
+
+def _wire(call_campaign_id, drip_id):
+    from api import campaigns as _c
+    _c.update(call_campaign_id, default_drip_id=drip_id)
+
+
+def test_a_wired_lead_with_a_qualifying_status_receives_the_step(db, dripc):
+    """Both conditions pass, so it is in."""
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed'])
+    _wire(running_campaign_id(), cid)
+    lid = _lead(db, days_ago=11, phone_e164='+15553339001')
+    _join(db, lid, cid, sent_steps=1)
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'a wired, qualifying lead was not selected'
+
+
+def test_the_SAME_lead_does_not_receive_a_drip_it_is_not_wired_to(db, dripc):
+    """
+    ⚠️ THE CALIFORNIA / HAWAII CASE, and the whole point of the correction.
+
+    Two drips accept `emailed`. The lead is wired to one. Under gate-only it
+    received BOTH - so every California lead got the Hawaii sequence too.
+
+    Status cannot express DESTINATION: not geography, not which campaign sourced a
+    lead, and it must not be made to. That is the one-field-two-jobs fault this
+    codebase keeps paying for.
+    """
+    from api import campaigns as _c
+    california = dripc['campaign_id']
+    _c.update(california, accepted_statuses=['emailed'])
+    hawaii = _c.create('DRIP-HAWAII', campaign_type='drip')['campaign_id']
+    _c.start(hawaii)
+    open_all_hours(hawaii)
+    _c.update(hawaii, accepted_statuses=['emailed'])
+    drip.save_steps(hawaii, [
+        {'delay_minutes': 0, 'subject': 'Aloha', 'body': 'b'},
+        {'delay_days': 1, 'subject': 'Aloha 2', 'body': 'b'}])
+
+    _wire(running_campaign_id(), california)
+    lid = _lead(db, days_ago=11, phone_e164='+15553339002')
+    _join(db, lid, california, sent_steps=1)
+
+    picked = {str(r['drip_campaign_id']) for r in drip.due()
+              if str(r['lead_id']) == str(lid)}
+    assert str(california) in picked, 'the wired drip did not select it'
+    assert str(hawaii) not in picked, \
+        'a lead received a drip it is NOT wired to, only because that drip ' \
+        'accepts its status - the exact failure of gate-only membership'
+
+
+def test_a_wired_lead_whose_status_leaves_the_gate_stops_mid_sequence(db, dripc):
+    """Wiring alone is not enough either: both conditions, every selection."""
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['emailed'])
+    _wire(running_campaign_id(), cid)
+    lid = _lead(db, days_ago=11, phone_e164='+15553339003')
+    _join(db, lid, cid, sent_steps=1)
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], 'premise'
+
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='paused' WHERE lead_id=%s", (lid,))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'a wired lead kept receiving after its status left the gate'
+
+
+def test_an_imported_lead_enters_on_the_GATE_ALONE(db, dripc):
+    """
+    ⚠️ THE DELIBERATE ASYMMETRY. Wiring is a property of the CALL campaign, and an
+    imported lead has none - there is nothing to wire it with. So for it the gate
+    is the only condition.
+
+    Tested through campaign_id IS NULL rather than lead_source, because the absence
+    of a call campaign is the structural fact that decides: a lead given a phone
+    and moved onto a campaign is wired by that campaign from then on, whatever its
+    provenance records.
+    """
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['imported'])
+    # nothing is wired to this drip at all
+    _wire(running_campaign_id(), None)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO leads (company, dm_email,
+                                  dm_email_confirmed, lead_source, pool_status,
+                                  status, state)
+                           VALUES ('Imported Co','i@imported.test',true,
+                                   'import','pool','imported','CA')
+                        RETURNING lead_id""")
+            lid = cur.fetchone()['lead_id']
+    assert [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'an imported lead did not enter on the gate alone - it has no call ' \
+        'campaign, so there is nothing that could wire it'
+
+
+def test_rewiring_a_campaign_does_not_move_leads_already_in_a_drip(db, dripc):
+    """
+    ⚠️ A CONFIG CHANGE MUST NEVER MOVE PEOPLE MID-SEQUENCE INTO DIFFERENT COPY.
+
+    Rewiring changes where FUTURE leads go. A lead already part-way through keeps
+    the steps it has been sent - email_sends is per (lead, step) and survives -
+    so it cannot be dragged into another sequence's step 2 mid-thread.
+    """
+    from api import campaigns as _c
+    first = dripc['campaign_id']
+    _c.update(first, accepted_statuses=['emailed'])
+    second = _c.create('DRIP-SECOND', campaign_type='drip')['campaign_id']
+    _c.start(second)
+    open_all_hours(second)
+    _c.update(second, accepted_statuses=['emailed'])
+    drip.save_steps(second, [{'delay_minutes': 0, 'subject': 'other', 'body': 'b'},
+                             {'delay_days': 1, 'subject': 'other 2', 'body': 'b'}])
+
+    _wire(running_campaign_id(), first)
+    lid = _lead(db, days_ago=11, phone_e164='+15553339004')
+    _join(db, lid, first, sent_steps=2)
+    sent_before = {r['position'] for r in drip.step_stats(first) if r['sent']}
+
+    _wire(running_campaign_id(), second)
+    # the steps it has already received are untouched - history is per (lead, step)
+    assert {r['position'] for r in drip.step_stats(first) if r['sent']} == sent_before, \
+        'rewiring rewrote which steps a lead had already received'
+
+
+def test_dnc_qualifies_for_nothing_regardless_of_wiring_or_gate(db, dripc):
+    """The exclusion lists outrank both conditions, however they are configured."""
+    from api import campaigns as _c
+    cid = dripc['campaign_id']
+    _c.update(cid, accepted_statuses=['dnc', 'emailed'])
+    _wire(running_campaign_id(), cid)
+    lid = _lead(db, days_ago=11, phone_e164='+15553339005')
+    _join(db, lid, cid, sent_steps=1)
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leads SET status='dnc' WHERE lead_id=%s", (lid,))
+    assert not [r for r in drip.due() if str(r['lead_id']) == str(lid)], \
+        'a dnc lead was selected because wiring and gate both allowed it'

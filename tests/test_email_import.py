@@ -406,9 +406,13 @@ def dripc(db):
     c = campaigns.create('IMP-DRIP', campaign_type='drip')
     cid = c['campaign_id']
     campaigns.start(cid)
-    # THE GATE IS THE MEMBERSHIP: accept both an imported lead and one that has
-    # had email 1, because this file tests both entry paths.
+    # BOTH CONDITIONS. The gate accepts an imported lead and one that has had
+    # email 1, because this file tests both entry paths - and the running CALL
+    # campaign is wired here, because a call-sourced lead needs that too. An
+    # imported lead does not: it has no call campaign, so the gate is its only
+    # condition.
     campaigns.update(cid, accepted_statuses=['imported', 'emailed'])
+    campaigns.update(running_campaign_id(), default_drip_id=cid)
     # ⚠️ BUSINESS HOURS GATE SELECTION SINCE THE PACING WORK, and a campaign is
     # created Mon-Fri 09:00-17:00 - so without this these tests pass or fail on
     # the wall clock, for a reason that has nothing to do with what they assert.

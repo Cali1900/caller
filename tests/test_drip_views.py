@@ -389,24 +389,36 @@ def test_two_drips_accepting_one_status_both_send_and_it_warns(db, dripc, client
     two emails in one afternoon.
     """
     cid = dripc['campaign_id']
-    campaigns.update(cid, accepted_statuses=['emailed'])
+    campaigns.update(cid, accepted_statuses=['imported'])
     other = campaigns.create('DRIP-NEWS', campaign_type='drip')['campaign_id']
     campaigns.start(other)
-    campaigns.update(other, accepted_statuses=['emailed'])
+    campaigns.update(other, accepted_statuses=['imported'])
 
     ov = drip.overlaps(cid)
-    assert ov and ov[0]['status'] == 'emailed', ov
+    assert ov and ov[0]['status'] == 'imported', ov
     assert set(ov[0]['names']) == {dripc['name'], 'DRIP-NEWS'}, ov
 
-    # both select the same lead
-    lid = _lead(db, days_ago=11, phone_e164='+15553330301')
-    _join(db, lid, cid)
+    # ⚠️ OVERLAP NOW ONLY REACHES A LEAD WITH NO CALL CAMPAIGN. A call campaign has
+    # ONE default_drip_id, so a wired lead cannot be in two drips at once - that is
+    # the California/Hawaii correction working. An IMPORTED lead has nothing wiring
+    # it, so the gate is its only condition and two drips accepting one status both
+    # send. That is the case this warning is for, and its scope narrowed with the
+    # correction.
+    with dbm.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO leads (company, dm_email,
+                                  dm_email_confirmed, lead_source, pool_status,
+                                  status, state)
+                           VALUES ('Overlap Co','o@overlap.test',true,'import',
+                                   'pool','imported','CA')
+                        RETURNING lead_id""")
+            lid = cur.fetchone()['lead_id']
     # TWO steps: for a lead that has had email 1, position 1 is never due
     # (DUE_NOW requires emailed_at IS NULL there), so a one-step drip would
     # select nobody and the overlap would look like it did not happen.
-    drip.save_steps(other, [
-        {'delay_minutes': 0, 'subject': 'news 1', 'body': 'b'},
-        {'delay_days': 1, 'subject': 'news 2', 'body': 'b'}])
+    # ONE step is enough: an imported lead has no emailed_at, so position 1 is the
+    # step that is due for it.
+    drip.save_steps(other, [{'delay_minutes': 0, 'subject': 'news 1', 'body': 'b'}])
     open_all_hours(other)
     picked = {str(r['drip_campaign_id']) for r in drip.due()
               if str(r['lead_id']) == str(lid)}
@@ -462,27 +474,32 @@ def test_today_warns_about_the_CONFIG_before_any_lead_is_affected(db, dripc, cli
     follows it. The failure was a campaign CONFIGURED to send people nowhere,
     which is observable before anyone is harmed and was completely silent.
     """
-    # ⚠️ REPORTED PER STATUS, because the status is what decides. A lead reaching
-    # `emailed` with no running drip accepting `emailed` gets an opener and
-    # nothing after it - and that is knowable before any lead is affected, which
-    # the per-lead net could not do.
+    # ⚠️ FOUR CAUSES, because membership needs BOTH conditions. Reported per CALL
+    # CAMPAIGN because that is where the fix is made, and each names its own fix:
+    # the consequence is identical and the remedy is not.
+    from tests.conftest import running_campaign_id
     cid = dripc['campaign_id']
-    campaigns.update(cid, accepted_statuses=['engaged'])   # nothing takes emailed
-    _lead(db, days_ago=1, company='Orphan Firm', phone_e164='+15553330401')
+    call_id = running_campaign_id()
 
+    # (a) wired to nothing
+    campaigns.update(call_id, default_drip_id=None)
     problems = campaigns.wiring_problems()
-    assert any(w['status'] == 'emailed' and 'no drip accepts it' in w['why']
+    assert any(str(w['campaign_id']) == str(call_id) and 'no drip' in w['why']
                for w in problems), problems
-    body = client.get('/today').text
-    assert 'no follow-up' in body or 'receive no' in body, \
-        '/today does not warn about a status nothing accepts'
+    assert 'nothing follow it' in client.get('/today').text
 
-    # AND THE STOPPED-DRIP VARIANT, which is the shape that actually bit: a drip
-    # accepts the status and is switched off.
-    campaigns.update(cid, accepted_statuses=['emailed'])
+    # (b) wired to a STOPPED drip - the shape that actually bit
+    campaigns.update(call_id, default_drip_id=cid)
     campaigns.stop(cid)
-    problems = campaigns.wiring_problems()
-    assert any('stopped' in w['why'] for w in problems), problems
+    assert any('stopped' in w['why'] for w in campaigns.wiring_problems())
+
+    # (c) ⚠️ WIRED AND RUNNING AND STILL NOTHING HAPPENS: the gate refuses the
+    # status email 1 sets. The hardest of the four to see, because both halves
+    # LOOK configured.
+    campaigns.start(cid)
+    campaigns.update(cid, accepted_statuses=['won'])
+    assert any('does not accept `emailed`' in w['why']
+               for w in campaigns.wiring_problems()), campaigns.wiring_problems()
 
 
 def test_a_status_a_running_drip_accepts_produces_no_warning(db, dripc, client):
@@ -832,7 +849,7 @@ def test_the_leads_page_is_REACHABLE_from_every_screen_that_lists_a_drip(db, dri
             f'{url} does not link back to the roster'
 
 
-def test_a_call_campaign_says_what_replaced_the_drip_selector(db, dripc, client):
+def test_a_call_campaign_shows_its_wiring_AND_that_drips_gate(db, dripc, client):
     """
     ⚠️ A DELETED CONTROL IS INVISIBLE IN EXACTLY THE WAY A MISSING FEATURE IS.
     The default_drip_id selector was removed when membership became derived from
@@ -844,22 +861,28 @@ def test_a_call_campaign_says_what_replaced_the_drip_selector(db, dripc, client)
     from tests.conftest import running_campaign_id
     cid = dripc['campaign_id']
     campaigns.update(cid, accepted_statuses=['emailed', 'imported'])
+    campaigns.update(running_campaign_id(), default_drip_id=cid)
     body = client.get(f'/campaign/{running_campaign_id()}').text
-    assert 'Follow-up' in body, 'the call campaign says nothing about follow-up'
-    assert 'by <b>status</b>' in body or 'by status' in body
-    assert dripc['name'] in body, 'it does not name the drip that would pick up'
+    assert 'name="default_drip_id"' in body, 'the wiring selector is missing'
+    assert 'Follow-up drip' in body
+    assert dripc['name'] in body, 'it does not name the drip it is wired to'
+    # ⚠️ AND THE GATE BESIDE IT. Showing the wiring alone would imply it were
+    # sufficient - a lead wired here whose status the gate refuses receives
+    # nothing, which looks like a wiring fault and is not.
     assert 'emailed' in body, 'it does not say which statuses that drip accepts'
-    assert '/drips?drip=' in body, 'it does not link to that drip\'s leads'
+    assert 'wired here AND its status qualifies' in body, \
+        'the screen does not say that BOTH conditions must pass'
 
 
-def test_when_no_drip_runs_the_call_campaign_SAYS_SO(db, dripc, client):
+def test_a_campaign_wired_to_nothing_SAYS_SO(db, dripc, client):
     """The other half: "currently: nothing" is the answer that matters most,
     because it means email 1 goes out and nothing follows it."""
     from tests.conftest import running_campaign_id
-    campaigns.stop(dripc['campaign_id'])
+    campaigns.update(running_campaign_id(), default_drip_id=None)
     body = client.get(f'/campaign/{running_campaign_id()}').text
-    assert 'No drip is running' in body, \
-        'a campaign whose email 1 leads nowhere does not say so'
+    assert 'No follow-up drip' in body, \
+        'a campaign wired to nothing does not say so'
+    assert 'nothing follows it' in body
 
 
 def test_the_nav_lands_on_the_roster_not_the_config(db, dripc, client):

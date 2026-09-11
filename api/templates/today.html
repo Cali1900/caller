@@ -1,24 +1,44 @@
 {% extends "base.html" %}{% block title %}today &middot; caller{% endblock %}
 {% block body %}
-{# ⚠️ THE CONFIGURATION WARNING, not a per-lead one. "emailed and on no drip"
-   below can only fire once a lead is ALREADY past email 1 - by then the mail has
-   gone and nothing follows it. This fires on the GATE, before anyone is affected.
-   Reported per STATUS, because the status is what decides membership. #}
+{# ⚠️ THE CONFIGURATION WARNING, not a per-lead one. The "emailed and on no drip"
+   net below can only fire once a lead is ALREADY past email 1 - by then the mail
+   has gone and nothing follows it. This fires on the CONFIG, before anyone is
+   affected.
+
+   FOUR CAUSES, because membership needs BOTH conditions: wired to nothing, wired
+   to a stopped drip, wired to a drip whose gate refuses `emailed`, or - for leads
+   with no call campaign - no running drip accepting their status at all. Same
+   consequence, different fix, so each names its own. #}
 {% if wiring %}
 <div class="banner warn">
-  <b>{{ wiring|length }} status{{ '' if wiring|length == 1 else 'es' }} will
-  receive no follow-up.</b>
+  <b>{{ wiring|length }} call campaign{{ '' if wiring|length == 1 else 's' }}
+  will send email&nbsp;1 and have nothing follow it.</b>
   <ul style="margin:6px 0 0 18px">
     {% for w in wiring %}
-    <li><code>{{ w.status }}</code> &mdash; {{ w.why }}.
-        <b>{{ w.leads }}</b> lead{{ '' if w.leads == 1 else 's' }} hold it, and
-        nothing will follow their opener.
+    <li><a href="/campaign/{{ w.campaign_id }}">{{ w.name }}</a>
+        {% if w.is_running %}<span class="pill completed">RUNNING</span>{% endif %}
+        &mdash; {{ w.why }}{% if w.leads %}, {{ w.leads }} lead{{ '' if w.leads == 1 else 's' }} assigned{% endif %}.
+        <a href="/campaign/{{ w.campaign_id }}">{{ w.fix }}</a></li>
+    {% endfor %}
+  </ul>
+  <span class="dim">Email&nbsp;1 can be sent by hand from any lead page, so this
+    matters whether or not the campaign is running.</span>
+</div>
+{% endif %}
+{% if orphans %}
+<div class="banner warn">
+  <b>{{ orphans|length }} status{{ '' if orphans|length == 1 else 'es' }} on leads
+  with no call campaign will receive nothing.</b>
+  <ul style="margin:6px 0 0 18px">
+    {% for o in orphans %}
+    <li><code>{{ o.status }}</code> &mdash; {{ o.why }}.
+        <b>{{ o.leads }}</b> lead{{ '' if o.leads == 1 else 's' }} hold it.
         <a href="/drips">set a drip's gate</a></li>
     {% endfor %}
   </ul>
-  <span class="dim">Membership is derived from status, so this is knowable before
-    any lead is affected &mdash; unlike the per-lead net below, which can only
-    report it afterwards.</span>
+  <span class="dim">Nothing wires a lead with no call campaign, so for these the
+    gate is the only condition &mdash; and no campaign can be pointed at as the
+    cause.</span>
 </div>
 {% endif %}
 

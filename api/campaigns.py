@@ -39,44 +39,81 @@ TEMPLATE_FIELDS = ('subject_with_name', 'subject_without',
 
 def wiring_problems() -> list:
     """
-    Statuses that will receive NO follow-up, and why.
+    Every way a lead can reach the end of email 1 and have nothing follow it.
 
-    ⚠️ THE SUCCESSOR TO "emailed and on no drip", rewritten against the gate. It
-    used to look for call campaigns whose default_drip_id was null or stopped.
-    Nothing routes now, so the question is asked of the STATUS instead: a lead
-    reaching `emailed` with no running drip accepting `emailed` gets an opener
-    and nothing after it, exactly as before, and nothing says so.
+    ⚠️ FOUR CAUSES NOW, NOT ONE, because membership needs BOTH conditions. This
+    reported per-campaign when only wiring existed, then per-status when only the
+    gate existed; neither alone is the truth. A lead needs a campaign wired to a
+    RUNNING drip whose gate accepts its status, and each of those can fail
+    separately - with the same consequence and a different fix.
 
-    Reported per STATUS rather than per campaign because that is what decides it.
-    Only statuses that leads actually hold are worth warning about - a warning
-    about a status nobody is in is noise that trains you to ignore the panel.
+    Reported per CALL CAMPAIGN, because that is where the fix is made. The
+    status-only case (an imported lead with no campaign) is reported separately:
+    nothing wires those, so a campaign is not the place to look.
     """
     from api import db as _db
-    watch = ('emailed', 'imported')
     with _db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT l.status, count(*) AS leads,
-                       (SELECT count(*) FROM campaign_configs d
-                         WHERE d.type = 'drip' AND d.is_running
-                           AND l.status = ANY(d.accepted_statuses)) AS running,
-                       (SELECT count(*) FROM campaign_configs d
-                         WHERE d.type = 'drip'
-                           AND l.status = ANY(d.accepted_statuses)) AS any_drip
-                  FROM leads l
-                 WHERE l.status = ANY(%s)
-                 GROUP BY l.status
-                 ORDER BY l.status""", (list(watch),))
+                SELECT c.campaign_id, c.name, c.is_running,
+                       d.campaign_id AS drip_id, d.name AS drip_name,
+                       d.is_running  AS drip_running,
+                       d.accepted_statuses,
+                       (SELECT count(*) FROM leads l
+                         WHERE l.campaign_id = c.campaign_id) AS leads
+                  FROM campaign_configs c
+                  LEFT JOIN campaign_configs d
+                         ON d.campaign_id = c.default_drip_id
+                 WHERE c.type = 'call'
+                 ORDER BY c.is_running DESC, c.name""")
             out = []
             for r in cur.fetchall():
-                if r['running']:
+                r = dict(r)
+                if not r['drip_id']:
+                    r['why'] = 'wired to no drip'
+                    r['fix'] = 'set its follow-up drip'
+                elif not r['drip_running']:
+                    r['why'] = f"{r['drip_name']} is stopped"
+                    r['fix'] = f"start {r['drip_name']}"
+                elif 'emailed' not in (r['accepted_statuses'] or []):
+                    # WIRED AND RUNNING AND STILL NOTHING HAPPENS. email 1 sets
+                    # `emailed`; a gate that does not accept it silently drops
+                    # every lead this campaign sends, which is the hardest of the
+                    # four to see because both halves LOOK configured.
+                    r['why'] = (f"{r['drip_name']} does not accept `emailed`, "
+                                f"which is what email 1 sets")
+                    r['fix'] = f"add `emailed` to {r['drip_name']}'s gate"
+                else:
                     continue
-                out.append({
-                    'status': r['status'], 'leads': r['leads'],
-                    'why': ('a drip accepts it but is stopped' if r['any_drip']
-                            else 'no drip accepts it'),
-                })
+                out.append(r)
             return out
+
+
+def orphan_statuses() -> list:
+    """
+    Statuses held by leads with NO call campaign that no running drip accepts.
+
+    ⚠️ THE HALF A CAMPAIGN CANNOT EXPLAIN. An imported lead has nothing wiring it,
+    so for it the gate is the only condition - and if no running drip accepts its
+    status it will never receive anything, with no campaign to point at as the
+    cause. Reported separately for that reason.
+    """
+    from api import db as _db
+    with _db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT l.status, count(*) AS leads
+                  FROM leads l
+                 WHERE l.campaign_id IS NULL
+                   AND l.status NOT IN ('dnc','archived','won','lost',
+                                        'bad_email','lost_no_response')
+                   AND NOT EXISTS (SELECT 1 FROM campaign_configs d
+                                    WHERE d.type = 'drip' AND d.is_running
+                                      AND l.status = ANY(d.accepted_statuses))
+                 GROUP BY l.status ORDER BY l.status""")
+            return [dict(r, why='no running drip accepts it, and nothing wires '
+                                'a lead with no call campaign')
+                    for r in cur.fetchall()]
 
 
 CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
@@ -98,6 +135,8 @@ CONFIG_FIELDS = ('name', 'notes', 'agent_l1_version',
                  # Which DRIP campaign this call campaign's leads enter when
                  # email 1 goes out. See drip.drip_for().
                  'accepted_statuses',
+                 # WHERE a call campaign's leads go. The gate says WHETHER.
+                 'default_drip_id',
                  # Pipeline forecast. The probabilities are GUESSES and are
                  # per campaign, because two campaigns aimed at different
                  # segments will not convert alike.

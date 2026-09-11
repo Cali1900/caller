@@ -97,9 +97,30 @@
     </div>
 
     {% if c.type == 'drip' %}
-    {# ⚠️ "FED BY" IS GONE BECAUSE NOTHING FEEDS A DRIP. Membership is derived
-       from status, so the equivalent question - who is in here and why - is
-       answered by the ACCEPTS gate below. #}
+    {# ⚠️ BOTH ENDS OF THE WIRING. default_drip_id lives on the CALL campaign, so
+       without this a drip cannot say who feeds it, and the wiring is auditable
+       from one side only. #}
+    <div class="card">
+      <h2>Fed by</h2>
+      {% if fed_by %}
+      <p class="dim" style="margin-top:0">These call campaigns are wired to this
+         drip. Their leads arrive when the gate below also accepts them.</p>
+      <table style="box-shadow:none;max-width:520px">
+        <tr><th>Call campaign</th><th></th></tr>
+        {% for f in fed_by %}
+        <tr><td><a href="/campaign/{{ f.campaign_id }}">{{ f.name }}</a></td>
+            <td>{% if f.is_running %}<span class="pill completed">RUNNING</span>
+                {% else %}<span class="dim">stopped</span>{% endif %}</td></tr>
+        {% endfor %}
+      </table>
+      {% else %}
+      <p class="dim" style="margin-bottom:0"><b>No call campaign is wired here.</b>
+         Only <b>imported</b> leads can arrive &mdash; they have no call campaign,
+         so for them the gate is the only condition. Wire one on a call campaign's
+         <b>Follow-up drip</b>.</p>
+      {% endif %}
+    </div>
+
     <div class="card">
       <h2>Accepts</h2>
       <p class="dim" style="margin-top:0">
@@ -205,23 +226,43 @@
        screen that no longer exists - the second time that has happened - so the
        card stays and explains what replaced it. #}
     <div class="card">
-      <h2>Follow-up</h2>
-      <p class="dim" style="margin-top:0">Leads enter a drip by <b>status</b>, not
-         by wiring. There is nothing to point at a drip from here: after
-         email&nbsp;1 a lead becomes <code>emailed</code>, and <b>any running drip
-         accepting that status</b> picks it up.</p>
-      {% if running_drips %}
-      <p class="dim" style="margin-bottom:0">Currently:
-        {% for d in running_drips %}
-        <a href="/campaign/{{ d.campaign_id }}">{{ d.name }}</a> accepts
-        {% if d.accepted_statuses %}{% for st in d.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
-        {% else %}<b>nothing</b>{% endif %}
-        <span class="dim">({{ drip_lead_counts.get(d.campaign_id|string, 0) }} qualify)</span>
-        &mdash; <a href="/drips?drip={{ d.campaign_id }}">its leads</a>{% if not loop.last %};{% endif %}
-        {% endfor %}</p>
+      <h2>Follow-up drip</h2>
+      <div class="field">
+        <label for="dd">After email&nbsp;1, leads go to this drip</label>
+        <select id="dd" name="default_drip_id">
+          <option value="" {% if not c.default_drip_id %}selected{% endif %}>none
+            &mdash; leads will not enter a drip after email 1</option>
+          {% for d in drip_options %}
+          <option value="{{ d.campaign_id }}"
+                  {% if c.default_drip_id and c.default_drip_id|string == d.campaign_id|string %}selected{% endif %}>
+            {{ d.name }}{% if not d.is_running %} (stopped){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {# ⚠️ WIRING AND GATE ARE TWO CONDITIONS AND BOTH MUST PASS. The wiring says
+         WHERE this campaign's leads go; the drip's gate says WHETHER a lead is
+         ready. Showing only one would imply it were sufficient - and a lead wired
+         here whose status the gate refuses receives nothing, which looks like a
+         wiring fault and is not. #}
+      {% if drip_chosen %}
+      <p class="dim">{{ drip_chosen.name }} accepts
+        {% if drip_chosen.accepted_statuses %}{% for st in drip_chosen.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% else %}<b>nothing</b>{% endif %}.
+        A lead arrives when it is <b>wired here AND its status qualifies</b>.
+        <a href="/drips?drip={{ drip_chosen.campaign_id }}">its leads</a> &middot;
+        <a href="/campaign/{{ drip_chosen.campaign_id }}">its gate</a></p>
+      {% if not drip_chosen.is_running %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ drip_chosen.name }} is
+        stopped</b>, so nothing follows email&nbsp;1 at all until it is started.</p>
+      {% elif 'emailed' not in (drip_chosen.accepted_statuses or []) %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>{{ drip_chosen.name }} does not
+        accept <code>emailed</code></b>, which is the status email&nbsp;1 sets
+        &mdash; so leads from here will be wired to it and never qualify.</p>
+      {% endif %}
       {% else %}
-      <p class="dim" style="margin-bottom:0">⚠️ <b>No drip is running</b>, so
-         nothing follows email&nbsp;1 at all. <a href="/drips">Start one</a>.</p>
+      <p class="dim" style="margin-bottom:0">⚠️ <b>No follow-up drip.</b> Leads
+        will not enter a drip after email&nbsp;1 &mdash; email 1 goes out and
+        nothing follows it. They appear in <a href="/today">Today</a>.</p>
       {% endif %}
     </div>
 

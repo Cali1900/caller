@@ -1677,8 +1677,10 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     # campaign's page. The default_drip_id selector used to be there. It is gone
     # because nothing wires a drip any more - but a screen that simply LOSES a
     # control teaches nobody why; it just costs somebody an hour looking for it.
-    running_drips = [c for c in campaigns.list_all()
-                     if c['type'] == 'drip' and c['is_running']]
+    drip_options = [c for c in campaigns.list_all() if c['type'] == 'drip']
+    drip_chosen = (campaigns.get(camp['default_drip_id'])
+                   if camp.get('default_drip_id') else None)
+    fed_by = _drip_mod.feeders(campaign_id) if is_drip else []
     drip_lead_counts = _drip_mod.qualifying_counts()
     # The chosen one, resolved here so the template can say "stopped" without
     # searching the list itself.
@@ -1711,7 +1713,8 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
         'gate_counts': gate_counts, 'overlaps': overlaps,
-        'running_drips': running_drips, 'drip_lead_counts': drip_lead_counts,
+        'drip_options': drip_options, 'drip_chosen': drip_chosen,
+        'fed_by': fed_by, 'drip_lead_counts': drip_lead_counts,
         'statuses': STATUSES, 'caution': _drip_mod.CAUTION_STATUSES,
         'stop_confirm': stop_confirm,
         'pace': pace, 'emails_per_hour': emails_per_hour,
@@ -1972,7 +1975,8 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(Non
                   email_gap_max_seconds: int = Form(None),
                   email_hourly_cap: int = Form(None),
                   email_daily_cap: int = Form(None),
-                  accepted_statuses: list = Form(None)):
+                  accepted_statuses: list = Form(None),
+                  default_drip_id: str = Form(None)):
     """
     ⚠️ THE CALL FIELDS ARE OPTIONAL BECAUSE A DRIP SCREEN DOES NOT RENDER THEM.
 
@@ -2009,6 +2013,14 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(Non
         bad = [x for x in accepted_statuses if x not in STATUSES]
         if bad:
             return _refuse(f'not a lead status: {", ".join(bad)}')
+    # ⚠️ THE WIRING. An EMPTY STRING is a real answer - "none", chosen on purpose -
+    # and None means the field was not on this type's form. Collapsing them makes
+    # "none" unsettable, which is the state that caused this in the first place: a
+    # silent null, wired to nothing, with no way to say so deliberately.
+    if default_drip_id is not None and default_drip_id.strip():
+        target = campaigns.get(default_drip_id.strip())
+        if target is None or target['type'] != 'drip':
+            return _refuse('the follow-up drip must be a drip campaign')
     if camp['type'] == 'call':
         missing = [n for n, v in (('prompt version', agent_l1_version),
                                   ('daily cap', daily_cap),
@@ -2075,6 +2087,8 @@ def campaign_save(campaign_id: str, name: str = Form(...), notes: str = Form(Non
                 fields[k] = v
         if accepted_statuses is not None:
             fields['accepted_statuses'] = accepted_statuses
+        if default_drip_id is not None:
+            fields['default_drip_id'] = default_drip_id.strip() or None
         if camp['type'] == 'call':
             fields.update(_retry_fields(max_attempts, retry_busy,
                                         retry_no_answer, retry_voicemail))
@@ -2272,7 +2286,9 @@ def today_page(request: Request, sent: str = ''):
         # ALREADY past email 1; this finds the CONFIGURATION that will send the
         # next one nowhere, which is observable before anybody is affected and
         # was completely silent.
-        'wiring': campaigns.wiring_problems()})
+        'wiring': campaigns.wiring_problems(),
+        # The half no campaign can explain - see orphan_statuses().
+        'orphans': campaigns.orphan_statuses()})
 
 
 @router.post('/today/send')

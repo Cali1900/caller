@@ -15,9 +15,9 @@ Last updated 2026-09-10. Every number in the table below was read from
 |---|---|
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
-| Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
-| Tests | 788 passed, 1 skipped |
-| Break pass | **144 definitions** (140–144 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
+| Drip membership | **WIRING *and* GATE — both must pass.** `C1 → Drip 1` (wiring), and `Drip 1` accepts `emailed, imported, clicked` (gate). Imported leads have no call campaign, so for them the gate is the only condition |
+| Tests | 794 passed, 1 skipped |
+| Break pass | **146 definitions** (140–146 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -654,7 +654,66 @@ to another drip, and confirms before firing. Break 142.
 The status dropdown posts to the **same** `/leads/<id>/status` route as lead
 detail, with a `back` parameter: one control, two places, one meaning.
 
-## ⚠️ DRIP MEMBERSHIP IS DERIVED FROM STATUS (2026-09-10)
+## ⚠️ WIRING **AND** GATE — BOTH MUST PASS (2026-09-11, corrects the section below)
+
+    WIRING   C1 -> Drip 3        WHERE this campaign's leads go
+    GATE     accepts: emailed    WHETHER a lead is ready to receive
+
+**A lead receives a step only if both pass.** The section below described the gate
+as *replacing* `default_drip_id`. It does not, and migration 047 restores the
+wiring. Read this first; that section is right about everything except the removal.
+
+### Why the gate alone cannot work
+
+A California drip and a Hawaii drip both accept `emailed`. On the gate alone,
+**every California lead receives the Hawaii sequence too.** Status cannot express
+destination — not geography, not which campaign sourced a lead — and must not be
+made to: that is the one-field-two-jobs fault this codebase keeps paying for.
+"Dumb" meant the system does not get clever about *choosing*; it did not mean route
+to everything that matches. Break 145.
+
+| fragment | question |
+|---|---|
+| `drip.WIRED` | is this lead's call campaign pointed at THIS drip? |
+| `drip.GATE` | is its status on THIS drip's accepted list? |
+| `drip.MEMBER_SQL` | both, as one expression — shared by the roster and every count, so no screen can disagree with the sender |
+
+### ⚠️ Imported leads enter on the GATE ALONE
+
+Wiring is a property of the **call campaign**, and an imported lead has none —
+there is nothing that could wire it. Tested as `campaign_id IS NULL`, not
+`lead_source = 'import'`: lead_source *records* where a lead came from, while the
+absence of a call campaign is the structural fact that decides. A lead given a
+phone and moved onto a campaign is wired by that campaign from then on, whatever
+its provenance says. Break 146.
+
+**Overlap narrowed with this.** A call campaign has one `default_drip_id`, so a
+wired lead cannot be in two drips at once. Two drips accepting one status both send
+only to leads with **no call campaign** — which is what the overlap warning is for
+now.
+
+### The four ways a lead can end up receiving nothing
+
+`campaigns.wiring_problems()` reports per **call campaign**, because that is where
+the fix is made, and each names its own fix:
+
+| cause | fix |
+|---|---|
+| wired to no drip | set its follow-up drip |
+| wired to a **stopped** drip | start that drip |
+| wired to a running drip whose gate refuses `emailed` | add `emailed` to that gate |
+| no call campaign at all | `campaigns.orphan_statuses()` — reported separately, because no campaign can be pointed at as the cause |
+
+The third is the hardest to see: **both halves look configured.** Break 137.
+
+### Both ends visible
+
+Call campaign page: the selector, plus that drip's gate and the sentence *"a lead
+arrives when it is wired here AND its status qualifies"* — showing the wiring alone
+would imply it were sufficient. Drip page: **Fed by**, the campaigns wired to it.
+Lead detail: *"wired from C1, status is clicked"*. Break 143.
+
+## DRIP MEMBERSHIP: the GATE half (2026-09-10 — see the correction above)
 
 **A drip declares which statuses it accepts. A lead's status decides whether it
 qualifies. That is the whole mechanism.** Re-evaluated on every selection, so a
