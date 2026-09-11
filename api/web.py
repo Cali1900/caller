@@ -1315,13 +1315,7 @@ def campaigns_list(request: Request, msg: str = '', confirm: str = ''):
                              FROM drip_steps WHERE deleted_at IS NULL
                             GROUP BY campaign_id""")
             step_counts = {r['cid']: r['n'] for r in cur.fetchall()}
-            cur.execute("""SELECT c.campaign_id::text AS cid, count(l.lead_id) AS n
-                             FROM campaign_configs c
-                             LEFT JOIN leads l
-                                    ON l.status = ANY(c.accepted_statuses)
-                            WHERE c.type = 'drip'
-                            GROUP BY c.campaign_id""")
-            drip_counts = {r['cid']: r['n'] for r in cur.fetchall()}
+    drip_counts = _drip_mod.qualifying_counts()
     return templates.TemplateResponse(request, 'campaigns.html', {
         'hdr': hdr, 'campaigns': rows, 'msg': msg,
         'step_counts': step_counts, 'drip_counts': drip_counts,
@@ -1679,6 +1673,13 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     is_drip = camp['type'] == 'drip'
     gate_counts = _drip_mod.gate_counts() if is_drip else {}
     overlaps = _drip_mod.overlaps(campaign_id) if is_drip else []
+    # ⚠️ THE RUNNING DRIPS AND WHAT THEY ACCEPT, for the FOLLOW-UP note on a CALL
+    # campaign's page. The default_drip_id selector used to be there. It is gone
+    # because nothing wires a drip any more - but a screen that simply LOSES a
+    # control teaches nobody why; it just costs somebody an hour looking for it.
+    running_drips = [c for c in campaigns.list_all()
+                     if c['type'] == 'drip' and c['is_running']]
+    drip_lead_counts = _drip_mod.qualifying_counts()
     # The chosen one, resolved here so the template can say "stopped" without
     # searching the list itself.
 
@@ -1710,6 +1711,7 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
     return templates.TemplateResponse(request, 'campaign.html', {
         'hdr': hdr, 'c': camp, 'queue': q, 'msg': msg, 'seq_msg': seq_msg,
         'gate_counts': gate_counts, 'overlaps': overlaps,
+        'running_drips': running_drips, 'drip_lead_counts': drip_lead_counts,
         'statuses': STATUSES, 'caution': _drip_mod.CAUTION_STATUSES,
         'stop_confirm': stop_confirm,
         'pace': pace, 'emails_per_hour': emails_per_hour,
@@ -1789,6 +1791,7 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
         # the drip area cannot answer "where do these leads come from" - and it
         # is the screen the drip work actually happens on.
         'overlaps': _drip_mod.overlaps(cid),
+        'drip_lead_counts': _drip_mod.qualifying_counts(),
         # ⚠️ THE SEQUENCE EDITOR IS AN INCLUDE, so it needs exactly the context
         # the campaign page gives it. Anything missing renders as empty rather
         # than erroring, which is how a template silently loses a control.

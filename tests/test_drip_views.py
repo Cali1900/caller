@@ -810,3 +810,44 @@ def test_send_now_asks_before_it_fires(db, dripc, client):
 def _cfg_for_tests():
     from api.config import load_config
     return load_config()
+
+
+def test_the_leads_page_is_REACHABLE_from_every_screen_that_lists_a_drip(db, dripc, client):
+    """
+    ⚠️ A PAGE NOTHING POINTS AT IS NOT A PAGE. /drips/<id>/leads shipped with no
+    link anywhere - reachable only by typing the URL, which is not reachable.
+    """
+    cid = dripc['campaign_id']
+    want = f'/drips/{cid}/leads'
+    for url in (f'/drips?drip={cid}', f'/campaign/{cid}'):
+        assert want in client.get(url).text, f'{url} does not link to the roster'
+
+
+def test_a_call_campaign_says_what_replaced_the_drip_selector(db, dripc, client):
+    """
+    ⚠️ A DELETED CONTROL IS INVISIBLE IN EXACTLY THE WAY A MISSING FEATURE IS.
+    The default_drip_id selector was removed when membership became derived from
+    status, and the card simply vanished - so the answer to "how do I point this
+    campaign at a drip" was nowhere near where anyone would look for it.
+
+    The note must carry the LIVE values, or it explains rather than answers.
+    """
+    from tests.conftest import running_campaign_id
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed', 'imported'])
+    body = client.get(f'/campaign/{running_campaign_id()}').text
+    assert 'Follow-up' in body, 'the call campaign says nothing about follow-up'
+    assert 'by <b>status</b>' in body or 'by status' in body
+    assert dripc['name'] in body, 'it does not name the drip that would pick up'
+    assert 'emailed' in body, 'it does not say which statuses that drip accepts'
+    assert f'/drips/{cid}/leads' in body, 'it does not link to that drip\'s leads'
+
+
+def test_when_no_drip_runs_the_call_campaign_SAYS_SO(db, dripc, client):
+    """The other half: "currently: nothing" is the answer that matters most,
+    because it means email 1 goes out and nothing follows it."""
+    from tests.conftest import running_campaign_id
+    campaigns.stop(dripc['campaign_id'])
+    body = client.get(f'/campaign/{running_campaign_id()}').text
+    assert 'No drip is running' in body, \
+        'a campaign whose email 1 leads nowhere does not say so'

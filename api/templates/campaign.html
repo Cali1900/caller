@@ -102,6 +102,10 @@
        answered by the ACCEPTS gate below. #}
     <div class="card">
       <h2>Accepts</h2>
+      <p class="dim" style="margin-top:0">
+        <a href="/drips/{{ c.campaign_id }}/leads"><b>{{ drip_lead_counts.get(c.campaign_id|string, 0) }}
+        lead(s) qualify right now &rarr;</b></a> &mdash; who is here, how far
+        through, and when each one sends next.</p>
       <p class="dim" style="margin-top:0">A lead is on this drip while its
          <b>status</b> is one of these. Nothing is assigned and nothing routes:
          tick a status and every lead holding it joins; untick it and they leave,
@@ -196,11 +200,31 @@
 
     {# BOTH TYPES have a sender: a drip mails as somebody too. #}
     {% if c.type == 'call' %}
-    {# ⚠️ THE FOLLOW-UP DRIP SELECTOR IS GONE. A call campaign no longer chooses
-       what follows its email 1 - sending email 1 sets the status to `emailed`,
-       and every running drip accepting `emailed` picks the lead up. The choice
-       moved from "which drip does this campaign feed" to "which statuses does
-       this drip accept", which is one fact instead of two that could disagree. #}
+    {# ⚠️ A DELETED CONTROL MUST SAY SO WHERE IT USED TO BE. The default_drip_id
+       selector stood here. Removing it silently sent somebody hunting for a
+       screen that no longer exists - the second time that has happened - so the
+       card stays and explains what replaced it. #}
+    <div class="card">
+      <h2>Follow-up</h2>
+      <p class="dim" style="margin-top:0">Leads enter a drip by <b>status</b>, not
+         by wiring. There is nothing to point at a drip from here: after
+         email&nbsp;1 a lead becomes <code>emailed</code>, and <b>any running drip
+         accepting that status</b> picks it up.</p>
+      {% if running_drips %}
+      <p class="dim" style="margin-bottom:0">Currently:
+        {% for d in running_drips %}
+        <a href="/campaign/{{ d.campaign_id }}">{{ d.name }}</a> accepts
+        {% if d.accepted_statuses %}{% for st in d.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% else %}<b>nothing</b>{% endif %}
+        <span class="dim">({{ drip_lead_counts.get(d.campaign_id|string, 0) }} qualify)</span>
+        &mdash; <a href="/drips/{{ d.campaign_id }}/leads">its leads</a>{% if not loop.last %};{% endif %}
+        {% endfor %}</p>
+      {% else %}
+      <p class="dim" style="margin-bottom:0">⚠️ <b>No drip is running</b>, so
+         nothing follows email&nbsp;1 at all. <a href="/drips">Start one</a>.</p>
+      {% endif %}
+    </div>
+
     <div class="card">
       <h2>Daily cap</h2>
       <div class="field"><label for="cap">New leads per day</label>

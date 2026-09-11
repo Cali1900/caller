@@ -10,6 +10,22 @@
   <p class="dim">No drip campaigns yet. Create one on <a href="/campaigns">Campaigns</a>.</p>
 {% else %}
 
+{# ⚠️ EVERY DRIP, ITS COUNT AND A LINK. The roster page existed with nothing
+   pointing at it - reachable only by typing the URL, which is not reachable. #}
+<table style="max-width:820px;margin-bottom:14px">
+<tr><th>Drip</th><th>Accepts</th><th class="right">Qualify</th><th></th></tr>
+{% for d in drips %}
+<tr{% if d.campaign_id|string == c.campaign_id|string %} class="hl"{% endif %}>
+  <td><a href="/drips?drip={{ d.campaign_id }}"><b>{{ d.name }}</b></a>
+      {% if not d.is_running %}<span class="dim">stopped</span>{% endif %}</td>
+  <td class="dim">{% if d.accepted_statuses %}{% for st in d.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+      {% else %}<b>nothing</b>{% endif %}</td>
+  <td class="right">{{ drip_lead_counts.get(d.campaign_id|string, 0) }}</td>
+  <td><a href="/drips/{{ d.campaign_id }}/leads">its leads &rarr;</a></td>
+</tr>
+{% endfor %}
+</table>
+
 <div class="toolbar" style="margin-bottom:12px">
   <form class="inline" method="get" action="/drips">
     <label class="dim">Drip

@@ -387,6 +387,26 @@ def sending_statuses() -> dict:
             return out
 
 
+def qualifying_counts() -> dict:
+    """
+    {campaign_id (str): how many leads qualify} for every drip.
+
+    One query for the whole list, so a page showing several drips does not run a
+    count per row - and so /campaigns, /drips and the config page cannot disagree
+    about how many leads are on a drip.
+    """
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT c.campaign_id::text AS cid,
+                                  count(l.lead_id) AS n
+                             FROM campaign_configs c
+                             LEFT JOIN leads l
+                                    ON l.status = ANY(c.accepted_statuses)
+                            WHERE c.type = 'drip'
+                            GROUP BY c.campaign_id""")
+            return {r['cid']: r['n'] for r in cur.fetchall()}
+
+
 def gate_counts(statuses=None) -> dict:
     """
     {status: how many leads have it} - so a gate change can be read BEFORE it is

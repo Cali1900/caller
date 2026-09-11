@@ -245,6 +245,32 @@ Cheap, mechanical, and it caught what three rounds of care did not. The same
 shape as everything else in this file: prefer a check that reads the real artefact
 over a claim about the thing that produces it.
 
+### ⚠️ STANDING RULE — when a concept is REMOVED, name the screens that change
+
+Twice now Sean has gone looking for a control that was deliberately deleted:
+
+| looked for | what had happened |
+|---|---|
+| the follow-up drip selector on a call campaign | `default_drip_id` was replaced by the status gate, and the card simply disappeared |
+| "how do I connect C1 to Drip 2" | there is nothing to connect — membership is derived — and no screen said so |
+
+**A deleted control is invisible in exactly the way a missing feature is.** The
+code says why, the commit says why, the HANDOFF says why — and none of those are
+where somebody stands when they go looking. The screen is.
+
+So, removing a concept has three parts, not one:
+
+1. delete the code, and the guards that only made sense with it
+2. **leave a note where the control used to be**, saying what replaced it and
+   where the answer lives now — with the live values, so it answers rather than
+   explains. `campaign.html`'s FOLLOW-UP card is the worked example: it names the
+   running drips, what each accepts, how many qualify, and links to their leads.
+3. **list the screens that change, in the report** — not just the modules
+
+And the same failure in a smaller form: `/drips/<id>/leads` was built with nothing
+linking to it, reachable only by typing the URL. **A page nothing points at is not
+a page.** Ship the route and the link together.
+
 ### ⚠️ STANDING RULE — verify the guards you TOUCHED; a full pass is on request only
 
 Default: after a change, run `break_pass.sh --only=<def>` for each break whose

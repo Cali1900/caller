@@ -16,8 +16,8 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
-| Tests | 783 passed, 1 skipped |
-| Break pass | **142 definitions** (140–142 added for the roster redesign, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
+| Tests | 786 passed, 1 skipped |
+| Break pass | **143 definitions** (140–143 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -549,6 +549,37 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## ⚠️ WHERE TO LOOK FOR A DRIP, AND WHAT REPLACED THE WIRING (2026-09-11)
+
+Two navigation failures, and the second is the one worth remembering.
+
+**`/drips/<id>/leads` had nothing linking to it** — built, working, reachable only
+by typing the URL. It is now linked from the drip's config page (`/campaign/<id>`,
+in the Accepts card) and from `/drips`, which lists **every** drip with what it
+accepts, how many qualify, and a link to its leads. **A page nothing points at is
+not a page.**
+
+**The follow-up drip selector was deleted and the screen said nothing.** Sean went
+looking for "how do I point C1 at Drip 2", which no longer exists because
+membership is derived. The card is back, as a note, where the control used to be:
+
+    FOLLOW-UP
+    Leads enter a drip by STATUS, not by wiring. After email 1 a lead becomes
+    `emailed`, and any running drip accepting that status picks it up.
+    Currently: Drip 1 accepts emailed, imported, clicked (1 qualify) — its leads
+
+It carries **live values** on purpose. A note that explains the concept answers the
+question once; one that names the current state answers it every time — including
+the case that matters most, *no drip is running*, which means email 1 goes out and
+nothing follows it. Break 143.
+
+`drip.qualifying_counts()` is the **one** query behind every drip lead count on
+every screen, so `/campaigns`, `/drips` and the config page cannot disagree.
+
+See the README standing rule: **when a concept is removed, name the screens that
+change** — and leave a note where the control was. That is the third part of
+removing something, alongside deleting the code and its guards.
 
 ## The drip roster: its own page, a number, and a pill that acts (2026-09-10)
 
