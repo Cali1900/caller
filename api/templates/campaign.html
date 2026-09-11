@@ -103,7 +103,7 @@
     <div class="card">
       <h2>Accepts</h2>
       <p class="dim" style="margin-top:0">
-        <a href="/drips/{{ c.campaign_id }}/leads"><b>{{ drip_lead_counts.get(c.campaign_id|string, 0) }}
+        <a href="/drips?drip={{ c.campaign_id }}"><b>{{ drip_lead_counts.get(c.campaign_id|string, 0) }}
         lead(s) qualify right now &rarr;</b></a> &mdash; who is here, how far
         through, and when each one sends next.</p>
       <p class="dim" style="margin-top:0">A lead is on this drip while its
@@ -217,7 +217,7 @@
         {% if d.accepted_statuses %}{% for st in d.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
         {% else %}<b>nothing</b>{% endif %}
         <span class="dim">({{ drip_lead_counts.get(d.campaign_id|string, 0) }} qualify)</span>
-        &mdash; <a href="/drips/{{ d.campaign_id }}/leads">its leads</a>{% if not loop.last %};{% endif %}
+        &mdash; <a href="/drips?drip={{ d.campaign_id }}">its leads</a>{% if not loop.last %};{% endif %}
         {% endfor %}</p>
       {% else %}
       <p class="dim" style="margin-bottom:0">⚠️ <b>No drip is running</b>, so

@@ -16,8 +16,8 @@ Last updated 2026-09-10. Every number in the table below was read from
 | Repo | `git@github.com:Cali1900/caller.git`, branch `main`, all work pushed |
 | Last migration | `20260910_042_a_send_needs_a_recipient.sql` |
 | Drip membership | **DERIVED FROM STATUS.** No assignment column exists. `Drip 1` accepts `emailed`+`imported`; both live leads are `engaged`, so nothing qualifies and nothing is queued |
-| Tests | 786 passed, 1 skipped |
-| Break pass | **143 definitions** (140–143 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
+| Tests | 788 passed, 1 skipped |
+| Break pass | **144 definitions** (140–144 added since, verified RED individually; the last FULL pass was over 139). Full pass **OK across all 139** at **2026-09-10T22:03Z** — every removal turned its OWN named test red, all 13 chunks restore-verified against the md5 manifest, and the suite green with the guards back (777 passed). Recorded in `.break_pass_last`. It took SIX attempts: five stopped on a guard that had quietly stopped being PROVEN, and one on a defect in the pass itself — see the masked-guard table (rows 16–20) and the tooling-defect section |
 | Masked guards | **15**, all named in README.md. Rows 14 and 15 are from 2026-09-10: a blank clone masking the save's count guard, and a test that read the constant it was asserting |
 | Campaigns | `C1` (call, **stopped**) and `Drip 1` (drip, **RUNNING**), which accepts `emailed`, `imported` and `clicked` |
 | Data | 1,087 leads, **all `lead_source='call'`** — all 1,087 in the pool, 0 queued — 2 calls, 3 suppressed, 0 archived, 0 on the email do-not-send list |
@@ -549,6 +549,30 @@ partial unique index unless the statement repeats its predicate. **Twelve tests
 went red immediately, all on the CALL path**, not the new one. Fixed in
 `upload.py` and `scripts/add_lead.sh`; the other three `ON CONFLICT (phone_e164)`
 sites target `suppression`, whose constraint was untouched.
+
+## `/drips` is the ROSTER; the sequence is one click away (2026-09-11)
+
+    Leads · Drips · Campaigns · Prompts · Funnel · Today
+
+| route | what it is |
+|---|---|
+| `/drips` | **the roster** — who is in a sequence, when each sends next. The drip switcher with every drip's gate and count is at the top |
+| `/drips/<id>/sequence` | the copy, the per-step `sent / clicked / %` table, the editor |
+| `/campaign/<id>` | gate, pacing, sender, business hours |
+| `/drips/<id>/leads` | **308 → `/drips?drip=<id>`.** That URL was given out; a link that used to work should not become a 404 to prove a point |
+
+`/drips` used to open the sequence, with the leads a link inside it — so seeing who
+is in a sequence meant going through a config screen **every time**. The sequence is
+set once; the roster is read daily, and the nav should land on the one that gets
+used. Same reasoning as `Leads` being the call view's front door rather than a
+campaign's settings. Break 144.
+
+**One nav item, not two.** "Drips" and "Drip leads" side by side would make somebody
+choose between two words for one subject on every visit — and the menu is already
+six items.
+
+The switcher moved to the roster too: choosing *which* drip to look at is the first
+thing you do, not something you do after arriving at one.
 
 ## ⚠️ WHERE TO LOOK FOR A DRIP, AND WHAT REPLACED THE WIRING (2026-09-11)
 

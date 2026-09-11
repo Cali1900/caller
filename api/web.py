@@ -1753,8 +1753,8 @@ def _campaign_view(request: Request, campaign_id: str, msg: str = '',
         'running': campaigns.running()})
 
 
-@router.get('/drips', response_class=HTMLResponse)
-def drips_page(request: Request, drip: str = '', msg: str = ''):
+@router.get('/drips/{campaign_id}/sequence', response_class=HTMLResponse)
+def drip_sequence_page(request: Request, campaign_id: str, msg: str = ''):
     """
     THE DRIP AREA - separate from calls, not a filter on the shared leads list.
 
@@ -1774,10 +1774,10 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
     if not drips:
         return templates.TemplateResponse(request, 'drips.html', {
             'hdr': hdr, 'drips': [], 'msg': msg})
-    # The picked drip, or the first. An id that is not a drip falls back rather
-    # than 404ing: a stale bookmark should land somewhere useful.
-    chosen = next((c for c in drips if str(c['campaign_id']) == str(drip)),
-                  drips[0])
+    # An id that is not a drip falls back rather than 404ing: a stale bookmark
+    # should land somewhere useful.
+    chosen = next((c for c in drips
+                   if str(c['campaign_id']) == str(campaign_id)), drips[0])
     cid = chosen['campaign_id']
     stats = _drip_mod.step_stats(cid)
     pv_lead, pv_real = drafts_mod.preview_lead(cid)
@@ -1811,25 +1811,36 @@ def drips_page(request: Request, drip: str = '', msg: str = ''):
         'seq_msg': ''})
 
 
-@router.get('/drips/{campaign_id}/leads', response_class=HTMLResponse)
-def drip_leads_page(request: Request, campaign_id: str, msg: str = '',
-                    confirm_send: str = ''):
+@router.get('/drips', response_class=HTMLResponse)
+def drips_page(request: Request, drip: str = '', msg: str = '',
+               confirm_send: str = ''):
     """
-    THE ROSTER, on its own page.
+    ⚠️ /drips IS THE ROSTER, because that is the screen opened daily.
 
-    ⚠️ SPLIT FROM THE CONFIG PAGE because that screen had stacked the metrics, the
-    per-step table, the roster and the sequence editor - four things with four
-    different jobs, and the roster is the only one that is about individual firms.
-    The per-step table stays on config: it is about the SEQUENCE, not the leads.
+    It used to land on the sequence - the per-step rates and the editor - and the
+    leads were a link inside it, so seeing who is in a sequence meant going through
+    a config screen. The sequence is set once; the roster is read constantly, and
+    the nav should land on the one that gets used. Same reasoning as `Leads` being
+    the call view's front door rather than a campaign's settings.
+
+    The sequence and its rates moved to /drips/<id>/sequence, one click away and
+    linked from here. No second nav item: six is already a lot, and "Drips" and
+    "Drip leads" side by side would make somebody choose between two words for one
+    subject every time.
     """
     cfg = _cfg()
     with db.get_conn() as conn:
         hdr = _header(conn, cfg)
-    camp = campaigns.get(campaign_id)
-    if camp is None or camp['type'] != 'drip':
-        return HTMLResponse('<p>no such drip</p>', status_code=404)
+    drips = [c for c in campaigns.list_all() if c['type'] == 'drip']
+    if not drips:
+        return templates.TemplateResponse(request, 'drip_leads.html', {
+            'hdr': hdr, 'drips': [], 'c': None, 'msg': msg, 'roster': []})
+    camp = next((c for c in drips if str(c['campaign_id']) == str(drip)),
+                drips[0])
+    campaign_id = camp['campaign_id']
     return templates.TemplateResponse(request, 'drip_leads.html', {
-        'hdr': hdr, 'c': camp, 'msg': msg,
+        'hdr': hdr, 'c': camp, 'msg': msg, 'drips': drips,
+        'drip_lead_counts': _drip_mod.qualifying_counts(),
         'roster': _drip_mod.roster(campaign_id),
         'pace': _drip_mod.held(campaign_id),
         'operator_tz': cfg.OPERATOR_TIMEZONE,
@@ -1838,6 +1849,15 @@ def drip_leads_page(request: Request, campaign_id: str, msg: str = '',
         'manual_statuses': MANUAL_STATUSES,
         'status_sends': _drip_mod.sending_statuses(),
         'confirm_send': confirm_send})
+
+
+@router.get('/drips/{campaign_id}/leads')
+def drip_leads_moved(campaign_id: str):
+    """
+    The roster's old address. It is /drips now - kept because that URL was given
+    out, and a link that used to work should not become a 404 to prove a point.
+    """
+    return RedirectResponse(f'/drips?drip={campaign_id}', status_code=308)
 
 
 @router.post('/drips/{campaign_id}/leads/{lead_id}/send-now')
@@ -1857,7 +1877,7 @@ def drip_send_now(campaign_id: str, lead_id: str, step_id: str = Form(...),
     """
     if confirm != 'yes':
         return RedirectResponse(
-            f'/drips/{campaign_id}/leads?confirm_send={lead_id}:{step_id}',
+            f'/drips?drip={campaign_id}&confirm_send={lead_id}:{step_id}',
             status_code=303)
     row = _drip_mod.row_for_send(campaign_id, lead_id, step_id)
     if row is None:
@@ -1868,7 +1888,7 @@ def drip_send_now(campaign_id: str, lead_id: str, step_id: str = Form(...),
         msg = (f'Sent step {row["position"]} to {row["company"]} now.'
                if r['sent'] else f'REFUSED: {r["detail"]}')
     return RedirectResponse(
-        f'/drips/{campaign_id}/leads?msg={urllib.parse.quote(msg)}',
+        f'/drips?drip={campaign_id}&msg={urllib.parse.quote(msg)}',
         status_code=303)
 
 

@@ -1,15 +1,37 @@
 {% extends "base.html" %}{% block title %}{{ c.name }} leads · Caller{% endblock %}
 {% block body %}
-<h1>{{ c.name }} &mdash; leads</h1>
-<p class="sub">
-  <a href="/drips?drip={{ c.campaign_id }}">&larr; the sequence and its per-step rates</a>
-  &nbsp;·&nbsp;
-  <a href="/campaign/{{ c.campaign_id }}">gate, pacing and sender</a>
-  &nbsp;·&nbsp;
-  {% if c.is_running %}<span class="livedot on"></span> running
-  {% else %}<span class="livedot off"></span> <b>stopped</b> &mdash; nothing sends
-  {% endif %}
-</p>
+<h1>Drips</h1>
+{% if not c %}
+  <p class="dim">No drip campaigns yet. Create one on
+     <a href="/campaigns">Campaigns</a>.</p>
+{% else %}
+<p class="sub">Who is in a sequence, and when each one sends next. The sequence
+   itself and its per-step rates are one click away &mdash; this is the screen
+   read daily, so it is the one the menu lands on.</p>
+
+{# THE SWITCHER, and every drip's count. It lived on the sequence page, which is
+   the wrong place: choosing which drip to look at is the first thing you do, not
+   something you do after arriving at one. #}
+<table style="max-width:860px;margin-bottom:14px">
+<tr><th>Drip</th><th>Accepts</th><th class="right">Qualify</th><th></th></tr>
+{% for d in drips %}
+<tr>
+  <td>{% if d.campaign_id|string == c.campaign_id|string %}<b>{{ d.name }}</b>
+      {% else %}<a href="/drips?drip={{ d.campaign_id }}">{{ d.name }}</a>{% endif %}
+      {% if d.is_running %}<span class="livedot on"></span>
+      {% else %}<span class="dim">stopped</span>{% endif %}</td>
+  <td class="dim">{% if d.accepted_statuses %}{% for st in d.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+      {% else %}<b>nothing</b>{% endif %}</td>
+  <td class="right">{{ drip_lead_counts.get(d.campaign_id|string, 0) }}</td>
+  <td><a href="/drips/{{ d.campaign_id }}/sequence">sequence &amp; rates</a>
+      &middot; <a href="/campaign/{{ d.campaign_id }}">settings</a></td>
+</tr>
+{% endfor %}
+</table>
+
+<h2>{{ c.name }}
+  {% if not c.is_running %}<span class="pill human_review">stopped &mdash; nothing sends</span>{% endif %}
+</h2>
 {% if msg %}<div class="banner{% if 'REJECT' in msg or 'REFUSED' in msg %} warn{% endif %}">{{ msg }}</div>{% endif %}
 
 {% if not roster %}
@@ -74,7 +96,7 @@
              lead detail does - including dropping the lead out of this drip. #}
           <form method="post" action="/leads/{{ l.lead_id }}/status" class="toolbar"
                 style="margin:0 0 6px">
-            <input type="hidden" name="back" value="/drips/{{ c.campaign_id }}/leads">
+            <input type="hidden" name="back" value="/drips?drip={{ c.campaign_id }}">
             <select name="status">
               {% for st in manual_statuses %}
               <option value="{{ st }}" {% if st == l.status %}selected{% endif %}>{{ st }}</option>
@@ -97,7 +119,7 @@
               <button type="submit" class="danger">Yes &mdash; send step
                 {{ l.next_step }} to {{ l.company }} now</button>
             </form>
-            <a href="/drips/{{ c.campaign_id }}/leads">Cancel</a>
+            <a href="/drips?drip={{ c.campaign_id }}">Cancel</a>
             {% else %}
             <form method="post" class="inline"
                   action="/drips/{{ c.campaign_id }}/leads/{{ l.lead_id }}/send-now">
@@ -120,5 +142,6 @@
    moved to the next open window in the <b>firm's</b> timezone, then through the
    pace queue. Click it for both clocks, the reasoning, and the controls.
    {% if pace.held %}<b>{{ pace.held }}</b> waiting on pace right now.{% endif %}</p>
+{% endif %}
 {% endif %}
 {% endblock %}

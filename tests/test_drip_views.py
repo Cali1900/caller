@@ -46,7 +46,7 @@ def test_the_drips_page_shows_email_columns_and_no_call_columns(db, dripc, clien
     # ⚠️ THE ROSTER MOVED to /drips/<id>/leads on 2026-09-10. The config page had
     # stacked four things with four jobs; the roster is the only one about
     # individual firms.
-    r = client.get(f'/drips/{cid}/leads')
+    r = client.get(f'/drips?drip={cid}')
     assert r.status_code == 200, r.text[:400]
     body = r.text
     # 'Sends' and 'In the sequence' replaced 'Next step due' and 'Status' on
@@ -88,7 +88,7 @@ def test_the_per_step_table_attributes_clicks_to_the_RIGHT_step(db, dripc, clien
     assert stats[2]['pct'] == 50.0, stats[2]
     assert stats[3]['sent'] == 0, 'an unsent step should count nothing'
 
-    body = client.get(f'/drips?drip={cid}').text
+    body = client.get(f'/drips/{cid}/sequence').text
     assert 'Per step' in body
     assert '50.0%' in body, 'the rate is not on the page'
 
@@ -133,7 +133,7 @@ def test_a_replied_lead_reads_as_stopped_not_as_due(db, dripc, client):
         with conn.cursor() as cur:
             cur.execute("UPDATE leads SET replied_at = now() WHERE lead_id = %s",
                         (lid,))
-    body = client.get(f'/drips?drip={cid}').text
+    body = client.get(f'/drips/{cid}/sequence').text
     assert 'stopped' in body and 'replied' in body, \
         'a replied lead must not read as having a step due'
     row = [r for r in drip.roster(cid) if r['lead_id'] == lid][0]
@@ -143,7 +143,7 @@ def test_a_replied_lead_reads_as_stopped_not_as_due(db, dripc, client):
 def test_the_sequence_editor_is_on_the_drips_page(db, dripc, client):
     """One definition, included by both pages - not a second copy that can drift."""
     cid = dripc['campaign_id']
-    body = client.get(f'/drips?drip={cid}').text
+    body = client.get(f'/drips/{cid}/sequence').text
     assert 'name="subject_0"' in body, 'the sequence editor is missing'
     assert f'action="/campaign/{cid}/steps"' in body, \
         'the editor posts somewhere other than the save handler'
@@ -170,7 +170,7 @@ def test_the_drips_page_works_with_no_drips_and_with_no_steps(db, client):
     assert 'No drip campaigns yet' in r.text
 
     cid = campaigns.create('DRIP-EMPTY', campaign_type='drip')['campaign_id']
-    r = client.get(f'/drips?drip={cid}')
+    r = client.get(f'/drips/{cid}/sequence')
     assert r.status_code == 200, r.text[:300]
     assert 'No steps yet' in r.text, 'a stepless drip must say it sends nothing'
 
@@ -375,7 +375,7 @@ def test_a_drip_says_which_statuses_it_accepts(db, dripc, client):
     campaigns.update(cid, accepted_statuses=['emailed'])
     # ⚠️ "FED BY" IS GONE - nothing feeds a drip. The successor question, asked on
     # both screens, is which STATUSES it accepts.
-    for url in (f'/campaign/{cid}', f'/drips?drip={cid}'):
+    for url in (f'/campaign/{cid}', f'/drips/{cid}/sequence'):
         body = client.get(url).text
         assert 'ccepts' in body, f'{url} does not say what this drip accepts'
         assert 'emailed' in body, f'{url} does not name the accepted status'
@@ -413,7 +413,7 @@ def test_two_drips_accepting_one_status_both_send_and_it_warns(db, dripc, client
     assert picked == {str(cid), str(other)}, \
         f'a lead qualifying for two drips was not selected by both: {picked}'
 
-    for url in (f'/campaign/{cid}', f'/drips?drip={cid}'):
+    for url in (f'/campaign/{cid}', f'/drips/{cid}/sequence'):
         assert 'both accept' in client.get(url).text, \
             f'{url} does not warn about the overlap'
 
@@ -523,7 +523,7 @@ def test_the_status_column_is_the_DRIPS_not_the_CALLS(db, dripc, client):
     assert row['drip_state'] in ('waiting', 'sending', 'queued', 'held'), \
         f"a mid-sequence lead reads as {row['drip_state']!r}"
 
-    body = client.get(f'/drips/{cid}/leads').text
+    body = client.get(f'/drips?drip={cid}').text
     assert 'In the sequence' in body, 'the column is still labelled Status'
 
 
@@ -673,7 +673,7 @@ def test_a_lead_emailed_only_by_the_call_campaign_shows_a_REAL_last_sent(db, dri
         'a firm that received email 1 reads as never emailed'
     assert row['last_what'] == 'email 1', \
         f"the source is not named: {row['last_what']!r}"
-    body = client.get(f'/drips/{cid}/leads').text
+    body = client.get(f'/drips?drip={cid}').text
     assert 'email 1' in body, 'the page does not name what was last sent'
 
 
@@ -749,7 +749,7 @@ def test_the_pill_gives_both_clocks_and_names_every_layer(db, dripc, client):
     assert row['why'], 'the date is given with no reasoning at all'
     assert any('Step' in w for w in row['why']), row['why']
 
-    body = client.get(f'/drips/{cid}/leads').text
+    body = client.get(f'/drips?drip={cid}').text
     for want in ('Their time', 'Your time', 'Why this date', 'SEND NOW'):
         assert want in body, f'the pill is missing {want!r}'
 
@@ -800,9 +800,11 @@ def test_send_now_asks_before_it_fires(db, dripc, client):
     r = client.post(f'/drips/{cid}/leads/{lid}/send-now',
                     data={'step_id': str(step['step_id'])},
                     follow_redirects=False)
-    assert 'confirm_send' in r.headers['location'], r.headers['location']
-    body = client.get(r.headers['location'].split('?', 1)[1]
-                      and f'/drips/{cid}/leads?confirm_send={lid}:{step["step_id"]}').text
+    loc = r.headers['location']
+    assert 'confirm_send' in loc, loc
+    # FOLLOW THE REDIRECT IT ACTUALLY GAVE, rather than rebuilding the URL by
+    # hand - a hand-built one tests the string I typed, not the route's answer.
+    body = client.get(loc).text
     assert 'Yes' in body and 'send step' in body, \
         'the confirmation does not say what it is about to do'
 
@@ -818,9 +820,16 @@ def test_the_leads_page_is_REACHABLE_from_every_screen_that_lists_a_drip(db, dri
     link anywhere - reachable only by typing the URL, which is not reachable.
     """
     cid = dripc['campaign_id']
-    want = f'/drips/{cid}/leads'
-    for url in (f'/drips?drip={cid}', f'/campaign/{cid}'):
-        assert want in client.get(url).text, f'{url} does not link to the roster'
+    # ⚠️ /drips IS the roster now - it is what the nav lands on, because it is the
+    # screen read daily and the sequence is set once. So "reachable" means the nav
+    # item itself, and the other screens link to it rather than the reverse.
+    # the SUBTITLE, not a table header: this test creates no leads, and an empty
+    # roster renders "Nobody" with no table at all.
+    assert 'Who is in a sequence' in client.get('/drips').text, \
+        'the nav destination is not the roster'
+    for url in (f'/drips/{cid}/sequence', f'/campaign/{cid}'):
+        assert '/drips?drip=' in client.get(url).text or '/drips"' in client.get(url).text, \
+            f'{url} does not link back to the roster'
 
 
 def test_a_call_campaign_says_what_replaced_the_drip_selector(db, dripc, client):
@@ -840,7 +849,7 @@ def test_a_call_campaign_says_what_replaced_the_drip_selector(db, dripc, client)
     assert 'by <b>status</b>' in body or 'by status' in body
     assert dripc['name'] in body, 'it does not name the drip that would pick up'
     assert 'emailed' in body, 'it does not say which statuses that drip accepts'
-    assert f'/drips/{cid}/leads' in body, 'it does not link to that drip\'s leads'
+    assert '/drips?drip=' in body, 'it does not link to that drip\'s leads'
 
 
 def test_when_no_drip_runs_the_call_campaign_SAYS_SO(db, dripc, client):
@@ -851,3 +860,38 @@ def test_when_no_drip_runs_the_call_campaign_SAYS_SO(db, dripc, client):
     body = client.get(f'/campaign/{running_campaign_id()}').text
     assert 'No drip is running' in body, \
         'a campaign whose email 1 leads nowhere does not say so'
+
+
+def test_the_nav_lands_on_the_roster_not_the_config(db, dripc, client):
+    """
+    ⚠️ THE MENU MUST LAND ON THE SCREEN THAT GETS USED. /drips used to open the
+    sequence - the per-step rates and the editor - with the leads a link inside it,
+    so seeing who is in a sequence meant going through a config screen first. The
+    sequence is set once; the roster is read daily.
+
+    One nav item, not two: "Drips" and "Drip leads" side by side would make
+    somebody choose between two words for one subject every time.
+    """
+    cid = dripc['campaign_id']
+    campaigns.update(cid, accepted_statuses=['emailed'])
+    lid = _lead(db, days_ago=11, company='Nav Firm', phone_e164='+15553330600')
+    _join(db, lid, cid)
+
+    body = client.get('/drips').text
+    assert 'Nav Firm' in body, '/drips does not show who is on the drip'
+    assert 'In the sequence' in body, '/drips is not the roster'
+    # the sequence is one click away, and named
+    assert f'/drips/{cid}/sequence' in body, 'no link to the sequence'
+
+    # AND THE SEQUENCE PAGE IS STILL THERE, with the per-step table on it.
+    seq = client.get(f'/drips/{cid}/sequence')
+    assert seq.status_code == 200, seq.text[:300]
+    assert 'Per step' in seq.text, 'the per-step rates went missing in the move'
+
+
+def test_the_old_roster_url_still_works(db, dripc, client):
+    """A link that used to work should not become a 404 to prove a point."""
+    cid = dripc['campaign_id']
+    r = client.get(f'/drips/{cid}/leads', follow_redirects=False)
+    assert r.status_code in (307, 308), r.status_code
+    assert f'/drips?drip={cid}' in r.headers['location'], r.headers['location']

@@ -1,10 +1,10 @@
 {% extends "base.html" %}{% block title %}Drips · Caller{% endblock %}
 {% block body %}
-<h1>Drips</h1>
-<p class="sub">Email sequences. <b>No phone, no attempts, no agent score</b> &mdash;
-   on a drip those columns are noise. The call view is
-   <a href="/">Leads</a>; a single lead's whole history, calls and emails in one
-   timeline, is on its own page.</p>
+<h1>{{ c.name if c else "Drips" }} &mdash; the sequence</h1>
+<p class="sub">The copy, the per-step rates and the gate.
+   <a href="/drips"><b>&larr; back to who is on the drips</b></a> &mdash; that is
+   what the menu lands on, because it is read daily and this is set once. A single
+   lead's whole history, calls and emails in one timeline, is on its lead page.</p>
 
 {% if not drips %}
   <p class="dim">No drip campaigns yet. Create one on <a href="/campaigns">Campaigns</a>.</p>
@@ -16,18 +16,18 @@
 <tr><th>Drip</th><th>Accepts</th><th class="right">Qualify</th><th></th></tr>
 {% for d in drips %}
 <tr{% if d.campaign_id|string == c.campaign_id|string %} class="hl"{% endif %}>
-  <td><a href="/drips?drip={{ d.campaign_id }}"><b>{{ d.name }}</b></a>
+  <td><a href="/drips/{{ d.campaign_id }}/sequence"><b>{{ d.name }}</b></a>
       {% if not d.is_running %}<span class="dim">stopped</span>{% endif %}</td>
   <td class="dim">{% if d.accepted_statuses %}{% for st in d.accepted_statuses %}<code>{{ st }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
       {% else %}<b>nothing</b>{% endif %}</td>
   <td class="right">{{ drip_lead_counts.get(d.campaign_id|string, 0) }}</td>
-  <td><a href="/drips/{{ d.campaign_id }}/leads">its leads &rarr;</a></td>
+  <td><a href="/drips?drip={{ d.campaign_id }}">its leads &rarr;</a></td>
 </tr>
 {% endfor %}
 </table>
 
 <div class="toolbar" style="margin-bottom:12px">
-  <form class="inline" method="get" action="/drips">
+  <form class="inline" method="get" action="/drips/{{ c.campaign_id }}/sequence">
     <label class="dim">Drip
       <select name="drip" onchange="this.form.submit()">
         {% for d in drips %}
@@ -109,7 +109,7 @@
    the roster and the sequence editor stacked - four things with four jobs. The
    per-step table stays because it is about the SEQUENCE; the roster is about
    individual firms and belongs on its own. #}
-<p class="dim"><a href="/drips/{{ c.campaign_id }}/leads"><b>{{ roster_count }}
+<p class="dim"><a href="/drips?drip={{ c.campaign_id }}"><b>{{ roster_count }}
    lead{{ '' if roster_count == 1 else 's' }} on this drip &rarr;</b></a>
    &mdash; who is here, how far through, when each one sends next, and the
    controls for one firm at a time.</p>
